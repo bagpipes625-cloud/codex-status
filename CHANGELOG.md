@@ -2,6 +2,10 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.2.1] - 2026-07-27
+
+- Return the process working set to its low idle footprint shortly after the daily WinHTTP update check completes.
+
 ## [0.2.0] - 2026-07-27
 
 - Replace the solid block tray badge with transparent, theme-aware Segoe UI quota digits and a restrained one-pixel status rule.

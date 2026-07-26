@@ -58,7 +58,7 @@ CodexStatus 不读取或保存 OAuth Token、邮箱、项目内容、提示词�
 
 ## 性能
 
-在 Windows 11 24H2 x64、v0.2.0 Release 版上的实测：
+在 Windows 11 24H2 x64、v0.2.1 Release 版上的实测：
 
 | 状态 | CodexStatus 工作集 | CPU | 子进程 |
 |---|---:|---:|---:|

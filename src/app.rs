@@ -19,7 +19,8 @@ use windows::Win32::Graphics::Gdi::{
     MonitorFromPoint,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::ProcessStatus::EmptyWorkingSet;
+use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetDpiForWindow,
     GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
@@ -64,10 +65,12 @@ const TIMER_STARTUP: usize = 2;
 const TIMER_CARD: usize = 3;
 const TIMER_FLYOUT_ACTIVATE: usize = 4;
 const TIMER_UPDATE: usize = 5;
+const TIMER_WORKING_SET_TRIM: usize = 6;
 
 const UPDATE_INITIAL_DELAY_MS: u32 = 90_000;
 const UPDATE_INTERVAL_SECONDS: i64 = 24 * 60 * 60;
 const UPDATE_RETRY_MS: u32 = 6 * 60 * 60 * 1_000;
+const UPDATE_WORKING_SET_TRIM_MS: u32 = 5_000;
 
 const TRAY_ACTIVATION_DEBOUNCE: Duration = Duration::from_millis(300);
 const FLYOUT_ACTIVATION_GUARD: Duration = Duration::from_millis(220);
@@ -411,6 +414,7 @@ unsafe extern "system" fn main_window_proc(
                                 state.start_update_check();
                             }
                         }
+                        TIMER_WORKING_SET_TRIM => state.trim_working_set(),
                         _ => {}
                     }
                     return LRESULT(0);
@@ -556,6 +560,7 @@ impl AppState {
 
     fn finish_update_check(&mut self, outcome: UpdateOutcome) {
         self.update_checking = false;
+        self.schedule_working_set_trim();
         match outcome.result {
             Ok(update) => {
                 self.settings.last_update_check = Some(Utc::now().timestamp());
@@ -585,6 +590,25 @@ impl AppState {
             }
         } else {
             self.reset_update_timer(UPDATE_RETRY_MS);
+        }
+    }
+
+    fn schedule_working_set_trim(&self) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_WORKING_SET_TRIM);
+            let _ =
+                SetTimer(Some(self.hwnd), TIMER_WORKING_SET_TRIM, UPDATE_WORKING_SET_TRIM_MS, None);
+        }
+    }
+
+    fn trim_working_set(&self) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_WORKING_SET_TRIM);
+            if IsWindowVisible(self.flyout).as_bool() {
+                let _ = SetTimer(Some(self.hwnd), TIMER_WORKING_SET_TRIM, 30_000, None);
+                return;
+            }
+            let _ = EmptyWorkingSet(GetCurrentProcess());
         }
     }
 
@@ -1120,6 +1144,7 @@ impl Drop for AppState {
             let _ = KillTimer(Some(self.hwnd), TIMER_CARD);
             let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
             let _ = KillTimer(Some(self.hwnd), TIMER_UPDATE);
+            let _ = KillTimer(Some(self.hwnd), TIMER_WORKING_SET_TRIM);
             if self.tray_added {
                 let data = self.notify_data();
                 let _ = Shell_NotifyIconW(NIM_DELETE, &data);
