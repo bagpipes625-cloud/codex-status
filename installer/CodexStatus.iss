@@ -34,7 +34,6 @@ MinVersion=10.0.17763
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
-Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
 [Tasks]
 Name: "startup"; Description: "Start CodexStatus with Windows"; GroupDescription: "Startup:"; Flags: checkedonce
