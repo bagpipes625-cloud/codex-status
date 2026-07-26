@@ -17,11 +17,11 @@ impl IconTone {
             return ([0, 0, 0, 255], [255, 255, 255, 255], [255, 255, 255, 255]);
         }
         match self {
-            Self::Healthy => ([14, 159, 110, 255], [7, 92, 67, 255], [255, 255, 255, 255]),
-            Self::Warning => ([218, 146, 0, 255], [133, 83, 0, 255], [255, 255, 255, 255]),
-            Self::Critical => ([220, 61, 73, 255], [129, 25, 37, 255], [255, 255, 255, 255]),
-            Self::Stale => ([85, 112, 139, 255], [43, 62, 82, 255], [255, 255, 255, 255]),
-            Self::Unavailable => ([104, 109, 118, 255], [54, 58, 66, 255], [255, 255, 255, 255]),
+            Self::Healthy => ([8, 122, 85, 255], [5, 83, 59, 255], [255, 255, 255, 255]),
+            Self::Warning => ([154, 103, 0, 255], [103, 69, 0, 255], [255, 255, 255, 255]),
+            Self::Critical => ([207, 34, 46, 255], [143, 22, 31, 255], [255, 255, 255, 255]),
+            Self::Stale => ([87, 96, 106, 255], [60, 66, 73, 255], [255, 255, 255, 255]),
+            Self::Unavailable => ([110, 119, 129, 255], [72, 79, 87, 255], [255, 255, 255, 255]),
         }
     }
 }
@@ -127,51 +127,34 @@ pub fn render_bgra(percent: Option<u8>, tone: IconTone, size: u32, high_contrast
 
 fn draw_label(pixels: &mut [[u8; 4]], size: u32, label: &str, color: [u8; 4]) {
     let glyph_width = 3_i32;
-    let glyph_height = 5_i32;
+    let glyph_height = 7_i32;
     let glyph_count = label.chars().count() as i32;
     let units_w = glyph_count * glyph_width + (glyph_count - 1).max(0);
-    let max_scale_x = ((size as i32 - 4) / units_w).max(1);
-    let max_scale_y = ((size as i32 - 5) / glyph_height).max(1);
-    let scale = max_scale_x.min(max_scale_y).min(4);
-    let width = units_w * scale;
-    let height = glyph_height * scale;
+    // The tray only gives us 16 px at 100% DPI. Independent horizontal and
+    // vertical scaling lets the common two-digit case occupy 14x14 px instead
+    // of shrinking to the old 7x5 px mark.
+    let scale_x = ((size as i32 - 2) / units_w).clamp(1, 6);
+    let scale_y = ((size as i32 - 2) / glyph_height).clamp(1, 6);
+    let width = units_w * scale_x;
+    let height = glyph_height * scale_y;
     let origin_x = (size as i32 - width) / 2;
     let origin_y = (size as i32 - height) / 2;
-    let shadow = [20, 24, 28, 190];
 
     for (index, character) in label.chars().enumerate() {
         let rows = glyph(character);
-        let offset_x = origin_x + index as i32 * (glyph_width + 1) * scale;
+        let offset_x = origin_x + index as i32 * (glyph_width + 1) * scale_x;
         for (row, bits) in rows.iter().enumerate() {
             for column in 0..glyph_width {
                 if bits & (1 << (glyph_width - 1 - column)) == 0 {
                     continue;
                 }
-                for dy in 0..scale {
-                    for dx in 0..scale {
-                        let x = offset_x + column * scale + dx;
-                        let y = origin_y + row as i32 * scale + dy;
-                        set_pixel(pixels, size, x + 1, y + 1, shadow);
-                    }
-                }
-            }
-        }
-    }
-    for (index, character) in label.chars().enumerate() {
-        let rows = glyph(character);
-        let offset_x = origin_x + index as i32 * (glyph_width + 1) * scale;
-        for (row, bits) in rows.iter().enumerate() {
-            for column in 0..glyph_width {
-                if bits & (1 << (glyph_width - 1 - column)) == 0 {
-                    continue;
-                }
-                for dy in 0..scale {
-                    for dx in 0..scale {
+                for dy in 0..scale_y {
+                    for dx in 0..scale_x {
                         set_pixel(
                             pixels,
                             size,
-                            offset_x + column * scale + dx,
-                            origin_y + row as i32 * scale + dy,
+                            offset_x + column * scale_x + dx,
+                            origin_y + row as i32 * scale_y + dy,
                             color,
                         );
                     }
@@ -188,20 +171,20 @@ fn set_pixel(pixels: &mut [[u8; 4]], size: u32, x: i32, y: i32, color: [u8; 4]) 
     pixels[(y as u32 * size + x as u32) as usize] = color;
 }
 
-fn glyph(character: char) -> [u8; 5] {
+fn glyph(character: char) -> [u8; 7] {
     match character {
-        '0' => [0b111, 0b101, 0b101, 0b101, 0b111],
-        '1' => [0b010, 0b110, 0b010, 0b010, 0b111],
-        '2' => [0b111, 0b001, 0b111, 0b100, 0b111],
-        '3' => [0b111, 0b001, 0b111, 0b001, 0b111],
-        '4' => [0b101, 0b101, 0b111, 0b001, 0b001],
-        '5' => [0b111, 0b100, 0b111, 0b001, 0b111],
-        '6' => [0b111, 0b100, 0b111, 0b101, 0b111],
-        '7' => [0b111, 0b001, 0b010, 0b010, 0b010],
-        '8' => [0b111, 0b101, 0b111, 0b101, 0b111],
-        '9' => [0b111, 0b101, 0b111, 0b001, 0b111],
-        '-' => [0b000, 0b000, 0b111, 0b000, 0b000],
-        _ => [0; 5],
+        '0' => [0b111, 0b101, 0b101, 0b101, 0b101, 0b101, 0b111],
+        '1' => [0b010, 0b110, 0b010, 0b010, 0b010, 0b010, 0b111],
+        '2' => [0b111, 0b001, 0b001, 0b111, 0b100, 0b100, 0b111],
+        '3' => [0b111, 0b001, 0b001, 0b111, 0b001, 0b001, 0b111],
+        '4' => [0b101, 0b101, 0b101, 0b111, 0b001, 0b001, 0b001],
+        '5' => [0b111, 0b100, 0b100, 0b111, 0b001, 0b001, 0b111],
+        '6' => [0b111, 0b100, 0b100, 0b111, 0b101, 0b101, 0b111],
+        '7' => [0b111, 0b001, 0b001, 0b010, 0b010, 0b010, 0b010],
+        '8' => [0b111, 0b101, 0b101, 0b111, 0b101, 0b101, 0b111],
+        '9' => [0b111, 0b101, 0b101, 0b111, 0b001, 0b001, 0b111],
+        '-' => [0b000, 0b000, 0b000, 0b111, 0b000, 0b000, 0b000],
+        _ => [0; 7],
     }
 }
 
@@ -219,6 +202,23 @@ mod tests {
                 assert!(pixels.iter().any(|byte| *byte != 0));
             }
         }
+    }
+
+    #[test]
+    fn common_two_digit_value_uses_most_of_a_16px_icon() {
+        let pixels = render_bgra(Some(87), IconTone::Healthy, 16, false);
+        let mut xs = Vec::new();
+        let mut ys = Vec::new();
+        for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+            if pixel == [255, 255, 255, 255] {
+                xs.push((index % 16) as i32);
+                ys.push((index / 16) as i32);
+            }
+        }
+        let occupied_width = xs.iter().max().unwrap() - xs.iter().min().unwrap() + 1;
+        let occupied_height = ys.iter().max().unwrap() - ys.iter().min().unwrap() + 1;
+        assert!(occupied_width >= 14);
+        assert!(occupied_height >= 14);
     }
 
     #[test]
@@ -270,6 +270,6 @@ mod tests {
                 }
             }
         }
-        assert_eq!(hash, 5_631_663_040_915_169_022);
+        assert_eq!(hash, 6_950_855_230_919_658_276);
     }
 }

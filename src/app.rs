@@ -8,6 +8,7 @@ use std::cell::Cell;
 use std::mem::size_of;
 use std::ptr;
 use std::thread;
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT,
     POINT, RECT, SetLastError, WIN32_ERROR, WPARAM,
@@ -53,10 +54,16 @@ const TRAY_ID: u32 = 1;
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_REFRESH_COMPLETE: u32 = WM_APP + 2;
 const WM_SHOW_EXISTING: u32 = WM_APP + 3;
+const WM_TOGGLE_FLYOUT: u32 = WM_APP + 4;
 
 const TIMER_REFRESH: usize = 1;
 const TIMER_STARTUP: usize = 2;
 const TIMER_CARD: usize = 3;
+const TIMER_FLYOUT_ACTIVATE: usize = 4;
+
+const TRAY_ACTIVATION_DEBOUNCE: Duration = Duration::from_millis(300);
+const FLYOUT_ACTIVATION_GUARD: Duration = Duration::from_millis(220);
+const TRAY_CLOSE_COALESCE: Duration = Duration::from_millis(250);
 
 const CMD_REFRESH: u32 = 100;
 const CMD_USAGE: u32 = 101;
@@ -115,6 +122,9 @@ struct AppState {
     refreshing: bool,
     refresh_pending: bool,
     failures: u8,
+    last_tray_activation: Option<Instant>,
+    flyout_ignore_inactive_until: Option<Instant>,
+    flyout_hidden_for_tray_activation: Option<Instant>,
 }
 
 pub fn run() -> Result<(), AppError> {
@@ -198,6 +208,9 @@ pub fn run() -> Result<(), AppError> {
         refreshing: false,
         refresh_pending: false,
         failures: 0,
+        last_tray_activation: None,
+        flyout_ignore_inactive_until: None,
+        flyout_hidden_for_tray_activation: None,
     });
     let raw = Box::into_raw(state);
     STATE.with(|slot| slot.set(raw));
@@ -304,10 +317,16 @@ unsafe extern "system" fn main_window_proc(
                 WM_TRAY => {
                     let event = lparam.0 as u32 & 0xffff;
                     match event {
-                        WM_LBUTTONUP | WM_LBUTTONDBLCLK | NIN_SELECT => state.toggle_flyout(),
+                        WM_LBUTTONUP | WM_LBUTTONDBLCLK | NIN_SELECT => {
+                            state.request_toggle_flyout()
+                        }
                         WM_RBUTTONUP | WM_CONTEXTMENU => state.show_menu(),
                         _ => {}
                     }
+                    return LRESULT(0);
+                }
+                WM_TOGGLE_FLYOUT => {
+                    state.toggle_flyout();
                     return LRESULT(0);
                 }
                 WM_REFRESH_COMPLETE => {
@@ -331,6 +350,10 @@ unsafe extern "system" fn main_window_proc(
                         TIMER_CARD => {
                             state.expire_cache_if_needed();
                             let _ = InvalidateRect(Some(state.flyout), None, false);
+                        }
+                        TIMER_FLYOUT_ACTIVATE => {
+                            let _ = KillTimer(Some(hwnd), TIMER_FLYOUT_ACTIVATE);
+                            state.finish_flyout_activation();
                         }
                         _ => {}
                     }
@@ -379,19 +402,30 @@ unsafe extern "system" fn flyout_window_proc(
             }
             WM_ERASEBKGND => return LRESULT(1),
             WM_ACTIVATE if (wparam.0 as u32 & 0xffff) == WA_INACTIVE => {
-                let _ = ShowWindow(hwnd, SW_HIDE);
                 if !state_ptr.is_null() {
-                    let state = &*state_ptr;
-                    let _ = KillTimer(Some(state.hwnd), TIMER_CARD);
+                    let state = &mut *state_ptr;
+                    state.handle_flyout_inactive();
+                } else {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
                 }
                 return LRESULT(0);
             }
             WM_KEYDOWN if wparam.0 as u16 == VK_ESCAPE.0 => {
-                let _ = ShowWindow(hwnd, SW_HIDE);
+                if !state_ptr.is_null() {
+                    let state = &mut *state_ptr;
+                    state.hide_flyout();
+                } else {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                }
                 return LRESULT(0);
             }
             WM_CLOSE => {
-                let _ = ShowWindow(hwnd, SW_HIDE);
+                if !state_ptr.is_null() {
+                    let state = &mut *state_ptr;
+                    state.hide_flyout();
+                } else {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                }
                 return LRESULT(0);
             }
             WM_DPICHANGED => {
@@ -613,18 +647,93 @@ impl AppState {
         let _ = self.store.save_settings(&self.settings);
     }
 
+    fn request_toggle_flyout(&mut self) {
+        let now = Instant::now();
+        if self
+            .flyout_hidden_for_tray_activation
+            .take()
+            .is_some_and(|hidden| now.duration_since(hidden) < TRAY_CLOSE_COALESCE)
+        {
+            // Clicking the icon transfers focus to Explorer before its tray
+            // callback arrives. If that focus loss already hid the card, the
+            // callback represents the same click and must not reopen it.
+            self.last_tray_activation = Some(now);
+            return;
+        }
+        if self
+            .last_tray_activation
+            .is_some_and(|previous| now.duration_since(previous) < TRAY_ACTIVATION_DEBOUNCE)
+        {
+            return;
+        }
+        self.last_tray_activation = Some(now);
+        unsafe {
+            // Showing from inside the Explorer callback lets the shell reclaim
+            // activation and used to make the card flash closed. Defer it until
+            // the notification callback has completely returned.
+            let _ = PostMessageW(Some(self.hwnd), WM_TOGGLE_FLYOUT, WPARAM(0), LPARAM(0));
+        }
+    }
+
     fn toggle_flyout(&mut self) {
         if unsafe { IsWindowVisible(self.flyout) }.as_bool() {
-            unsafe {
-                let _ = ShowWindow(self.flyout, SW_HIDE);
-                let _ = KillTimer(Some(self.hwnd), TIMER_CARD);
-            }
+            self.hide_flyout();
         } else {
             self.show_flyout();
         }
     }
 
+    fn hide_flyout(&mut self) {
+        self.flyout_ignore_inactive_until = None;
+        self.flyout_hidden_for_tray_activation = None;
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
+            let _ = KillTimer(Some(self.hwnd), TIMER_CARD);
+            let _ = ShowWindow(self.flyout, SW_HIDE);
+        }
+    }
+
+    fn handle_flyout_inactive(&mut self) {
+        let guarded =
+            self.flyout_ignore_inactive_until.is_some_and(|deadline| Instant::now() < deadline);
+        if guarded {
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
+                let _ = SetTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE, 75, None);
+            }
+        } else {
+            let over_tray_icon = self.cursor_is_over_tray_icon();
+            self.hide_flyout();
+            if over_tray_icon {
+                self.flyout_hidden_for_tray_activation = Some(Instant::now());
+            }
+        }
+    }
+
+    fn finish_flyout_activation(&mut self) {
+        if !unsafe { IsWindowVisible(self.flyout) }.as_bool() {
+            self.flyout_ignore_inactive_until = None;
+            return;
+        }
+        unsafe {
+            let _ = SetForegroundWindow(self.flyout);
+        }
+        self.flyout_ignore_inactive_until = None;
+    }
+
+    fn cursor_is_over_tray_icon(&self) -> bool {
+        let Some(rect) = self.tray_rect() else {
+            return false;
+        };
+        let mut point = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut point);
+        }
+        point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom
+    }
+
     fn show_flyout(&mut self) {
+        self.flyout_hidden_for_tray_activation = None;
         self.theme = ui::detect_theme();
         ui::configure_flyout(self.flyout, self.theme);
         let anchor = self.tray_rect().unwrap_or_else(cursor_rect);
@@ -647,12 +756,13 @@ impl AppState {
         }
         x = x.clamp(info.rcWork.left, (info.rcWork.right - width).max(info.rcWork.left));
         y = y.clamp(info.rcWork.top, (info.rcWork.bottom - height).max(info.rcWork.top));
+        self.flyout_ignore_inactive_until = Some(Instant::now() + FLYOUT_ACTIVATION_GUARD);
         unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
             let _ = SetWindowPos(self.flyout, None, x, y, width, height, SWP_SHOWWINDOW);
-            let _ = ShowWindow(self.flyout, SW_SHOWNORMAL);
             let _ = SetForegroundWindow(self.flyout);
             let _ = SetTimer(Some(self.hwnd), TIMER_CARD, 30_000, None);
-            let _ = InvalidateRect(Some(self.flyout), None, true);
+            let _ = InvalidateRect(Some(self.flyout), None, false);
         }
     }
 
@@ -834,6 +944,7 @@ impl Drop for AppState {
             let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH);
             let _ = KillTimer(Some(self.hwnd), TIMER_STARTUP);
             let _ = KillTimer(Some(self.hwnd), TIMER_CARD);
+            let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
             if self.tray_added {
                 let data = self.notify_data();
                 let _ = Shell_NotifyIconW(NIM_DELETE, &data);
