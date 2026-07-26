@@ -563,6 +563,7 @@ impl AppState {
             tone_for(&self.display),
             size,
             self.theme.high_contrast,
+            self.theme.tray_dark,
         )?;
         let mut data = self.notify_data();
         data.uFlags = NIF_GUID | NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;

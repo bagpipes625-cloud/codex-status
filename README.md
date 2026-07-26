@@ -15,7 +15,7 @@ CodexStatus is a tiny native Windows utility. Its notification-area icon is the 
 ## Highlights
 
 - Weekly remaining quota drawn directly into the standard tray icon.
-- Clear green (≥50%), amber (20–49%), red (<20%), and stale/unavailable states.
+- Transparent, theme-aware Segoe UI digits with a restrained green (≥50%), amber (20–49%), red (<20%), or muted status rule.
 - Native rounded flyout that follows light, dark, high-contrast, and per-monitor DPI settings.
 - Official Codex app-server RPC: `account/rateLimits/read`; no token scraping and no private endpoints.
 - Event-driven Win32 process with no Electron, WebView, WPF, WinUI, local HTTP server, or resident async runtime.
@@ -54,7 +54,7 @@ Normal builds do not write logs. The optional `diagnostics` Cargo feature record
 
 ## Performance
 
-Measured on Windows 11 24H2 x64 with the v0.1.1 release:
+Measured on Windows 11 24H2 x64 with the v0.1.2 release:
 
 | State | CodexStatus working set | CPU | Child processes |
 |---|---:|---:|---:|

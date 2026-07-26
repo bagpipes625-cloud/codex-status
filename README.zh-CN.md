@@ -15,7 +15,7 @@ CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标本身�
 ## 主要特点
 
 - 在标准系统托盘图标内直接绘制周剩余额度。
-- 绿色（≥50%）、琥珀色（20–49%）、红色（<20%），并明确区分缓存和不可用状态。
+- 透明背景、随任务栏明暗切换的 Segoe UI 数字；底部仅用一条细线标记绿色（≥50%）、琥珀色（20–49%）、红色（<20%）或缓存状态。
 - 原生圆角卡片，自动适配浅色、深色、高对比度和多显示器 DPI。
 - 只使用官方 Codex app-server RPC `account/rateLimits/read`，不读取 Token，不访问私有接口。
 - 纯 Win32 事件驱动；没有 Electron、WebView、WPF、WinUI、本地 HTTP 服务或常驻异步运行时。
@@ -54,7 +54,7 @@ CodexStatus 不读取或保存 OAuth Token、邮箱、项目内容、提示词�
 
 ## 性能
 
-在 Windows 11 24H2 x64、v0.1.1 Release 版上的实测：
+在 Windows 11 24H2 x64、v0.1.2 Release 版上的实测：
 
 | 状态 | CodexStatus 工作集 | CPU | 子进程 |
 |---|---:|---:|---:|
