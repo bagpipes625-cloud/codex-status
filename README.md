@@ -8,7 +8,9 @@
 
 </div>
 
-![CodexStatus quota flyout](assets/screenshots/codexstatus-light.png)
+| Light | Dark |
+|:--:|:--:|
+| ![CodexStatus light quota flyout](assets/screenshots/codexstatus-light.png) | ![CodexStatus dark quota flyout](assets/screenshots/codexstatus-dark.png) |
 
 CodexStatus is a tiny native Windows utility. Its notification-area icon is the number itself—`0` to `100`, or `--` when no trustworthy weekly value is available. Click it for reset timing, the optional five-hour window, plan information, and refresh status.
 
@@ -17,6 +19,8 @@ CodexStatus is a tiny native Windows utility. Its notification-area icon is the 
 - Weekly remaining quota drawn directly into the standard tray icon.
 - Transparent, theme-aware Segoe UI digits with a restrained green (≥50%), amber (20–49%), red (<20%), or muted status rule.
 - Native rounded flyout that follows light, dark, high-contrast, and per-monitor DPI settings.
+- System, light, and dark flyout themes selectable from the tray menu.
+- Silent daily updates from verified GitHub Release assets, followed by an automatic restart.
 - Official Codex app-server RPC: `account/rateLimits/read`; no token scraping and no private endpoints.
 - Event-driven Win32 process with no Electron, WebView, WPF, WinUI, local HTTP server, or resident async runtime.
 - Five-minute default refresh, manual refresh, bounded failure backoff, safe cache expiry, and optional low-quota alerts.
@@ -36,25 +40,25 @@ The installer is not yet code-signed, so Microsoft Defender SmartScreen may show
 ## Use
 
 - **Left-click:** open or close the quota card.
-- **Right-click:** refresh now, open the Codex usage page, choose a 1/5/15-minute interval, configure a low-quota alert, toggle startup, open Releases, or exit.
+- **Right-click:** refresh now, open the Codex usage page, choose a 1/5/15-minute interval, configure a low-quota alert, select a theme, toggle startup, open Releases, or exit.
 - **Tray label:** weekly remaining percentage rounded to the nearest whole number.
 
 CodexStatus only calls the locally installed `codex app-server`. Each refresh performs `initialize → account/read → account/rateLimits/read`, then closes the process tree using a Windows Job Object. It selects an exact 10,080-minute window first and only accepts a 6–8 day fallback; a short window is never mislabeled as weekly quota.
 
 ## Privacy
 
-CodexStatus never reads or stores your OAuth token, email address, project content, prompts, or raw app-server response. It does not send telemetry and does not check for updates automatically.
+CodexStatus never reads or stores your OAuth token, email address, project content, prompts, or raw app-server response. It sends no telemetry. For automatic updates, it reads the public latest-release metadata from `api.github.com` at most once per day and downloads an executable only when a newer stable version exists. The file must match the SHA-256 digest published by GitHub before it can replace the current executable.
 
 Two files are stored under `%LOCALAPPDATA%\CodexStatus`:
 
-- `settings.json`: refresh interval, UI language, alert threshold, onboarding state, and alert deduplication state.
+- `settings.json`: refresh interval, UI language, theme, alert threshold, onboarding state, last successful update check, and alert deduplication state.
 - `snapshot.json`: the latest non-sensitive parsed quota snapshot. It is discarded once its reset time passes.
 
 Normal builds do not write logs. The optional `diagnostics` Cargo feature records only lifecycle stages and filtered error summaries.
 
 ## Performance
 
-Measured on Windows 11 24H2 x64 with the v0.1.2 release:
+Measured on Windows 11 24H2 x64 with the v0.2.0 release:
 
 | State | CodexStatus working set | CPU | Child processes |
 |---|---:|---:|---:|
@@ -78,7 +82,7 @@ GitHub Actions builds the portable ZIP and Inno Setup installer for version tags
 
 ## Design boundaries
 
-The first release intentionally does not inject private taskbar UI, collect cost/token history, support other providers, expose a local server, or auto-update. Windows does not offer a supported API for forcing a tray icon to remain visible, so pinning is always the user's choice.
+CodexStatus intentionally does not inject private taskbar UI, collect cost/token history, support other providers, or expose a local server. Windows does not offer a supported API for forcing a tray icon to remain visible, so pinning is always the user's choice.
 
 ## Thanks
 

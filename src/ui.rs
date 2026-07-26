@@ -13,8 +13,8 @@ use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateFontW, CreateRoundRectRgn, CreateSolidBrush, DEFAULT_CHARSET,
     DEFAULT_PITCH, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER,
     DeleteDC, DeleteObject, DrawTextW, EndPaint, FF_SWISS, FONT_QUALITY, FW_NORMAL, FW_SEMIBOLD,
-    FillRect, FillRgn, HDC, HGDIOBJ, OUT_DEFAULT_PRECIS, PAINTSTRUCT, SRCCOPY, SelectObject,
-    SetBkMode, SetTextColor, TRANSPARENT,
+    FillRect, FillRgn, GetTextExtentPoint32W, HDC, HGDIOBJ, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
+    SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -77,7 +77,7 @@ pub struct Theme {
     line: COLORREF,
 }
 
-pub fn detect_theme() -> Theme {
+pub fn detect_theme(preference: &str) -> Theme {
     let mut high_contrast =
         HIGHCONTRASTW { cbSize: size_of::<HIGHCONTRASTW>() as u32, ..Default::default() };
     let high_contrast_enabled = unsafe {
@@ -93,10 +93,15 @@ pub fn detect_theme() -> Theme {
     let personalize = RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize")
         .ok();
-    let dark = personalize
+    let system_dark = personalize
         .as_ref()
         .and_then(|key| key.get_value::<u32, _>("AppsUseLightTheme").ok())
         .is_some_and(|value| value == 0);
+    let dark = match preference {
+        "light" => false,
+        "dark" => true,
+        _ => system_dark,
+    };
     let tray_dark = personalize
         .as_ref()
         .and_then(|key| key.get_value::<u32, _>("SystemUsesLightTheme").ok())
@@ -119,24 +124,24 @@ pub fn detect_theme() -> Theme {
             dark,
             tray_dark,
             high_contrast: false,
-            background: rgb(31, 33, 37),
-            surface: rgb(40, 43, 48),
-            surface_alt: rgb(48, 51, 57),
-            text: rgb(247, 248, 250),
-            muted: rgb(168, 175, 185),
-            line: rgb(59, 63, 70),
+            background: rgb(32, 32, 32),
+            surface: rgb(44, 44, 44),
+            surface_alt: rgb(50, 50, 50),
+            text: rgb(255, 255, 255),
+            muted: rgb(200, 200, 200),
+            line: rgb(62, 62, 62),
         }
     } else {
         Theme {
             dark,
             tray_dark,
             high_contrast: false,
-            background: rgb(247, 248, 250),
-            surface: rgb(255, 255, 255),
-            surface_alt: rgb(246, 248, 251),
-            text: rgb(24, 27, 32),
-            muted: rgb(99, 108, 121),
-            line: rgb(226, 230, 235),
+            background: rgb(243, 243, 243),
+            surface: rgb(251, 251, 251),
+            surface_alt: rgb(246, 246, 246),
+            text: rgb(31, 31, 31),
+            muted: rgb(96, 96, 96),
+            line: rgb(226, 226, 226),
         }
     }
 }
@@ -261,7 +266,7 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
                 right: width - scale(18, dpi),
                 bottom: scale(40, dpi),
             },
-            scale(10, dpi),
+            scale(11, dpi),
             FW_NORMAL.0 as i32,
             theme.muted,
         );
@@ -283,7 +288,7 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
                 right: scale(178, dpi),
                 bottom: scale(83, dpi),
             },
-            scale(11, dpi),
+            scale(12, dpi),
             FW_SEMIBOLD.0 as i32,
             theme.muted,
         );
@@ -316,7 +321,7 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
                 right: reset_panel.right - scale(12, dpi),
                 bottom: reset_panel.top + scale(25, dpi),
             },
-            scale(10, dpi),
+            scale(11, dpi),
             FW_NORMAL.0 as i32,
             theme.muted,
         );
@@ -342,7 +347,7 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
                 right: reset_panel.right - scale(12, dpi),
                 bottom: reset_panel.bottom - scale(4, dpi),
             },
-            scale(9, dpi),
+            scale(11, dpi),
             FW_NORMAL.0 as i32,
             theme.muted,
         );
@@ -447,7 +452,7 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
                 right: width - scale(18, dpi),
                 bottom: height - scale(7, dpi),
             },
-            scale(9, dpi),
+            scale(11, dpi),
             FW_NORMAL.0 as i32,
             if state.error.is_some() { status_color } else { theme.muted },
         );
@@ -466,7 +471,7 @@ unsafe fn draw_percentage(hdc: HDC, percent: Option<u8>, theme: Theme, dpi: u32)
                     right: scale(174, dpi),
                     bottom: scale(132, dpi),
                 },
-                scale(39, dpi),
+                scale(40, dpi),
                 FW_SEMIBOLD.0 as i32,
                 theme.text,
             );
@@ -486,16 +491,13 @@ unsafe fn draw_percentage(hdc: HDC, percent: Option<u8>, theme: Theme, dpi: u32)
             FW_SEMIBOLD.0 as i32,
             theme.text,
         );
-        let percent_offset = match number.len() {
-            1 => 27,
-            2 => 50,
-            _ => 73,
-        };
+        let number_left = scale(30, dpi);
+        let number_width = measure_text_width(hdc, &number, scale(40, dpi), FW_SEMIBOLD.0 as i32);
         draw_text(
             hdc,
             "%",
             RECT {
-                left: scale(30 + percent_offset, dpi),
+                left: number_left + number_width + scale(3, dpi),
                 top: scale(91, dpi),
                 right: scale(177, dpi),
                 bottom: scale(128, dpi),
@@ -519,7 +521,7 @@ unsafe fn metric_card(hdc: HDC, rect: RECT, label: &str, value: &str, theme: The
                 right: rect.right - scale(10, dpi),
                 bottom: rect.top + scale(29, dpi),
             },
-            scale(9, dpi),
+            scale(11, dpi),
             FW_NORMAL.0 as i32,
             theme.muted,
         );
@@ -680,12 +682,54 @@ unsafe fn draw_text_with_alignment(
     alignment: windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT,
 ) {
     unsafe {
-        let face = wide0(if height >= 28 {
-            "Segoe UI Variable Display"
-        } else {
-            "Segoe UI Variable Text"
-        });
-        let font = CreateFontW(
+        let font = create_ui_font(value, height, weight);
+        let old = SelectObject(hdc, HGDIOBJ(font.0));
+        let _ = SetTextColor(hdc, color);
+        let mut text: Vec<u16> = value.encode_utf16().collect();
+        let _ = DrawTextW(
+            hdc,
+            &mut text,
+            &mut rect,
+            alignment | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+        let _ = SelectObject(hdc, old);
+        let _ = DeleteObject(HGDIOBJ(font.0));
+    }
+}
+
+unsafe fn measure_text_width(hdc: HDC, value: &str, height: i32, weight: i32) -> i32 {
+    unsafe {
+        let font = create_ui_font(value, height, weight);
+        let old = SelectObject(hdc, HGDIOBJ(font.0));
+        let text: Vec<u16> = value.encode_utf16().collect();
+        let mut size = windows::Win32::Foundation::SIZE::default();
+        let _ = GetTextExtentPoint32W(hdc, &text, &mut size);
+        let _ = SelectObject(hdc, old);
+        let _ = DeleteObject(HGDIOBJ(font.0));
+        size.cx.max(0)
+    }
+}
+
+unsafe fn create_ui_font(
+    value: &str,
+    height: i32,
+    weight: i32,
+) -> windows::Win32::Graphics::Gdi::HFONT {
+    let has_cjk = value.chars().any(|character| {
+        matches!(
+            character as u32,
+            0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff
+        )
+    });
+    let face = wide0(if has_cjk {
+        "Microsoft YaHei UI"
+    } else if height >= 28 {
+        "Segoe UI Variable Display"
+    } else {
+        "Segoe UI Variable Text"
+    });
+    unsafe {
+        CreateFontW(
             -height,
             0,
             0,
@@ -700,18 +744,7 @@ unsafe fn draw_text_with_alignment(
             FONT_QUALITY(CLEARTYPE_QUALITY.0),
             u32::from(DEFAULT_PITCH.0 | FF_SWISS.0),
             PCWSTR(face.as_ptr()),
-        );
-        let old = SelectObject(hdc, HGDIOBJ(font.0));
-        let _ = SetTextColor(hdc, color);
-        let mut text: Vec<u16> = value.encode_utf16().collect();
-        let _ = DrawTextW(
-            hdc,
-            &mut text,
-            &mut rect,
-            alignment | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
-        );
-        let _ = SelectObject(hdc, old);
-        let _ = DeleteObject(HGDIOBJ(font.0));
+        )
     }
 }
 

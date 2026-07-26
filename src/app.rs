@@ -2,10 +2,11 @@ use crate::app_server::AppServerClient;
 use crate::icon::{OwnedIcon, create_icon, tone_for};
 use crate::model::{DisplayState, QuotaSnapshot, RefreshState};
 use crate::settings::{AppStore, Settings};
-use crate::{startup, ui};
+use crate::{startup, ui, updater};
 use chrono::Utc;
 use std::cell::Cell;
 use std::mem::size_of;
+use std::path::PathBuf;
 use std::ptr;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -56,11 +57,17 @@ const WM_TRAY: u32 = WM_APP + 1;
 const WM_REFRESH_COMPLETE: u32 = WM_APP + 2;
 const WM_SHOW_EXISTING: u32 = WM_APP + 3;
 const WM_TOGGLE_FLYOUT: u32 = WM_APP + 4;
+const WM_UPDATE_COMPLETE: u32 = WM_APP + 5;
 
 const TIMER_REFRESH: usize = 1;
 const TIMER_STARTUP: usize = 2;
 const TIMER_CARD: usize = 3;
 const TIMER_FLYOUT_ACTIVATE: usize = 4;
+const TIMER_UPDATE: usize = 5;
+
+const UPDATE_INITIAL_DELAY_MS: u32 = 90_000;
+const UPDATE_INTERVAL_SECONDS: i64 = 24 * 60 * 60;
+const UPDATE_RETRY_MS: u32 = 6 * 60 * 60 * 1_000;
 
 const TRAY_ACTIVATION_DEBOUNCE: Duration = Duration::from_millis(300);
 const FLYOUT_ACTIVATION_GUARD: Duration = Duration::from_millis(220);
@@ -77,6 +84,9 @@ const CMD_ALERT_20: u32 = 132;
 const CMD_ALERT_30: u32 = 133;
 const CMD_STARTUP: u32 = 140;
 const CMD_RELEASES: u32 = 150;
+const CMD_THEME_SYSTEM: u32 = 160;
+const CMD_THEME_LIGHT: u32 = 161;
+const CMD_THEME_DARK: u32 = 162;
 const CMD_EXIT: u32 = 199;
 
 const USAGE_URL: &str = "https://chatgpt.com/codex/settings/usage";
@@ -88,7 +98,7 @@ thread_local! {
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
-    #[error("CodexStatus only supports the --background option")]
+    #[error("CodexStatus received unsupported command-line arguments")]
     InvalidArguments,
     #[error("Windows could not initialize CodexStatus: {0}")]
     Windows(#[from] windows::core::Error),
@@ -108,6 +118,16 @@ struct RefreshOutcome {
     result: Result<QuotaSnapshot, String>,
 }
 
+struct UpdateOutcome {
+    result: Result<Option<updater::StagedUpdate>, updater::UpdateError>,
+}
+
+enum LaunchMode {
+    Normal,
+    Background,
+    ApplyUpdate { parent_pid: u32, target: PathBuf },
+}
+
 struct AppState {
     hwnd: HWND,
     flyout: HWND,
@@ -122,6 +142,8 @@ struct AppState {
     tray_added: bool,
     refreshing: bool,
     refresh_pending: bool,
+    update_checking: bool,
+    pending_update: Option<updater::StagedUpdate>,
     failures: u8,
     last_tray_activation: Option<Instant>,
     flyout_ignore_inactive_until: Option<Instant>,
@@ -130,7 +152,12 @@ struct AppState {
 
 pub fn run() -> Result<(), AppError> {
     diagnostic("run:enter");
-    let background = parse_arguments()?;
+    let launch_mode = parse_arguments()?;
+    if let LaunchMode::ApplyUpdate { parent_pid, target } = launch_mode {
+        updater::apply_update_silently(parent_pid, &target);
+        return Ok(());
+    }
+    let background = matches!(launch_mode, LaunchMode::Background);
     diagnostic("run:arguments");
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -194,6 +221,7 @@ pub fn run() -> Result<(), AppError> {
     let store = AppStore::discover();
     let settings = store.load_settings();
     let locale = ui::Locale::detect(&settings.locale);
+    let theme = ui::detect_theme(&settings.theme);
     let now = Utc::now().timestamp();
     let cached = store.load_snapshot().filter(|snapshot| snapshot.is_cache_valid(now));
     let display = DisplayState::loading(cached);
@@ -205,13 +233,15 @@ pub fn run() -> Result<(), AppError> {
         store,
         settings,
         locale,
-        theme: ui::detect_theme(),
+        theme,
         display,
         client: AppServerClient::new(),
         tray_icon: None,
         tray_added: false,
         refreshing: false,
         refresh_pending: false,
+        update_checking: false,
+        pending_update: None,
         failures: 0,
         last_tray_activation: None,
         flyout_ignore_inactive_until: None,
@@ -239,6 +269,7 @@ pub fn run() -> Result<(), AppError> {
     unsafe {
         let state = &mut *raw;
         state.reset_refresh_timer(state.settings.refresh_minutes.saturating_mul(60_000));
+        state.schedule_update_check(UPDATE_INITIAL_DELAY_MS);
         if background {
             let _ = SetTimer(Some(hwnd), TIMER_STARTUP, 30_000, None);
         } else {
@@ -263,11 +294,16 @@ pub fn run() -> Result<(), AppError> {
     Ok(())
 }
 
-fn parse_arguments() -> Result<bool, AppError> {
+fn parse_arguments() -> Result<LaunchMode, AppError> {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     match arguments.as_slice() {
-        [] => Ok(false),
-        [argument] if argument == "--background" => Ok(true),
+        [] => Ok(LaunchMode::Normal),
+        [argument] if argument == "--background" => Ok(LaunchMode::Background),
+        [mode, parent_pid, target] if mode == "--apply-update" => {
+            let parent_pid =
+                parent_pid.to_string_lossy().parse().map_err(|_| AppError::InvalidArguments)?;
+            Ok(LaunchMode::ApplyUpdate { parent_pid, target: PathBuf::from(target) })
+        }
         _ => Err(AppError::InvalidArguments),
     }
 }
@@ -341,6 +377,13 @@ unsafe extern "system" fn main_window_proc(
                     }
                     return LRESULT(0);
                 }
+                WM_UPDATE_COMPLETE => {
+                    if lparam.0 != 0 {
+                        let outcome = *Box::from_raw(lparam.0 as *mut UpdateOutcome);
+                        state.finish_update_check(outcome);
+                    }
+                    return LRESULT(0);
+                }
                 WM_SHOW_EXISTING => {
                     state.show_flyout();
                     return LRESULT(0);
@@ -360,12 +403,20 @@ unsafe extern "system" fn main_window_proc(
                             let _ = KillTimer(Some(hwnd), TIMER_FLYOUT_ACTIVATE);
                             state.finish_flyout_activation();
                         }
+                        TIMER_UPDATE => {
+                            let _ = KillTimer(Some(hwnd), TIMER_UPDATE);
+                            if state.pending_update.is_some() {
+                                state.try_apply_update();
+                            } else {
+                                state.start_update_check();
+                            }
+                        }
                         _ => {}
                     }
                     return LRESULT(0);
                 }
                 WM_SETTINGCHANGE | WM_DISPLAYCHANGE => {
-                    state.theme = ui::detect_theme();
+                    state.theme = ui::detect_theme(&state.settings.theme);
                     ui::configure_flyout(state.flyout, state.theme);
                     let _ = state.update_tray(false);
                     let _ = InvalidateRect(Some(state.flyout), None, true);
@@ -453,6 +504,90 @@ unsafe extern "system" fn flyout_window_proc(
 }
 
 impl AppState {
+    fn schedule_update_check(&self, fallback_delay_ms: u32) {
+        let now = Utc::now().timestamp();
+        let delay = self
+            .settings
+            .last_update_check
+            .map(|last| last.saturating_add(UPDATE_INTERVAL_SECONDS).saturating_sub(now))
+            .filter(|seconds| *seconds > 0)
+            .and_then(|seconds| u32::try_from(seconds.saturating_mul(1_000)).ok())
+            .unwrap_or(fallback_delay_ms)
+            .max(1_000);
+        self.reset_update_timer(delay);
+    }
+
+    fn reset_update_timer(&self, delay_ms: u32) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_UPDATE);
+            let _ = SetTimer(Some(self.hwnd), TIMER_UPDATE, delay_ms.max(1_000), None);
+        }
+    }
+
+    fn start_update_check(&mut self) {
+        if self.update_checking || self.pending_update.is_some() {
+            return;
+        }
+        self.update_checking = true;
+        let hwnd_value = self.hwnd.0 as isize;
+        let updates_directory = self.store.updates_directory();
+        let spawn_result = thread::Builder::new()
+            .name("codex-status-update".to_owned())
+            .stack_size(512 * 1024)
+            .spawn(move || {
+                let hwnd = HWND(hwnd_value as *mut std::ffi::c_void);
+                let outcome =
+                    UpdateOutcome { result: updater::check_and_stage(&updates_directory) };
+                let raw = Box::into_raw(Box::new(outcome));
+                let posted = unsafe {
+                    PostMessageW(Some(hwnd), WM_UPDATE_COMPLETE, WPARAM(0), LPARAM(raw as isize))
+                };
+                if posted.is_err() {
+                    unsafe {
+                        drop(Box::from_raw(raw));
+                    }
+                }
+            });
+        if spawn_result.is_err() {
+            self.update_checking = false;
+            self.reset_update_timer(UPDATE_RETRY_MS);
+        }
+    }
+
+    fn finish_update_check(&mut self, outcome: UpdateOutcome) {
+        self.update_checking = false;
+        match outcome.result {
+            Ok(update) => {
+                self.settings.last_update_check = Some(Utc::now().timestamp());
+                self.persist_settings();
+                self.pending_update = update;
+                if self.pending_update.is_some() {
+                    self.try_apply_update();
+                } else {
+                    self.reset_update_timer(UPDATE_INTERVAL_SECONDS as u32 * 1_000);
+                }
+            }
+            Err(_) => self.reset_update_timer(UPDATE_RETRY_MS),
+        }
+    }
+
+    fn try_apply_update(&mut self) {
+        if unsafe { IsWindowVisible(self.flyout) }.as_bool() {
+            self.reset_update_timer(60_000);
+            return;
+        }
+        let Some(update) = self.pending_update.take() else {
+            return;
+        };
+        if updater::launch_staged_update(&update).is_ok() {
+            unsafe {
+                let _ = DestroyWindow(self.hwnd);
+            }
+        } else {
+            self.reset_update_timer(UPDATE_RETRY_MS);
+        }
+    }
+
     fn start_refresh(&mut self, force: bool) {
         diagnostic("refresh:start");
         if self.refreshing {
@@ -697,6 +832,7 @@ impl AppState {
             let _ = KillTimer(Some(self.hwnd), TIMER_CARD);
             let _ = ShowWindow(self.flyout, SW_HIDE);
         }
+        self.try_apply_update();
     }
 
     fn handle_flyout_inactive(&mut self) {
@@ -740,7 +876,7 @@ impl AppState {
 
     fn show_flyout(&mut self) {
         self.flyout_hidden_for_tray_activation = None;
-        self.theme = ui::detect_theme();
+        self.theme = ui::detect_theme(&self.settings.theme);
         ui::configure_flyout(self.flyout, self.theme);
         let anchor = self.tray_rect().unwrap_or_else(cursor_rect);
         let point =
@@ -862,6 +998,25 @@ impl AppState {
             separator(menu)?;
             append(
                 menu,
+                CMD_THEME_SYSTEM,
+                self.locale.text("Theme: system", "主题：跟随系统"),
+                self.settings.theme == "system",
+            )?;
+            append(
+                menu,
+                CMD_THEME_LIGHT,
+                self.locale.text("Theme: light", "主题：浅色"),
+                self.settings.theme == "light",
+            )?;
+            append(
+                menu,
+                CMD_THEME_DARK,
+                self.locale.text("Theme: dark", "主题：深色"),
+                self.settings.theme == "dark",
+            )?;
+            separator(menu)?;
+            append(
+                menu,
                 CMD_EXIT,
                 self.locale.text("Exit CodexStatus", "退出 CodexStatus"),
                 false,
@@ -910,6 +1065,19 @@ impl AppState {
                         );
                     }
                 }
+                CMD_THEME_SYSTEM | CMD_THEME_LIGHT | CMD_THEME_DARK => {
+                    self.settings.theme = match command {
+                        CMD_THEME_LIGHT => "light",
+                        CMD_THEME_DARK => "dark",
+                        _ => "system",
+                    }
+                    .to_owned();
+                    self.persist_settings();
+                    self.theme = ui::detect_theme(&self.settings.theme);
+                    ui::configure_flyout(self.flyout, self.theme);
+                    let _ = self.update_tray(false);
+                    let _ = InvalidateRect(Some(self.flyout), None, true);
+                }
                 CMD_EXIT => {
                     let _ = DestroyWindow(self.hwnd);
                 }
@@ -951,6 +1119,7 @@ impl Drop for AppState {
             let _ = KillTimer(Some(self.hwnd), TIMER_STARTUP);
             let _ = KillTimer(Some(self.hwnd), TIMER_CARD);
             let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
+            let _ = KillTimer(Some(self.hwnd), TIMER_UPDATE);
             if self.tray_added {
                 let data = self.notify_data();
                 let _ = Shell_NotifyIconW(NIM_DELETE, &data);

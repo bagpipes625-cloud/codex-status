@@ -12,8 +12,10 @@ pub struct Settings {
     pub refresh_minutes: u32,
     pub alert_threshold: Option<u8>,
     pub locale: String,
+    pub theme: String,
     pub onboarding_shown: bool,
     pub last_alert_reset: Option<i64>,
+    pub last_update_check: Option<i64>,
 }
 
 impl Default for Settings {
@@ -22,8 +24,10 @@ impl Default for Settings {
             refresh_minutes: 5,
             alert_threshold: None,
             locale: "auto".to_owned(),
+            theme: "system".to_owned(),
             onboarding_shown: false,
             last_alert_reset: None,
+            last_update_check: None,
         }
     }
 }
@@ -38,6 +42,9 @@ impl Settings {
         }
         if !matches!(self.locale.as_str(), "auto" | "en" | "zh-CN") {
             self.locale = "auto".to_owned();
+        }
+        if !matches!(self.theme.as_str(), "system" | "light" | "dark") {
+            self.theme = "system".to_owned();
         }
     }
 }
@@ -77,6 +84,10 @@ impl AppStore {
     pub fn save_snapshot(&self, snapshot: &QuotaSnapshot) -> io::Result<()> {
         write_json_atomic(&self.directory.join("snapshot.json"), snapshot)
     }
+
+    pub fn updates_directory(&self) -> PathBuf {
+        self.directory.join("updates")
+    }
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
@@ -108,6 +119,7 @@ mod tests {
             refresh_minutes: 2,
             alert_threshold: Some(99),
             locale: "invalid".to_owned(),
+            theme: "sepia".to_owned(),
             ..Settings::default()
         };
         settings.normalize();

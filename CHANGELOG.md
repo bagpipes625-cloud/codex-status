@@ -2,12 +2,15 @@
 
 All notable changes to CodexStatus are documented here.
 
-## [0.1.2] - 2026-07-27
+## [0.2.0] - 2026-07-27
 
 - Replace the solid block tray badge with transparent, theme-aware Segoe UI quota digits and a restrained one-pixel status rule.
 - Fix the tray bitmap orientation that could make a weekly value ending in `2` look like `5`.
 - Follow the Windows system theme independently from the app theme so the number stays legible on light and dark taskbars.
 - Recompose the flyout around a focused weekly-quota card, a quiet reset panel, three consistent metric cards, and a roomier Fluent-style spacing system.
+- Add silent daily updates from verified GitHub Release executables, with SHA-256 digest validation, atomic replacement, and automatic restart.
+- Add system, light, and dark flyout theme choices while preserving Windows high-contrast behavior.
+- Use Microsoft YaHei UI for Simplified Chinese and Segoe UI Variable for Latin text and quota numerals, with larger supporting type.
 
 ## [0.1.1] - 2026-07-27
 
