@@ -23,6 +23,7 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetDpiForWindow,
     GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
 };
+use windows::Win32::UI::Input::Ime::ImmDisableIME;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows::Win32::UI::Shell::{
     NIF_GUID, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO,
@@ -133,6 +134,10 @@ pub fn run() -> Result<(), AppError> {
     diagnostic("run:arguments");
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        // The app has no editable controls. Disabling text services before the
+        // first window is created prevents third-party IME/TIP modules from
+        // being injected merely because the flyout receives focus.
+        let _ = ImmDisableIME(0);
     }
     unsafe {
         SetLastError(WIN32_ERROR(0));

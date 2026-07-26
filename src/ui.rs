@@ -5,8 +5,8 @@ use std::mem::size_of;
 use windows::Win32::Foundation::{COLORREF, HWND, RECT};
 use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::Graphics::Dwm::{
-    DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
-    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
+    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateCompatibleBitmap,
@@ -131,7 +131,6 @@ pub fn configure_flyout(hwnd: HWND, theme: Theme) {
     unsafe {
         let dark = i32::from(theme.dark);
         let corner = DWMWCP_ROUND;
-        let backdrop = DWMSBT_TRANSIENTWINDOW;
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_USE_IMMERSIVE_DARK_MODE,
@@ -144,14 +143,6 @@ pub fn configure_flyout(hwnd: HWND, theme: Theme) {
             (&corner as *const windows::Win32::Graphics::Dwm::DWM_WINDOW_CORNER_PREFERENCE).cast(),
             size_of_val(&corner) as u32,
         );
-        if !theme.high_contrast {
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_SYSTEMBACKDROP_TYPE,
-                (&backdrop as *const windows::Win32::Graphics::Dwm::DWM_SYSTEMBACKDROP_TYPE).cast(),
-                size_of_val(&backdrop) as u32,
-            );
-        }
     }
 }
 

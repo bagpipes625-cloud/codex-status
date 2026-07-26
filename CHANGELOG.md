@@ -2,6 +2,11 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.1.1] - 2026-07-27
+
+- Keep the flyout lightweight on systems with third-party input methods by disabling unused text services before window creation.
+- Preserve the redesigned readable tray digits and reliable single-click flyout behavior.
+
 ## [0.1.0] - 2026-07-26
 
 - Initial public release.

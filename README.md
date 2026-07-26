@@ -31,7 +31,7 @@ CodexStatus requires Windows 10/11 x64 and an already installed, signed-in [Code
 2. Run it. The default location is `%LOCALAPPDATA%\Programs\CodexStatus` and start-with-Windows is enabled by default.
 3. If Windows places the new icon behind the overflow arrow, open that area and drag CodexStatus onto the visible tray. Windows—not applications—controls notification icon visibility.
 
-The installer is not code-signed in v0.1.0, so Microsoft Defender SmartScreen may show an “unrecognized app” warning. Release assets include SHA-256 checksums. The portable ZIP makes no startup changes; enable startup from the right-click menu if desired.
+The installer is not yet code-signed, so Microsoft Defender SmartScreen may show an “unrecognized app” warning. Release assets include SHA-256 checksums. The portable ZIP makes no startup changes; enable startup from the right-click menu if desired.
 
 ## Use
 
@@ -54,7 +54,7 @@ Normal builds do not write logs. The optional `diagnostics` Cargo feature record
 
 ## Performance
 
-Measured on Windows 11 24H2 x64 with the v0.1.0 release candidate:
+Measured on Windows 11 24H2 x64 with the v0.1.1 release:
 
 | State | CodexStatus working set | CPU | Child processes |
 |---|---:|---:|---:|

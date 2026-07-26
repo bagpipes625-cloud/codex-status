@@ -31,7 +31,7 @@ CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标本身�
 2. 运行安装程序。默认安装到 `%LOCALAPPDATA%\Programs\CodexStatus`，并默认启用开机启动。
 3. 如果 Windows 把新图标放进折叠区，请打开折叠区，把 CodexStatus 拖到可见托盘。图标是否常显由 Windows 和用户控制，应用无法强制固定。
 
-v0.1.0 安装包尚未代码签名，因此 Microsoft Defender SmartScreen 可能提示“无法识别的应用”。每个 Release 都提供 SHA-256 校验文件。便携 ZIP 默认不会修改开机启动，可从右键菜单自行开启。
+当前安装包尚未代码签名，因此 Microsoft Defender SmartScreen 可能提示“无法识别的应用”。每个 Release 都提供 SHA-256 校验文件。便携 ZIP 默认不会修改开机启动，可从右键菜单自行开启。
 
 ## 使用
 
@@ -54,7 +54,7 @@ CodexStatus 不读取或保存 OAuth Token、邮箱、项目内容、提示词�
 
 ## 性能
 
-在 Windows 11 24H2 x64、v0.1.0 Release 候选版上的实测：
+在 Windows 11 24H2 x64、v0.1.1 Release 版上的实测：
 
 | 状态 | CodexStatus 工作集 | CPU | 子进程 |
 |---|---:|---:|---:|
