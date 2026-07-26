@@ -1,0 +1,8 @@
+/target/
+/.tools/
+/dist/
+*.pdb
+*.ilk
+*.log
+.DS_Store
+Thumbs.db
