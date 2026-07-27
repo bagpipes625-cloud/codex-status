@@ -32,8 +32,9 @@ CodexStatus is a tiny native Windows utility. Its notification-area icon is the 
 CodexStatus requires Windows 10/11 x64 and an already installed, signed-in [Codex CLI or Codex app](https://developers.openai.com/codex/cli/).
 
 1. Download the per-user installer from [Releases](https://github.com/bagpipes625-cloud/codex-status/releases/latest).
-2. Run it. This private build installs to `F:\CodexStatus` and always registers start-with-Windows.
-3. If Windows places the new icon behind the overflow arrow, open that area and drag CodexStatus onto the visible tray. Windows—not applications—controls notification icon visibility.
+2. Run it and confirm the installation directory. New installations default to `F:\CodexStatus` when the `F:` drive exists, or `%LOCALAPPDATA%\Programs\CodexStatus` otherwise. Existing installations keep their previous directory during upgrades.
+3. The installer always registers start-with-Windows.
+4. If Windows places the new icon behind the overflow arrow, open that area and drag CodexStatus onto the visible tray. Windows—not applications—controls notification icon visibility.
 
 The installer is not yet code-signed, so Microsoft Defender SmartScreen may show an “unrecognized app” warning. Release assets include SHA-256 checksums. The portable ZIP makes no startup changes; enable startup from the right-click menu if desired.
 

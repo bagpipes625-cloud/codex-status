@@ -32,8 +32,9 @@ CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标本身�
 需要 Windows 10/11 x64，并已安装且登录 [Codex CLI 或 Codex 应用](https://developers.openai.com/codex/cli/)。
 
 1. 从 [Releases](https://github.com/bagpipes625-cloud/codex-status/releases/latest) 下载当前用户安装包。
-2. 运行安装程序。此私有版本固定安装到 `F:\CodexStatus`，并始终注册开机启动。
-3. 如果 Windows 把新图标放进折叠区，请打开折叠区，把 CodexStatus 拖到可见托盘。图标是否常显由 Windows 和用户控制，应用无法强制固定。
+2. 运行安装程序并确认安装目录。全新安装时，如果存在 `F:` 盘则默认使用 `F:\CodexStatus`，否则默认使用 `%LOCALAPPDATA%\Programs\CodexStatus`；升级时沿用已有安装目录。
+3. 安装程序始终注册开机启动。
+4. 如果 Windows 把新图标放进折叠区，请打开折叠区，把 CodexStatus 拖到可见托盘。图标是否常显由 Windows 和用户控制，应用无法强制固定。
 
 当前安装包尚未代码签名，因此 Microsoft Defender SmartScreen 可能提示“无法识别的应用”。每个 Release 都提供 SHA-256 校验文件。便携 ZIP 默认不会修改开机启动，可从右键菜单自行开启。
 

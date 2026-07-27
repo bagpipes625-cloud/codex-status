@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.3.0"
+  #define AppVersion "0.3.1"
 #endif
 
 #define AppName "CodexStatus"
@@ -14,9 +14,9 @@ AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}
 AppSupportURL={#AppURL}/issues
-DefaultDirName=F:\CodexStatus
-DisableDirPage=yes
-UsePreviousAppDir=no
+DefaultDirName={code:GetDefaultDirName}
+DisableDirPage=no
+UsePreviousAppDir=yes
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
@@ -49,3 +49,12 @@ Name: "{group}\Uninstall CodexStatus"; Filename: "{uninstallexe}"
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "Launch CodexStatus"; Flags: nowait postinstall skipifsilent
+
+[Code]
+function GetDefaultDirName(Param: String): String;
+begin
+  if DirExists('F:\') then
+    Result := 'F:\CodexStatus'
+  else
+    Result := ExpandConstant('{localappdata}\Programs\CodexStatus');
+end;
