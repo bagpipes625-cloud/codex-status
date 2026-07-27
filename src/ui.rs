@@ -1,4 +1,4 @@
-use crate::model::{DisplayState, QuotaWindow, RefreshState, UsageProjection};
+use crate::model::{AccountSummary, DisplayState, QuotaWindow, RefreshState, UsageProjection};
 use chrono::{DateTime, Local};
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -27,6 +27,9 @@ use winreg::enums::HKEY_CURRENT_USER;
 
 pub const CARD_WIDTH: i32 = 376;
 pub const CARD_HEIGHT: i32 = 296;
+const HERO_DIVIDER_X: i32 = 202;
+const METRICS_LEFT_X: i32 = 16;
+const METRICS_LEFT_DIVIDER_X: i32 = (METRICS_LEFT_X + HERO_DIVIDER_X) / 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Locale {
@@ -313,9 +316,9 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
         fill(
             hdc,
             RECT {
-                left: scale(202, dpi),
+                left: scale(HERO_DIVIDER_X, dpi),
                 top: scale(65, dpi),
-                right: scale(203, dpi),
+                right: scale(HERO_DIVIDER_X, dpi) + scale(1, dpi).max(1),
                 bottom: scale(132, dpi),
             },
             theme.line,
@@ -401,21 +404,28 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
             .and_then(|snapshot| snapshot.account.reset_credits)
             .map(|credits| format!("{credits} {}", locale.text("resets", "次")))
             .unwrap_or_else(|| "--".to_owned());
+        let credit_detail = state
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| reset_credit_detail(&snapshot.account, locale));
 
         let metrics = RECT {
-            left: scale(16, dpi),
+            left: scale(METRICS_LEFT_X, dpi),
             top: scale(184, dpi),
             right: width - scale(16, dpi),
             bottom: scale(252, dpi),
         };
         outlined_surface(hdc, metrics, scale(12, dpi), theme.surface_alt, theme.line, dpi);
-        for divider in [scale(130, dpi), scale(246, dpi)] {
+        let divider_width = scale(1, dpi).max(1);
+        let left_divider = scale(METRICS_LEFT_DIVIDER_X, dpi);
+        let aligned_divider = scale(HERO_DIVIDER_X, dpi);
+        for divider in [left_divider, aligned_divider] {
             fill(
                 hdc,
                 RECT {
                     left: divider,
                     top: metrics.top + scale(13, dpi),
-                    right: divider + scale(1, dpi).max(1),
+                    right: divider + divider_width,
                     bottom: metrics.bottom - scale(13, dpi),
                 },
                 theme.line,
@@ -424,27 +434,32 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
         metric_column(
             hdc,
             locale,
-            RECT { right: scale(130, dpi), ..metrics },
-            locale.text("5-hour quota", "5 小时额度"),
-            &session,
+            RECT { right: left_divider, ..metrics },
+            MetricContent {
+                label: locale.text("5-hour quota", "5 小时额度"),
+                value: &session,
+                detail: None,
+            },
             theme,
             dpi,
         );
         metric_column(
             hdc,
             locale,
-            RECT { left: scale(131, dpi), right: scale(246, dpi), ..metrics },
-            locale.text("Plan", "套餐"),
-            &plan,
+            RECT { left: left_divider + divider_width, right: aligned_divider, ..metrics },
+            MetricContent { label: locale.text("Plan", "套餐"), value: &plan, detail: None },
             theme,
             dpi,
         );
         metric_column(
             hdc,
             locale,
-            RECT { left: scale(247, dpi), ..metrics },
-            locale.text("Reset credits", "重置机会"),
-            &credits,
+            RECT { left: aligned_divider + divider_width, ..metrics },
+            MetricContent {
+                label: locale.text("Reset credits", "重置机会"),
+                value: &credits,
+                detail: credit_detail.as_deref(),
+            },
             theme,
             dpi,
         );
@@ -527,12 +542,17 @@ unsafe fn draw_percentage(hdc: HDC, percent: Option<u8>, locale: Locale, theme: 
     }
 }
 
+struct MetricContent<'a> {
+    label: &'a str,
+    value: &'a str,
+    detail: Option<&'a str>,
+}
+
 unsafe fn metric_column(
     hdc: HDC,
     locale: Locale,
     rect: RECT,
-    label: &str,
-    value: &str,
+    content: MetricContent<'_>,
     theme: Theme,
     dpi: u32,
 ) {
@@ -540,12 +560,12 @@ unsafe fn metric_column(
         draw_text(
             hdc,
             locale,
-            label,
+            content.label,
             RECT {
                 left: rect.left + scale(12, dpi),
-                top: rect.top + scale(6, dpi),
+                top: rect.top + scale(5, dpi),
                 right: rect.right - scale(10, dpi),
-                bottom: rect.top + scale(29, dpi),
+                bottom: rect.top + scale(25, dpi),
             },
             scale(11, dpi),
             FW_NORMAL.0 as i32,
@@ -554,17 +574,33 @@ unsafe fn metric_column(
         draw_text(
             hdc,
             locale,
-            value,
+            content.value,
             RECT {
                 left: rect.left + scale(12, dpi),
-                top: rect.top + scale(27, dpi),
+                top: rect.top + scale(19, dpi),
                 right: rect.right - scale(10, dpi),
-                bottom: rect.bottom - scale(7, dpi),
+                bottom: rect.bottom - scale(16, dpi),
             },
             scale(18, dpi),
             FW_SEMIBOLD.0 as i32,
             theme.text,
         );
+        if let Some(detail) = content.detail {
+            draw_text(
+                hdc,
+                locale,
+                detail,
+                RECT {
+                    left: rect.left + scale(12, dpi),
+                    top: rect.top + scale(47, dpi),
+                    right: rect.right - scale(10, dpi),
+                    bottom: rect.bottom - scale(4, dpi),
+                },
+                scale(10, dpi),
+                FW_NORMAL.0 as i32,
+                theme.muted,
+            );
+        }
     }
 }
 
@@ -684,6 +720,23 @@ fn reset_details(window: &QuotaWindow, locale: Locale) -> (String, String) {
         })
         .unwrap_or_else(|| "--".to_owned());
     (countdown, local_time)
+}
+
+fn reset_credit_detail(account: &AccountSummary, locale: Locale) -> Option<String> {
+    match account.reset_credits {
+        Some(0) => Some(locale.text("No reset credits available", "暂无可用重置券").to_owned()),
+        Some(_) => account.reset_credit_expires_at.and_then(|expires_at| {
+            DateTime::from_timestamp(expires_at, 0).map(|time| {
+                let time = time.with_timezone(&Local);
+                if locale == Locale::Chinese {
+                    format!("最近到期 {}", time.format("%-m月%-d日 %H:%M:%S"))
+                } else {
+                    format!("Expires {}", time.format("%m/%d %H:%M:%S"))
+                }
+            })
+        }),
+        None => None,
+    }
 }
 
 fn plan_label(plan: &str, locale: Locale) -> &str {
@@ -922,6 +975,40 @@ mod tests {
 
         assert_eq!(reset_details(&window, Locale::Chinese).1, "8月2日 11:00");
         assert_eq!(reset_details(&window, Locale::English).1, "08/02 11:00");
+    }
+
+    #[test]
+    fn formats_the_nearest_reset_credit_expiration_with_seconds() {
+        use chrono::TimeZone;
+
+        let expires_at = Local.with_ymd_and_hms(2026, 8, 1, 3, 8, 34).single().unwrap().timestamp();
+        let account = AccountSummary {
+            reset_credits: Some(2),
+            reset_credit_expires_at: Some(expires_at),
+            ..AccountSummary::default()
+        };
+
+        assert_eq!(
+            reset_credit_detail(&account, Locale::Chinese).as_deref(),
+            Some("最近到期 8月1日 03:08:34")
+        );
+        assert_eq!(
+            reset_credit_detail(&account, Locale::English).as_deref(),
+            Some("Expires 08/01 03:08:34")
+        );
+    }
+
+    #[test]
+    fn labels_the_no_reset_credit_state_without_an_expiration() {
+        let account = AccountSummary { reset_credits: Some(0), ..AccountSummary::default() };
+        assert_eq!(
+            reset_credit_detail(&account, Locale::Chinese).as_deref(),
+            Some("暂无可用重置券")
+        );
+        assert_eq!(
+            reset_credit_detail(&account, Locale::English).as_deref(),
+            Some("No reset credits available")
+        );
     }
 
     #[test]

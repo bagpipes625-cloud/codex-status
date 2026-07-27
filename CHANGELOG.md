@@ -4,6 +4,18 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-07-27
+
+- Display the nearest available reset credit's expiration time without adding
+  another refresh or network request.
+- Align the lower metric-card divider with the hero divider, split the two
+  left columns evenly, and align all three metric values on one row.
+
+## [0.3.5] - 2026-07-27
+
+- Keep the tray icon's two-pixel bottom bar at full width and use its
+  green, yellow, or red color alone to communicate the remaining-quota state.
+
 ## [0.3.4] - 2026-07-27
 
 - Align the percent sign with the bottom of the weekly remaining number.
