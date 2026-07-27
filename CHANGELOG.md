@@ -4,6 +4,15 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-27
+
+- Restore the installation-directory page so the destination can be selected on every
+  computer.
+- Default new installations to `F:\CodexStatus` when the `F:` drive exists, otherwise
+  use `%LOCALAPPDATA%\Programs\CodexStatus`.
+- Reuse an existing installation directory during upgrades and continue to register
+  start-with-Windows for every installation.
+
 ## [0.3.0] - 2026-07-27
 
 - Remove the automatic updater, release-check timers, network transport, and update metadata from the installed application.
