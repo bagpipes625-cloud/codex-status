@@ -2,6 +2,13 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.2.2] - 2026-07-27
+
+- Use one Segoe UI Variable request throughout the flyout so Latin letters and quota numerals no longer change families between strings; Windows font linking supplies localized glyphs.
+- Remove the nested reset panel and three separate metric cards in favor of a calmer split quota surface and one aligned metrics band.
+- Refine light and dark semantic colors, dividers, spacing, status accents, and privacy copy for clearer hierarchy and stronger contrast.
+- Refresh the documented light and dark screenshots to match the released interface.
+
 ## [0.2.1] - 2026-07-27
 
 - Return the process working set to its low idle footprint shortly after the daily WinHTTP update check completes.

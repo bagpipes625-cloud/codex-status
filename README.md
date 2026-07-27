@@ -58,7 +58,7 @@ Normal builds do not write logs. The optional `diagnostics` Cargo feature record
 
 ## Performance
 
-Measured on Windows 11 24H2 x64 with the v0.2.1 release:
+Measured on Windows 11 24H2 x64 with the v0.2.2 release:
 
 | State | CodexStatus working set | CPU | Child processes |
 |---|---:|---:|---:|
