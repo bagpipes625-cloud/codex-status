@@ -142,7 +142,7 @@ fn render_rgba(
         draw_fallback_label(&mut pixels, size, &label, text);
     }
 
-    draw_quota_bar(&mut pixels, size, percent, high_contrast, dark_taskbar);
+    draw_quota_status_bar(&mut pixels, size, percent, high_contrast, dark_taskbar);
     pixels
 }
 
@@ -155,7 +155,7 @@ fn foreground(dark_taskbar: bool, muted: bool) -> [u8; 4] {
     }
 }
 
-fn draw_quota_bar(
+fn draw_quota_status_bar(
     pixels: &mut [[u8; 4]],
     size: u32,
     percent: Option<u8>,
@@ -165,25 +165,14 @@ fn draw_quota_bar(
     let left = 1;
     let width = size.saturating_sub(2);
     let top = size.saturating_sub(2);
-    let track = quota_track(high_contrast, dark_taskbar);
+    let color = percent.map_or_else(
+        || quota_track(high_contrast, dark_taskbar),
+        |value| quota_tone(Some(value.min(100))).accent(high_contrast, dark_taskbar),
+    );
 
     for y in top..size {
         for x in left..left + width {
-            set_pixel(pixels, size, x as i32, y as i32, track);
-        }
-    }
-
-    let Some(percent) = percent.map(|value| value.min(100)) else {
-        return;
-    };
-    if percent == 0 {
-        return;
-    }
-    let filled = (width * u32::from(percent) / 100).max(2).min(width);
-    let accent = quota_tone(Some(percent)).accent(high_contrast, dark_taskbar);
-    for y in top..size {
-        for x in left..left + filled {
-            set_pixel(pixels, size, x as i32, y as i32, accent);
+            set_pixel(pixels, size, x as i32, y as i32, color);
         }
     }
 }
@@ -475,20 +464,18 @@ mod tests {
     }
 
     #[test]
-    fn quota_bar_is_two_pixels_high_and_keeps_horizontal_margins() {
+    fn quota_status_bar_is_two_pixels_high_and_keeps_horizontal_margins() {
         let pixels = render_rgba(Some(50), IconTone::Healthy, 16, false, false);
         let accent = quota_tone(Some(50)).accent(false, false);
-        let track = quota_track(false, false);
         for y in [14, 15] {
             assert_eq!(pixels[y * 16], [0, 0, 0, 0]);
-            assert!(pixels[y * 16 + 1..y * 16 + 8].iter().all(|pixel| *pixel == accent));
-            assert!(pixels[y * 16 + 8..y * 16 + 15].iter().all(|pixel| *pixel == track));
+            assert!(pixels[y * 16 + 1..y * 16 + 15].iter().all(|pixel| *pixel == accent));
             assert_eq!(pixels[y * 16 + 15], [0, 0, 0, 0]);
         }
     }
 
     #[test]
-    fn create_icon_bytes_keep_the_quota_bar_on_the_bottom() {
+    fn create_icon_bytes_keep_the_quota_status_bar_on_the_bottom() {
         let pixels = render_bgra(Some(50), IconTone::Healthy, 16, false, false);
         let accent = quota_tone(Some(50)).accent(false, false);
         let accent_bgra = [accent[2], accent[1], accent[0], accent[3]];
@@ -499,30 +486,29 @@ mod tests {
     }
 
     #[test]
-    fn quota_bar_length_and_color_follow_the_panel_rules() {
+    fn quota_status_bar_stays_full_width_and_color_follows_the_panel_rules() {
         let cases = [
-            (100, IconTone::Healthy, 14),
-            (50, IconTone::Healthy, 7),
-            (49, IconTone::Warning, 6),
-            (20, IconTone::Warning, 2),
-            (19, IconTone::Critical, 2),
-            (1, IconTone::Critical, 2),
-            (0, IconTone::Critical, 0),
+            (100, IconTone::Healthy),
+            (50, IconTone::Healthy),
+            (49, IconTone::Warning),
+            (20, IconTone::Warning),
+            (19, IconTone::Critical),
+            (1, IconTone::Critical),
+            (0, IconTone::Critical),
         ];
-        let track = quota_track(false, false);
-        for (percent, expected_tone, expected_width) in cases {
+        for (percent, expected_tone) in cases {
             let pixels = render_rgba(Some(percent), expected_tone, 16, false, false);
             let accent = expected_tone.accent(false, false);
             let bar = &pixels[15 * 16 + 1..15 * 16 + 15];
-            assert_eq!(
-                bar.iter().take(expected_width).filter(|pixel| **pixel == accent).count(),
-                expected_width
-            );
-            assert!(
-                bar.iter().skip(expected_width).all(|pixel| *pixel == track),
-                "percent={percent}"
-            );
+            assert!(bar.iter().all(|pixel| *pixel == accent), "percent={percent}");
         }
+    }
+
+    #[test]
+    fn unavailable_quota_uses_a_full_width_neutral_status_bar() {
+        let pixels = render_rgba(None, IconTone::Unavailable, 16, false, false);
+        let track = quota_track(false, false);
+        assert!(pixels[15 * 16 + 1..15 * 16 + 15].iter().all(|pixel| *pixel == track));
     }
 
     #[test]

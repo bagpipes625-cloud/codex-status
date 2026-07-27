@@ -4,6 +4,11 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-07-27
+
+- Keep the tray icon's two-pixel bottom bar at full width and use its
+  green, yellow, or red color alone to communicate the remaining-quota state.
+
 ## [0.3.4] - 2026-07-27
 
 - Align the percent sign with the bottom of the weekly remaining number.
