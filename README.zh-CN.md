@@ -84,7 +84,7 @@ Remove-Item Env:CODEX_STATUS_CHANNEL
 
 开发构建默认使用隔离的开发版托盘 GUID。只有打包相应安装通道时才把 `CODEX_STATUS_CHANNEL` 设为 `beta` 或 `stable`；各通道的窗口类和单实例互斥量也彼此隔离。不要直接从构建或暂存目录运行 stable 通道 EXE，应先安装到固定目录，让该 GUID 首次从正式路径完成注册。便携包使用 `CODEX_STATUS_CHANNEL=portable` 和受支持的 `HWND + uID` 标识，因为它的 EXE 路径本来就不固定。
 
-GitHub Actions 会为版本标签构建 stable 通道的便携 ZIP 和 Inno Setup 安装包。本地也可使用 gnullvm 开发工具链；此时 llvm-mingw 的 `libunwind.dll` 只是本地开发依赖，正式 MSVC Release 是单文件程序。
+GitHub Actions 会为版本标签分别构建路径无关的 portable 通道 ZIP 和 stable 通道 Inno Setup 安装包。本地也可使用 gnullvm 开发工具链；此时 llvm-mingw 的 `libunwind.dll` 只是本地开发依赖，正式 MSVC Release 是单文件程序。
 
 ## 首版边界
 

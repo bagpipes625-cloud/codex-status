@@ -84,7 +84,7 @@ Remove-Item Env:CODEX_STATUS_CHANNEL
 
 Development builds default to an isolated development tray GUID. Set `CODEX_STATUS_CHANNEL` to `beta` or `stable` only when packaging that installed channel; each channel also has its own window classes and single-instance mutex. Do not run a stable-channel binary from the build or staging directory—install it first so its persistent GUID is initially registered from the fixed executable path. Portable packages use `CODEX_STATUS_CHANNEL=portable` and the supported `HWND + uID` identity because their executable path is intentionally not fixed.
 
-GitHub Actions builds the stable-channel portable ZIP and Inno Setup installer for version tags. Local development can also use the gnullvm target; llvm-mingw's `libunwind.dll` is then a development-only runtime dependency. Official release builds use MSVC and are a single executable.
+For version tags, GitHub Actions builds a path-independent portable-channel ZIP and a stable-channel Inno Setup installer. Local development can also use the gnullvm target; llvm-mingw's `libunwind.dll` is then a development-only runtime dependency. Official release builds use MSVC and are a single executable.
 
 ## Design boundaries
 
