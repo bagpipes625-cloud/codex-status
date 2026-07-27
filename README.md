@@ -20,7 +20,7 @@ CodexStatus is a tiny native Windows utility. Its notification-area icon is the 
 - Transparent, theme-aware Segoe UI digits with a restrained green (≥50%), amber (20–49%), red (<20%), or muted status rule.
 - Native rounded flyout that follows light, dark, high-contrast, and per-monitor DPI settings.
 - System, light, and dark flyout themes selectable from the tray menu.
-- Manual updates from this repository's private GitHub Releases; automatic release checks are disabled.
+- Weekly depletion forecast based on the current cycle's elapsed time and used quota.
 - Official Codex app-server RPC: `account/rateLimits/read`; no token scraping and no private endpoints.
 - Event-driven Win32 process with no Electron, WebView, WPF, WinUI, local HTTP server, or resident async runtime.
 - Five-minute default refresh, manual refresh, bounded failure backoff, safe cache expiry, and optional low-quota alerts.
@@ -40,18 +40,20 @@ The installer is not yet code-signed, so Microsoft Defender SmartScreen may show
 ## Use
 
 - **Left-click:** open or close the quota card.
-- **Right-click:** refresh now, open the Codex usage page, choose a 1/5/15-minute interval, configure a low-quota alert, select a theme, toggle startup, open Releases, or exit.
+- **Right-click:** refresh now, open the Codex usage page, choose a 1/5/15-minute interval, configure a low-quota alert, select a theme, toggle startup, or exit.
 - **Tray label:** weekly remaining percentage rounded to the nearest whole number.
 
 CodexStatus only calls the locally installed `codex app-server`. Each refresh performs `initialize → account/read → account/rateLimits/read`, then closes the process tree using a Windows Job Object. It selects an exact 10,080-minute window first and only accepts a 6–8 day fallback; a short window is never mislabeled as weekly quota.
 
+The footer extrapolates the average consumption rate observed since the weekly cycle began. It shows a green **Usage ample** status when the projected depletion is at or after reset, or a red estimated time to depletion when the quota is likely to run out first.
+
 ## Privacy
 
-CodexStatus never reads or stores your OAuth token, email address, project content, prompts, or raw app-server response. It sends no telemetry. This private build does not perform automatic release checks or download updates; updates are installed manually from this repository's Releases page.
+CodexStatus never reads or stores your OAuth token, email address, project content, prompts, or raw app-server response. It sends no telemetry or background network requests.
 
 Two files are stored under `%LOCALAPPDATA%\CodexStatus`:
 
-- `settings.json`: refresh interval, UI language, theme, alert threshold, onboarding state, last successful update check, and alert deduplication state.
+- `settings.json`: refresh interval, UI language, theme, alert threshold, onboarding state, and alert deduplication state.
 - `snapshot.json`: the latest non-sensitive parsed quota snapshot. It is discarded once its reset time passes.
 
 Normal builds do not write logs. The optional `diagnostics` Cargo feature records only lifecycle stages and filtered error summaries.

@@ -15,7 +15,6 @@ pub struct Settings {
     pub theme: String,
     pub onboarding_shown: bool,
     pub last_alert_reset: Option<i64>,
-    pub last_update_check: Option<i64>,
 }
 
 impl Default for Settings {
@@ -27,7 +26,6 @@ impl Default for Settings {
             theme: "system".to_owned(),
             onboarding_shown: false,
             last_alert_reset: None,
-            last_update_check: None,
         }
     }
 }
@@ -83,10 +81,6 @@ impl AppStore {
 
     pub fn save_snapshot(&self, snapshot: &QuotaSnapshot) -> io::Result<()> {
         write_json_atomic(&self.directory.join("snapshot.json"), snapshot)
-    }
-
-    pub fn updates_directory(&self) -> PathBuf {
-        self.directory.join("updates")
     }
 }
 

@@ -24,6 +24,47 @@ impl QuotaWindow {
             None => now.saturating_sub(fetched_at) < 15 * 60,
         }
     }
+
+    fn usage_projection(&self, observed_at: i64, now: i64) -> Option<UsageProjection> {
+        let reset = self.resets_at?;
+        if reset <= observed_at || reset <= now || !self.used_percent.is_finite() {
+            return None;
+        }
+        let window_seconds = i64::try_from(self.window_minutes.checked_mul(60)?).ok()?;
+        let cycle_started_at = reset.checked_sub(window_seconds)?;
+        let elapsed_at_observation = observed_at.checked_sub(cycle_started_at)?;
+        if elapsed_at_observation <= 0 {
+            return None;
+        }
+
+        let used_percent = self.used_percent.clamp(0.0, 100.0);
+        if used_percent <= f64::EPSILON {
+            return Some(UsageProjection::Ample);
+        }
+        if used_percent >= 100.0 {
+            return Some(UsageProjection::DepletesIn { seconds: 0 });
+        }
+
+        let remaining_percent = 100.0 - used_percent;
+        let seconds_after_observation =
+            elapsed_at_observation as f64 * remaining_percent / used_percent;
+        if !seconds_after_observation.is_finite() {
+            return None;
+        }
+        let projected_depletion_at = observed_at as f64 + seconds_after_observation;
+        if projected_depletion_at >= reset as f64 {
+            return Some(UsageProjection::Ample);
+        }
+
+        let seconds = (projected_depletion_at - now as f64).ceil().max(0.0) as i64;
+        Some(UsageProjection::DepletesIn { seconds })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageProjection {
+    Ample,
+    DepletesIn { seconds: i64 },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -45,6 +86,10 @@ pub struct QuotaSnapshot {
 impl QuotaSnapshot {
     pub fn is_cache_valid(&self, now: i64) -> bool {
         self.weekly.as_ref().is_some_and(|window| window.is_cache_valid(now, self.fetched_at))
+    }
+
+    pub fn weekly_usage_projection(&self, now: i64) -> Option<UsageProjection> {
+        self.weekly.as_ref()?.usage_projection(self.fetched_at, now)
     }
 }
 
@@ -293,5 +338,68 @@ mod tests {
         let snapshot = parse_snapshot(&account(), &rate, 100).unwrap();
         assert!(snapshot.weekly.is_none());
         assert!(snapshot.session.is_none());
+    }
+
+    fn weekly_snapshot(
+        used_percent: f64,
+        fetched_at: i64,
+        resets_at: Option<i64>,
+    ) -> QuotaSnapshot {
+        QuotaSnapshot {
+            weekly: Some(QuotaWindow {
+                used_percent,
+                remaining_percent: (100.0 - used_percent).clamp(0.0, 100.0),
+                window_minutes: WEEK_MINUTES,
+                resets_at,
+            }),
+            session: None,
+            account: AccountSummary::default(),
+            fetched_at,
+        }
+    }
+
+    #[test]
+    fn projects_ample_usage_when_average_rate_outlasts_reset() {
+        let reset = WEEK_MINUTES as i64 * 60;
+        let fetched_at = 24 * 60 * 60;
+        let snapshot = weekly_snapshot(10.0, fetched_at, Some(reset));
+        assert_eq!(snapshot.weekly_usage_projection(fetched_at), Some(UsageProjection::Ample));
+    }
+
+    #[test]
+    fn projects_depletion_from_observed_cycle_rate() {
+        let reset = WEEK_MINUTES as i64 * 60;
+        let fetched_at = 24 * 60 * 60;
+        let snapshot = weekly_snapshot(50.0, fetched_at, Some(reset));
+        assert_eq!(
+            snapshot.weekly_usage_projection(fetched_at),
+            Some(UsageProjection::DepletesIn { seconds: 24 * 60 * 60 })
+        );
+        assert_eq!(
+            snapshot.weekly_usage_projection(fetched_at + 60 * 60),
+            Some(UsageProjection::DepletesIn { seconds: 23 * 60 * 60 })
+        );
+    }
+
+    #[test]
+    fn treats_zero_usage_as_ample_and_full_usage_as_depleted() {
+        let reset = WEEK_MINUTES as i64 * 60;
+        let fetched_at = 24 * 60 * 60;
+        assert_eq!(
+            weekly_snapshot(0.0, fetched_at, Some(reset)).weekly_usage_projection(fetched_at),
+            Some(UsageProjection::Ample)
+        );
+        assert_eq!(
+            weekly_snapshot(100.0, fetched_at, Some(reset)).weekly_usage_projection(fetched_at),
+            Some(UsageProjection::DepletesIn { seconds: 0 })
+        );
+    }
+
+    #[test]
+    fn omits_projection_without_a_trustworthy_active_cycle() {
+        let reset = WEEK_MINUTES as i64 * 60;
+        assert_eq!(weekly_snapshot(10.0, 100, None).weekly_usage_projection(100), None);
+        assert_eq!(weekly_snapshot(10.0, 0, Some(reset)).weekly_usage_projection(0), None);
+        assert_eq!(weekly_snapshot(10.0, reset, Some(reset)).weekly_usage_projection(reset), None);
     }
 }

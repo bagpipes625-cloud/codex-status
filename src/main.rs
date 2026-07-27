@@ -8,7 +8,6 @@ mod model;
 mod settings;
 mod startup;
 mod ui;
-mod updater;
 
 fn main() {
     #[cfg(feature = "diagnostics")]

@@ -2,6 +2,11 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [Unreleased]
+
+- Remove the automatic updater, release-check timers, network transport, and update metadata from the installed application.
+- Add a weekly quota depletion forecast with green ample-use and red estimated-depletion indicators.
+
 ## [0.2.3] - 2026-07-27
 
 - Generate the Windows manifest and executable version metadata from the Cargo package version so File Explorer reports the installed release correctly.

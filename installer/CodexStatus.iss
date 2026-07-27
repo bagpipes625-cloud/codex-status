@@ -14,7 +14,6 @@ AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}
 AppSupportURL={#AppURL}/issues
-AppUpdatesURL={#AppURL}/releases
 DefaultDirName={localappdata}\Programs\CodexStatus
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
