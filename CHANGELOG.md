@@ -2,6 +2,10 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.2.3] - 2026-07-27
+
+- Generate the Windows manifest and executable version metadata from the Cargo package version so File Explorer reports the installed release correctly.
+
 ## [0.2.2] - 2026-07-27
 
 - Use one Segoe UI Variable request throughout the flyout so Latin letters and quota numerals no longer change families between strings; Windows font linking supplies localized glyphs.

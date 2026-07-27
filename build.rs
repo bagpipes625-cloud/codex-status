@@ -1,5 +1,6 @@
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=CARGO_PKG_VERSION");
     compile_resource();
 }
 
@@ -9,15 +10,17 @@ fn compile_resource() {}
 #[cfg(target_env = "msvc")]
 fn compile_resource() {
     let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+    let package_version = std::env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
+    let (major, minor, patch) = resource_version(&package_version);
+    let manifest_version = format!("{major}.{minor}.{patch}.0");
+    let numeric_version = format!("{major},{minor},{patch},0");
     let icon = output.join("codex-status.ico");
     let manifest = output.join("codex-status.manifest");
     let resource = output.join("codex-status.rc");
     std::fs::write(&icon, make_icon()).expect("write generated icon");
-    std::fs::write(
-        &manifest,
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    let manifest_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity version="0.1.0.0" processorArchitecture="amd64" name="CodexStatus" type="win32" />
+  <assemblyIdentity version="@PACKAGE_VERSION@" processorArchitecture="amd64" name="CodexStatus" type="win32" />
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security><requestedPrivileges><requestedExecutionLevel level="asInvoker" uiAccess="false" /></requestedPrivileges></security>
   </trustInfo>
@@ -35,16 +38,52 @@ fn compile_resource() {
     </windowsSettings>
   </application>
 </assembly>
-"#,
-    )
-    .expect("write generated manifest");
+"#
+    .replace("@PACKAGE_VERSION@", &manifest_version);
+    std::fs::write(&manifest, manifest_xml).expect("write generated manifest");
     let icon_path = escape_resource_path(&icon);
     let manifest_path = escape_resource_path(&manifest);
     let rc = format!(
-        "1 ICON \"{icon_path}\"\n1 24 \"{manifest_path}\"\n1 VERSIONINFO\nFILEVERSION 0,1,0,0\nPRODUCTVERSION 0,1,0,0\nBEGIN\n BLOCK \"StringFileInfo\"\n BEGIN\n  BLOCK \"040904E4\"\n  BEGIN\n   VALUE \"CompanyName\", \"CodexStatus Contributors\\0\"\n   VALUE \"FileDescription\", \"Codex weekly quota in the Windows tray\\0\"\n   VALUE \"FileVersion\", \"0.1.0\\0\"\n   VALUE \"InternalName\", \"CodexStatus\\0\"\n   VALUE \"OriginalFilename\", \"CodexStatus.exe\\0\"\n   VALUE \"ProductName\", \"CodexStatus\\0\"\n   VALUE \"ProductVersion\", \"0.1.0\\0\"\n  END\n END\n BLOCK \"VarFileInfo\"\n BEGIN\n  VALUE \"Translation\", 0x0409, 1252\n END\nEND\n"
+        r#"1 ICON "{icon_path}"
+1 24 "{manifest_path}"
+1 VERSIONINFO
+FILEVERSION {numeric_version}
+PRODUCTVERSION {numeric_version}
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904E4"
+  BEGIN
+   VALUE "CompanyName", "CodexStatus Contributors\0"
+   VALUE "FileDescription", "Codex weekly quota in the Windows tray\0"
+   VALUE "FileVersion", "{package_version}\0"
+   VALUE "InternalName", "CodexStatus\0"
+   VALUE "OriginalFilename", "CodexStatus.exe\0"
+   VALUE "ProductName", "CodexStatus\0"
+   VALUE "ProductVersion", "{package_version}\0"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x0409, 1252
+ END
+END
+"#
     );
     std::fs::write(&resource, rc).expect("write generated resource");
     embed_resource::compile(resource, embed_resource::NONE).manifest_required().unwrap();
+}
+
+#[cfg(target_env = "msvc")]
+fn resource_version(version: &str) -> (u16, u16, u16) {
+    let mut parts = version.split(['.', '-', '+']);
+    let mut next = || {
+        parts
+            .next()
+            .and_then(|part| part.parse::<u16>().ok())
+            .expect("Cargo package version component")
+    };
+    (next(), next(), next())
 }
 
 #[cfg(target_env = "msvc")]
