@@ -49,7 +49,9 @@ use windows::core::{GUID, PCWSTR, w};
 const MAIN_CLASS: PCWSTR = w!("CodexStatus.MainWindow.v1");
 const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.FlyoutWindow.v1");
 const MUTEX_NAME: PCWSTR = w!("Local\\CodexStatus.4B7D5A91-45A5-4B78-A095-A9B43A2A4F7D");
-const TRAY_GUID: GUID = GUID::from_u128(0x7a89d848_0611_4cb4_98c9_88ca9b59ff84);
+// This detached distribution owns a distinct notification-area identity so it
+// cannot collide with an original or stale CodexStatus registration.
+const TRAY_GUID: GUID = GUID::from_u128(0x039ac5a4_ecbd_4e3a_b30b_fdc8f048c1e1);
 const TRAY_ID: u32 = 1;
 
 const WM_TRAY: u32 = WM_APP + 1;
@@ -575,7 +577,24 @@ impl AppState {
         let add = force_add || !self.tray_added;
         let operation = if add { NIM_ADD } else { NIM_MODIFY };
         diagnostic(if add { "tray:add" } else { "tray:modify" });
-        if !unsafe { Shell_NotifyIconW(operation, &data) }.as_bool() {
+        let mut succeeded = unsafe { Shell_NotifyIconW(operation, &data) }.as_bool();
+        if add && !succeeded {
+            // A GUID identifies the icon independently of its old HWND. Rebind
+            // an existing Explorer entry to this instance before trying a
+            // delete-and-add recovery.
+            diagnostic("tray:reuse-existing");
+            succeeded = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) }.as_bool();
+        }
+        if add && !succeeded {
+            // Explorer can retain a GUID-backed icon briefly after an unclean exit.
+            // Remove that stale registration and retry once while this instance
+            // still owns the single-instance mutex.
+            diagnostic("tray:replace-stale");
+            let stale = self.notify_data();
+            let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &stale) };
+            succeeded = unsafe { Shell_NotifyIconW(NIM_ADD, &data) }.as_bool();
+        }
+        if !succeeded {
             diagnostic("tray:failed");
             return Err(windows::core::Error::from_thread());
         }

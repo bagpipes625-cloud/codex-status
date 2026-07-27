@@ -26,8 +26,16 @@ impl QuotaWindow {
     }
 
     fn usage_projection(&self, observed_at: i64, now: i64) -> Option<UsageProjection> {
+        if !self.used_percent.is_finite() {
+            return None;
+        }
+        let used_percent = self.used_percent.clamp(0.0, 100.0);
+        if used_percent >= 100.0 {
+            return Some(UsageProjection::Exhausted);
+        }
+
         let reset = self.resets_at?;
-        if reset <= observed_at || reset <= now || !self.used_percent.is_finite() {
+        if reset <= observed_at || reset <= now {
             return None;
         }
         let window_seconds = i64::try_from(self.window_minutes.checked_mul(60)?).ok()?;
@@ -37,12 +45,8 @@ impl QuotaWindow {
             return None;
         }
 
-        let used_percent = self.used_percent.clamp(0.0, 100.0);
         if used_percent <= f64::EPSILON {
             return Some(UsageProjection::Ample);
-        }
-        if used_percent >= 100.0 {
-            return Some(UsageProjection::DepletesIn { seconds: 0 });
         }
 
         let remaining_percent = 100.0 - used_percent;
@@ -64,6 +68,7 @@ impl QuotaWindow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageProjection {
     Ample,
+    Exhausted,
     DepletesIn { seconds: i64 },
 }
 
@@ -182,10 +187,10 @@ pub fn parse_snapshot(
         })
         .map(|(_, window)| window.clone());
 
-    let plan_type = account_result
-        .pointer("/account/planType")
+    let plan_type = bucket
+        .get("planType")
         .and_then(Value::as_str)
-        .or_else(|| bucket.get("planType").and_then(Value::as_str))
+        .or_else(|| account_result.pointer("/account/planType").and_then(Value::as_str))
         .map(str::to_owned);
     let reset_credits =
         rate_result.pointer("/rateLimitResetCredits/availableCount").and_then(Value::as_u64);
@@ -268,6 +273,19 @@ mod tests {
         assert_eq!(snapshot.weekly.unwrap().display_percent(), 75);
         assert_eq!(snapshot.session.unwrap().display_percent(), 60);
         assert_eq!(snapshot.account.reset_credits, Some(2));
+    }
+
+    #[test]
+    fn prefers_quota_plan_when_it_differs_from_the_account_token() {
+        let rate = json!({
+            "rateLimits": {
+                "limitId": "codex",
+                "planType": "prolite",
+                "primary": {"usedPercent": 12, "windowDurationMins": 10080}
+            }
+        });
+        let snapshot = parse_snapshot(&account(), &rate, 100).unwrap();
+        assert_eq!(snapshot.account.plan_type.as_deref(), Some("prolite"));
     }
 
     #[test]
@@ -382,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn treats_zero_usage_as_ample_and_full_usage_as_depleted() {
+    fn treats_zero_usage_as_ample_and_full_usage_as_exhausted() {
         let reset = WEEK_MINUTES as i64 * 60;
         let fetched_at = 24 * 60 * 60;
         assert_eq!(
@@ -391,7 +409,15 @@ mod tests {
         );
         assert_eq!(
             weekly_snapshot(100.0, fetched_at, Some(reset)).weekly_usage_projection(fetched_at),
-            Some(UsageProjection::DepletesIn { seconds: 0 })
+            Some(UsageProjection::Exhausted)
+        );
+    }
+
+    #[test]
+    fn reports_exhausted_even_without_a_reset_timestamp() {
+        assert_eq!(
+            weekly_snapshot(100.0, 100, None).weekly_usage_projection(100),
+            Some(UsageProjection::Exhausted)
         );
     }
 
