@@ -692,7 +692,7 @@ fn plan_label(plan: &str, locale: Locale) -> &str {
         "go" => "Go",
         "plus" => "Plus",
         "prolite" => "5x Pro",
-        "pro" => "20x Pro",
+        "pro" => "Pro",
         "team" => "Team",
         "business" => "Business",
         "enterprise" => "Enterprise",
@@ -976,7 +976,7 @@ mod tests {
         assert_eq!(plan_label("go", Locale::Chinese), "Go");
         assert_eq!(plan_label("plus", Locale::Chinese), "Plus");
         assert_eq!(plan_label("prolite", Locale::Chinese), "5x Pro");
-        assert_eq!(plan_label("pro", Locale::Chinese), "20x Pro");
+        assert_eq!(plan_label("pro", Locale::Chinese), "Pro");
     }
 
     #[test]

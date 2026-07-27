@@ -4,6 +4,11 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-07-27
+
+- Display the server-reported `pro` plan as `Pro` because the available account and
+  Codex quota fields do not distinguish 5x Pro from 20x Pro.
+
 ## [0.3.2] - 2026-07-27
 
 - Format Chinese reset timestamps as `8月2日 11:00` instead of `08/02 11:00`.
