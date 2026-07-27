@@ -4,6 +4,22 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-07-27
+
+- Align the percent sign with the bottom of the weekly remaining number.
+- Turn the tray icon's bottom rule into a two-pixel remaining-quota bar whose
+  length and green, yellow, or red color match the main panel.
+
+## [0.3.3] - 2026-07-27
+
+- Display the server-reported `pro` plan as `Pro` because the available account and
+  Codex quota fields do not distinguish 5x Pro from 20x Pro.
+
+## [0.3.2] - 2026-07-27
+
+- Format Chinese reset timestamps as `8月2日 11:00` instead of `08/02 11:00`.
+- Increase the reset timestamp and quota forecast typography for easier reading.
+
 ## [0.3.1] - 2026-07-27
 
 - Restore the installation-directory page so the destination can be selected on every
