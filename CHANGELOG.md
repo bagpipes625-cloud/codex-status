@@ -4,6 +4,12 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-07-27
+
+- Align the percent sign with the bottom of the weekly remaining number.
+- Turn the tray icon's bottom rule into a two-pixel remaining-quota bar whose
+  length and green, yellow, or red color match the main panel.
+
 ## [0.3.3] - 2026-07-27
 
 - Display the server-reported `pro` plan as `Pro` because the available account and

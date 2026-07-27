@@ -28,11 +28,11 @@ impl IconTone {
             return foreground(dark_taskbar, false);
         }
         match self {
-            Self::Healthy => [16, 146, 103, 255],
-            Self::Warning => [214, 137, 16, 255],
-            Self::Critical => [224, 49, 65, 255],
+            Self::Healthy => [16, 163, 127, 255],
+            Self::Warning => [210, 134, 0, 255],
+            Self::Critical => [211, 64, 73, 255],
             Self::Stale => [112, 122, 134, 255],
-            Self::Unavailable => [132, 141, 151, 255],
+            Self::Unavailable => [104, 109, 118, 255],
         }
     }
 
@@ -49,7 +49,11 @@ pub fn tone_for(state: &DisplayState) -> IconTone {
             IconTone::Unavailable
         };
     }
-    match state.weekly_percent() {
+    quota_tone(state.weekly_percent())
+}
+
+fn quota_tone(percent: Option<u8>) -> IconTone {
+    match percent {
         Some(percent) if percent < 20 => IconTone::Critical,
         Some(percent) if percent < 50 => IconTone::Warning,
         Some(_) => IconTone::Healthy,
@@ -138,10 +142,7 @@ fn render_rgba(
         draw_fallback_label(&mut pixels, size, &label, text);
     }
 
-    let accent = tone.accent(high_contrast, dark_taskbar);
-    for x in 1..size.saturating_sub(1) {
-        set_pixel(&mut pixels, size, x as i32, size as i32 - 1, accent);
-    }
+    draw_quota_bar(&mut pixels, size, percent, high_contrast, dark_taskbar);
     pixels
 }
 
@@ -152,6 +153,46 @@ fn foreground(dark_taskbar: bool, muted: bool) -> [u8; 4] {
         (false, true) => [94, 103, 114, 255],
         (false, false) => [31, 34, 38, 255],
     }
+}
+
+fn draw_quota_bar(
+    pixels: &mut [[u8; 4]],
+    size: u32,
+    percent: Option<u8>,
+    high_contrast: bool,
+    dark_taskbar: bool,
+) {
+    let left = 1;
+    let width = size.saturating_sub(2);
+    let top = size.saturating_sub(2);
+    let track = quota_track(high_contrast, dark_taskbar);
+
+    for y in top..size {
+        for x in left..left + width {
+            set_pixel(pixels, size, x as i32, y as i32, track);
+        }
+    }
+
+    let Some(percent) = percent.map(|value| value.min(100)) else {
+        return;
+    };
+    if percent == 0 {
+        return;
+    }
+    let filled = (width * u32::from(percent) / 100).max(2).min(width);
+    let accent = quota_tone(Some(percent)).accent(high_contrast, dark_taskbar);
+    for y in top..size {
+        for x in left..left + filled {
+            set_pixel(pixels, size, x as i32, y as i32, accent);
+        }
+    }
+}
+
+fn quota_track(high_contrast: bool, dark_taskbar: bool) -> [u8; 4] {
+    if high_contrast {
+        return foreground(dark_taskbar, false);
+    }
+    if dark_taskbar { [61, 61, 61, 255] } else { [226, 226, 226, 255] }
 }
 
 struct GrayMask {
@@ -434,22 +475,54 @@ mod tests {
     }
 
     #[test]
-    fn status_color_is_a_single_bottom_rule() {
+    fn quota_bar_is_two_pixels_high_and_keeps_horizontal_margins() {
         let pixels = render_rgba(Some(50), IconTone::Healthy, 16, false, false);
-        let accent = IconTone::Healthy.accent(false, false);
-        assert_eq!(pixels[15 * 16], [0, 0, 0, 0]);
-        assert!(pixels[15 * 16 + 1..15 * 16 + 15].iter().all(|pixel| *pixel == accent));
-        assert_eq!(pixels[15 * 16 + 15], [0, 0, 0, 0]);
+        let accent = quota_tone(Some(50)).accent(false, false);
+        let track = quota_track(false, false);
+        for y in [14, 15] {
+            assert_eq!(pixels[y * 16], [0, 0, 0, 0]);
+            assert!(pixels[y * 16 + 1..y * 16 + 8].iter().all(|pixel| *pixel == accent));
+            assert!(pixels[y * 16 + 8..y * 16 + 15].iter().all(|pixel| *pixel == track));
+            assert_eq!(pixels[y * 16 + 15], [0, 0, 0, 0]);
+        }
     }
 
     #[test]
-    fn create_icon_bytes_keep_the_status_rule_on_the_bottom() {
+    fn create_icon_bytes_keep_the_quota_bar_on_the_bottom() {
         let pixels = render_bgra(Some(50), IconTone::Healthy, 16, false, false);
-        let accent = IconTone::Healthy.accent(false, false);
+        let accent = quota_tone(Some(50)).accent(false, false);
         let accent_bgra = [accent[2], accent[1], accent[0], accent[3]];
         let pixel = |x: usize, y: usize| &pixels[(y * 16 + x) * 4..][..4];
-        assert_ne!(pixel(8, 0), accent_bgra);
-        assert_eq!(pixel(8, 15), accent_bgra);
+        assert_ne!(pixel(4, 13), accent_bgra);
+        assert_eq!(pixel(4, 14), accent_bgra);
+        assert_eq!(pixel(4, 15), accent_bgra);
+    }
+
+    #[test]
+    fn quota_bar_length_and_color_follow_the_panel_rules() {
+        let cases = [
+            (100, IconTone::Healthy, 14),
+            (50, IconTone::Healthy, 7),
+            (49, IconTone::Warning, 6),
+            (20, IconTone::Warning, 2),
+            (19, IconTone::Critical, 2),
+            (1, IconTone::Critical, 2),
+            (0, IconTone::Critical, 0),
+        ];
+        let track = quota_track(false, false);
+        for (percent, expected_tone, expected_width) in cases {
+            let pixels = render_rgba(Some(percent), expected_tone, 16, false, false);
+            let accent = expected_tone.accent(false, false);
+            let bar = &pixels[15 * 16 + 1..15 * 16 + 15];
+            assert_eq!(
+                bar.iter().take(expected_width).filter(|pixel| **pixel == accent).count(),
+                expected_width
+            );
+            assert!(
+                bar.iter().skip(expected_width).all(|pixel| *pixel == track),
+                "percent={percent}"
+            );
+        }
     }
 
     #[test]

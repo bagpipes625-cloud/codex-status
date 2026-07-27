@@ -516,9 +516,9 @@ unsafe fn draw_percentage(hdc: HDC, percent: Option<u8>, locale: Locale, theme: 
             "%",
             RECT {
                 left: number_left + number_width + scale(3, dpi),
-                top: scale(91, dpi),
+                top: scale(97, dpi),
                 right: scale(177, dpi),
-                bottom: scale(128, dpi),
+                bottom: scale(134, dpi),
             },
             scale(17, dpi),
             FW_SEMIBOLD.0 as i32,
