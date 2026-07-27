@@ -4,7 +4,7 @@
 
 **Your Codex weekly quota, readable at a glance in the Windows tray.**
 
-[简体中文](README.zh-CN.md) · [Download](https://github.com/mmm1h/codex-status/releases/latest) · [Report an issue](https://github.com/mmm1h/codex-status/issues)
+[简体中文](README.zh-CN.md) · [Download](https://github.com/bagpipes625-cloud/codex-status/releases/latest) · [Report an issue](https://github.com/bagpipes625-cloud/codex-status/issues)
 
 </div>
 
@@ -20,7 +20,7 @@ CodexStatus is a tiny native Windows utility. Its notification-area icon is the 
 - Transparent, theme-aware Segoe UI digits with a restrained green (≥50%), amber (20–49%), red (<20%), or muted status rule.
 - Native rounded flyout that follows light, dark, high-contrast, and per-monitor DPI settings.
 - System, light, and dark flyout themes selectable from the tray menu.
-- Silent daily updates from verified GitHub Release assets, followed by an automatic restart.
+- Manual updates from this repository's private GitHub Releases; automatic release checks are disabled.
 - Official Codex app-server RPC: `account/rateLimits/read`; no token scraping and no private endpoints.
 - Event-driven Win32 process with no Electron, WebView, WPF, WinUI, local HTTP server, or resident async runtime.
 - Five-minute default refresh, manual refresh, bounded failure backoff, safe cache expiry, and optional low-quota alerts.
@@ -31,7 +31,7 @@ CodexStatus is a tiny native Windows utility. Its notification-area icon is the 
 
 CodexStatus requires Windows 10/11 x64 and an already installed, signed-in [Codex CLI or Codex app](https://developers.openai.com/codex/cli/).
 
-1. Download the per-user installer from [Releases](https://github.com/mmm1h/codex-status/releases/latest).
+1. Download the per-user installer from [Releases](https://github.com/bagpipes625-cloud/codex-status/releases/latest).
 2. Run it. The default location is `%LOCALAPPDATA%\Programs\CodexStatus` and start-with-Windows is enabled by default.
 3. If Windows places the new icon behind the overflow arrow, open that area and drag CodexStatus onto the visible tray. Windows—not applications—controls notification icon visibility.
 
@@ -47,7 +47,7 @@ CodexStatus only calls the locally installed `codex app-server`. Each refresh pe
 
 ## Privacy
 
-CodexStatus never reads or stores your OAuth token, email address, project content, prompts, or raw app-server response. It sends no telemetry. For automatic updates, it reads the public latest-release metadata from `api.github.com` at most once per day and downloads an executable only when a newer stable version exists. The file must match the SHA-256 digest published by GitHub before it can replace the current executable.
+CodexStatus never reads or stores your OAuth token, email address, project content, prompts, or raw app-server response. It sends no telemetry. This private build does not perform automatic release checks or download updates; updates are installed manually from this repository's Releases page.
 
 Two files are stored under `%LOCALAPPDATA%\CodexStatus`:
 

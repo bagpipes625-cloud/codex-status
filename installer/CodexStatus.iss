@@ -4,7 +4,7 @@
 
 #define AppName "CodexStatus"
 #define AppPublisher "CodexStatus contributors"
-#define AppURL "https://github.com/mmm1h/codex-status"
+#define AppURL "https://github.com/bagpipes625-cloud/codex-status"
 #define AppExeName "CodexStatus.exe"
 
 [Setup]

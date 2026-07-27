@@ -71,6 +71,7 @@ const UPDATE_INITIAL_DELAY_MS: u32 = 90_000;
 const UPDATE_INTERVAL_SECONDS: i64 = 24 * 60 * 60;
 const UPDATE_RETRY_MS: u32 = 6 * 60 * 60 * 1_000;
 const UPDATE_WORKING_SET_TRIM_MS: u32 = 5_000;
+const AUTOMATIC_UPDATES_ENABLED: bool = false;
 
 const TRAY_ACTIVATION_DEBOUNCE: Duration = Duration::from_millis(300);
 const FLYOUT_ACTIVATION_GUARD: Duration = Duration::from_millis(220);
@@ -93,7 +94,7 @@ const CMD_THEME_DARK: u32 = 162;
 const CMD_EXIT: u32 = 199;
 
 const USAGE_URL: &str = "https://chatgpt.com/codex/settings/usage";
-const RELEASES_URL: &str = "https://github.com/mmm1h/codex-status/releases";
+const RELEASES_URL: &str = "https://github.com/bagpipes625-cloud/codex-status/releases";
 
 thread_local! {
     static STATE: Cell<*mut AppState> = const { Cell::new(ptr::null_mut()) };
@@ -272,7 +273,9 @@ pub fn run() -> Result<(), AppError> {
     unsafe {
         let state = &mut *raw;
         state.reset_refresh_timer(state.settings.refresh_minutes.saturating_mul(60_000));
-        state.schedule_update_check(UPDATE_INITIAL_DELAY_MS);
+        if AUTOMATIC_UPDATES_ENABLED {
+            state.schedule_update_check(UPDATE_INITIAL_DELAY_MS);
+        }
         if background {
             let _ = SetTimer(Some(hwnd), TIMER_STARTUP, 30_000, None);
         } else {

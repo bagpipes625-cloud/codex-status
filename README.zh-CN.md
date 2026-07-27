@@ -4,7 +4,7 @@
 
 **在 Windows 托盘里一眼看清 Codex 周剩余额度。**
 
-[English](README.md) · [下载](https://github.com/mmm1h/codex-status/releases/latest) · [反馈问题](https://github.com/mmm1h/codex-status/issues)
+[English](README.md) · [下载](https://github.com/bagpipes625-cloud/codex-status/releases/latest) · [反馈问题](https://github.com/bagpipes625-cloud/codex-status/issues)
 
 </div>
 
@@ -20,7 +20,7 @@ CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标本身�
 - 透明背景、随任务栏明暗切换的 Segoe UI 数字；底部仅用一条细线标记绿色（≥50%）、琥珀色（20–49%）、红色（<20%）或缓存状态。
 - 原生圆角卡片，自动适配浅色、深色、高对比度和多显示器 DPI。
 - 可从托盘菜单选择跟随系统、浅色或深色界面主题。
-- 每天静默检查经过校验的 GitHub Release；有新版时自动替换并重新启动。
+- 从本私有仓库的 GitHub Releases 手动更新；自动版本检查已禁用。
 - 只使用官方 Codex app-server RPC `account/rateLimits/read`，不读取 Token，不访问私有接口。
 - 纯 Win32 事件驱动；没有 Electron、WebView、WPF、WinUI、本地 HTTP 服务或常驻异步运行时。
 - 默认 5 分钟刷新，支持手动刷新、失败退避、安全缓存过期和可选低额度提醒。
@@ -31,7 +31,7 @@ CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标本身�
 
 需要 Windows 10/11 x64，并已安装且登录 [Codex CLI 或 Codex 应用](https://developers.openai.com/codex/cli/)。
 
-1. 从 [Releases](https://github.com/mmm1h/codex-status/releases/latest) 下载当前用户安装包。
+1. 从 [Releases](https://github.com/bagpipes625-cloud/codex-status/releases/latest) 下载当前用户安装包。
 2. 运行安装程序。默认安装到 `%LOCALAPPDATA%\Programs\CodexStatus`，并默认启用开机启动。
 3. 如果 Windows 把新图标放进折叠区，请打开折叠区，把 CodexStatus 拖到可见托盘。图标是否常显由 Windows 和用户控制，应用无法强制固定。
 
@@ -47,7 +47,7 @@ CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标本身�
 
 ## 隐私
 
-CodexStatus 不读取或保存 OAuth Token、邮箱、项目内容、提示词和 app-server 原始响应，也不收集遥测。自动更新最多每天读取一次 `api.github.com` 的公开最新 Release 元数据；只有存在更高的稳定版本时才下载程序，并且必须通过 GitHub 发布的 SHA-256 摘要校验后才会替换当前程序。
+CodexStatus 不读取或保存 OAuth Token、邮箱、项目内容、提示词和 app-server 原始响应，也不收集遥测。此私有版本不会自动检查或下载 Release；更新需从本仓库的 Releases 页面手动安装。
 
 `%LOCALAPPDATA%\CodexStatus` 下只有两个文件：
 

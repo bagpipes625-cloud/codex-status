@@ -21,8 +21,10 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::{PCWSTR, w};
 
-const RELEASE_API: &str = "https://api.github.com/repos/mmm1h/codex-status/releases/latest";
-const RELEASE_ASSET_PREFIX: &str = "https://github.com/mmm1h/codex-status/releases/download/";
+const RELEASE_API: &str =
+    "https://api.github.com/repos/bagpipes625-cloud/codex-status/releases/latest";
+const RELEASE_ASSET_PREFIX: &str =
+    "https://github.com/bagpipes625-cloud/codex-status/releases/download/";
 const MAX_METADATA_BYTES: usize = 512 * 1024;
 const MAX_EXECUTABLE_BYTES: usize = 32 * 1024 * 1024;
 const UPDATE_WAIT_MS: u32 = 30_000;
@@ -379,7 +381,7 @@ mod tests {
             "assets": [{
                 "name": format!("CodexStatus-{tag}-windows-x64.exe"),
                 "browser_download_url": format!(
-                    "https://github.com/mmm1h/codex-status/releases/download/{tag}/CodexStatus-{tag}-windows-x64.exe"
+                    "https://github.com/bagpipes625-cloud/codex-status/releases/download/{tag}/CodexStatus-{tag}-windows-x64.exe"
                 ),
                 "size": 100_000,
                 "digest": format!("sha256:{digest}")
@@ -412,8 +414,8 @@ mod tests {
     #[test]
     fn splits_only_simple_https_urls() {
         assert_eq!(
-            split_https_url("https://api.github.com/repos/mmm1h/codex-status"),
-            Some(("api.github.com", "/repos/mmm1h/codex-status"))
+            split_https_url("https://api.github.com/repos/bagpipes625-cloud/codex-status"),
+            Some(("api.github.com", "/repos/bagpipes625-cloud/codex-status"))
         );
         assert!(split_https_url("http://api.github.com/test").is_none());
         assert!(split_https_url("https://user@api.github.com/test").is_none());

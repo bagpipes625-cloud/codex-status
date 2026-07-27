@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 description = "A lightweight native Windows tray meter for Codex weekly quota"
-repository = "https://github.com/mmm1h/codex-status"
+repository = "https://github.com/bagpipes625-cloud/codex-status"
 readme = "README.md"
 build = "build.rs"
 
