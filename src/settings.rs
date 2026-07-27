@@ -1,7 +1,7 @@
 use crate::model::QuotaSnapshot;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 const APP_DIR: &str = "CodexStatus";
@@ -15,7 +15,6 @@ pub struct Settings {
     pub theme: String,
     pub onboarding_shown: bool,
     pub last_alert_reset: Option<i64>,
-    pub last_update_check: Option<i64>,
 }
 
 impl Default for Settings {
@@ -27,7 +26,6 @@ impl Default for Settings {
             theme: "system".to_owned(),
             onboarding_shown: false,
             last_alert_reset: None,
-            last_update_check: None,
         }
     }
 }
@@ -85,8 +83,13 @@ impl AppStore {
         write_json_atomic(&self.directory.join("snapshot.json"), snapshot)
     }
 
-    pub fn updates_directory(&self) -> PathBuf {
-        self.directory.join("updates")
+    pub fn append_tray_error(&self, entry: &str) -> io::Result<()> {
+        fs::create_dir_all(&self.directory)?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.directory.join("tray-errors.log"))?;
+        writeln!(file, "{entry}")
     }
 }
 

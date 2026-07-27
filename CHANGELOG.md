@@ -2,6 +2,26 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [Unreleased]
+
+## [0.3.0] - 2026-07-27
+
+- Remove the automatic updater, release-check timers, network transport, and update metadata from the installed application.
+- Add a weekly quota depletion forecast with green ample-use and red estimated-depletion indicators.
+- Use Microsoft YaHei UI throughout the panel and distinguish Free, Go, Plus, 5x Pro, and 20x Pro plans.
+- Apply green, yellow, and red remaining-quota thresholds and show an explicit exhausted state.
+- Center the forecast footer and remove the local/cache diagnostic line.
+- Give development, beta, and stable builds independent persistent tray GUIDs; the stable
+  identity is only packaged for the fixed installation path.
+- Keep portable builds path-independent with a constant `uID` under the traditional
+  `HWND + uID` identity instead of reusing the installed product GUID.
+- Keep tray operations on one consistent `NIF_GUID` identity, enforce one instance per
+  channel, recover after Explorer restarts, and degrade without terminating if tray
+  registration fails.
+- Discover Codex Desktop's local app-server executable when the packaged WindowsApps
+  binary cannot be launched by an unpackaged tray process.
+- Fix the installation directory at `F:\CodexStatus` and always register start-with-Windows.
+
 ## [0.2.3] - 2026-07-27
 
 - Generate the Windows manifest and executable version metadata from the Cargo package version so File Explorer reports the installed release correctly.
