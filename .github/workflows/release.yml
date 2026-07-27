@@ -21,16 +21,27 @@ jobs:
           cargo fmt --check
           cargo clippy --locked --all-targets --target x86_64-pc-windows-msvc -- -D warnings
           cargo test --locked --all-targets --target x86_64-pc-windows-msvc
-      - name: Build
-        run: cargo build --locked --release --target x86_64-pc-windows-msvc
+      - name: Build portable executable
+        env:
+          CODEX_STATUS_CHANNEL: portable
+        run: |
+          cargo build --locked --release --target x86_64-pc-windows-msvc
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/codex-status.exe dist/CodexStatus-portable.exe
+      - name: Build installed executable
+        env:
+          CODEX_STATUS_CHANNEL: stable
+        run: |
+          cargo build --locked --release --target x86_64-pc-windows-msvc
+          Copy-Item target/x86_64-pc-windows-msvc/release/codex-status.exe dist/CodexStatus.exe
       - name: Stage portable build
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}".TrimStart("v")
-          New-Item -ItemType Directory -Path dist, dist/portable -Force | Out-Null
-          Copy-Item target/x86_64-pc-windows-msvc/release/codex-status.exe dist/CodexStatus.exe
-          Copy-Item dist/CodexStatus.exe "dist/CodexStatus-v$version-windows-x64.exe"
-          Copy-Item dist/CodexStatus.exe, LICENSE, README.md, README.zh-CN.md dist/portable/
+          New-Item -ItemType Directory -Path dist/portable -Force | Out-Null
+          Copy-Item dist/CodexStatus-portable.exe "dist/CodexStatus-v$version-windows-x64.exe"
+          Copy-Item dist/CodexStatus-portable.exe dist/portable/CodexStatus.exe
+          Copy-Item LICENSE, README.md, README.zh-CN.md dist/portable/
           Compress-Archive -Path dist/portable/* -DestinationPath "dist/CodexStatus-v$version-windows-x64.zip" -CompressionLevel Optimal
       - name: Build installer
         shell: pwsh

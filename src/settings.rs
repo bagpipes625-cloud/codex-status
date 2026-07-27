@@ -1,7 +1,7 @@
 use crate::model::QuotaSnapshot;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 const APP_DIR: &str = "CodexStatus";
@@ -81,6 +81,15 @@ impl AppStore {
 
     pub fn save_snapshot(&self, snapshot: &QuotaSnapshot) -> io::Result<()> {
         write_json_atomic(&self.directory.join("snapshot.json"), snapshot)
+    }
+
+    pub fn append_tray_error(&self, entry: &str) -> io::Result<()> {
+        fs::create_dir_all(&self.directory)?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.directory.join("tray-errors.log"))?;
+        writeln!(file, "{entry}")
     }
 }
 

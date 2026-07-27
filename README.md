@@ -32,7 +32,7 @@ CodexStatus is a tiny native Windows utility. Its notification-area icon is the 
 CodexStatus requires Windows 10/11 x64 and an already installed, signed-in [Codex CLI or Codex app](https://developers.openai.com/codex/cli/).
 
 1. Download the per-user installer from [Releases](https://github.com/bagpipes625-cloud/codex-status/releases/latest).
-2. Run it. The default location is `%LOCALAPPDATA%\Programs\CodexStatus` and start-with-Windows is enabled by default.
+2. Run it. This private build installs to `F:\CodexStatus` and always registers start-with-Windows.
 3. If Windows places the new icon behind the overflow arrow, open that area and drag CodexStatus onto the visible tray. Windows—not applications—controls notification icon visibility.
 
 The installer is not yet code-signed, so Microsoft Defender SmartScreen may show an “unrecognized app” warning. Release assets include SHA-256 checksums. The portable ZIP makes no startup changes; enable startup from the right-click menu if desired.
@@ -51,16 +51,16 @@ The footer extrapolates the average consumption rate observed since the weekly c
 
 CodexStatus never reads or stores your OAuth token, email address, project content, prompts, or raw app-server response. It sends no telemetry or background network requests.
 
-Two files are stored under `%LOCALAPPDATA%\CodexStatus`:
+Two normal state files are stored under `%LOCALAPPDATA%\CodexStatus`:
 
 - `settings.json`: refresh interval, UI language, theme, alert threshold, onboarding state, and alert deduplication state.
 - `snapshot.json`: the latest non-sensitive parsed quota snapshot. It is discarded once its reset time passes.
 
-Normal builds do not write logs. The optional `diagnostics` Cargo feature records only lifecycle stages and filtered error summaries.
+Normal builds do not write activity logs. If Windows rejects a notification icon operation, CodexStatus additionally writes one failure-only `tray-errors.log` containing the operation, release channel, executable path, tray identity, PID, and Win32 error code. The optional `diagnostics` Cargo feature records lifecycle stages and filtered error summaries.
 
 ## Performance
 
-Measured on Windows 11 24H2 x64 with the v0.2.3 release:
+Measured on Windows 11 24H2 x64 with the v0.3.0 release:
 
 | State | CodexStatus working set | CPU | Child processes |
 |---|---:|---:|---:|
@@ -77,10 +77,14 @@ The supported release target is stable Rust with `x86_64-pc-windows-msvc`:
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
+$env:CODEX_STATUS_CHANNEL = "stable"
 cargo build --release --locked
+Remove-Item Env:CODEX_STATUS_CHANNEL
 ```
 
-GitHub Actions builds the portable ZIP and Inno Setup installer for version tags. Local development can also use the gnullvm target; llvm-mingw's `libunwind.dll` is then a development-only runtime dependency. Official release builds use MSVC and are a single executable.
+Development builds default to an isolated development tray GUID. Set `CODEX_STATUS_CHANNEL` to `beta` or `stable` only when packaging that installed channel; each channel also has its own window classes and single-instance mutex. Do not run a stable-channel binary from the build or staging directory—install it first so its persistent GUID is initially registered from the fixed executable path. Portable packages use `CODEX_STATUS_CHANNEL=portable` and the supported `HWND + uID` identity because their executable path is intentionally not fixed.
+
+GitHub Actions builds the stable-channel portable ZIP and Inno Setup installer for version tags. Local development can also use the gnullvm target; llvm-mingw's `libunwind.dll` is then a development-only runtime dependency. Official release builds use MSVC and are a single executable.
 
 ## Design boundaries
 

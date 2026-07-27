@@ -32,7 +32,7 @@ CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标本身�
 需要 Windows 10/11 x64，并已安装且登录 [Codex CLI 或 Codex 应用](https://developers.openai.com/codex/cli/)。
 
 1. 从 [Releases](https://github.com/bagpipes625-cloud/codex-status/releases/latest) 下载当前用户安装包。
-2. 运行安装程序。默认安装到 `%LOCALAPPDATA%\Programs\CodexStatus`，并默认启用开机启动。
+2. 运行安装程序。此私有版本固定安装到 `F:\CodexStatus`，并始终注册开机启动。
 3. 如果 Windows 把新图标放进折叠区，请打开折叠区，把 CodexStatus 拖到可见托盘。图标是否常显由 Windows 和用户控制，应用无法强制固定。
 
 当前安装包尚未代码签名，因此 Microsoft Defender SmartScreen 可能提示“无法识别的应用”。每个 Release 都提供 SHA-256 校验文件。便携 ZIP 默认不会修改开机启动，可从右键菜单自行开启。
@@ -51,16 +51,16 @@ CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标本身�
 
 CodexStatus 不读取或保存 OAuth Token、邮箱、项目内容、提示词和 app-server 原始响应，也不收集遥测或发起后台网络请求。
 
-`%LOCALAPPDATA%\CodexStatus` 下只有两个文件：
+`%LOCALAPPDATA%\CodexStatus` 下通常只有两个状态文件：
 
 - `settings.json`：刷新间隔、界面语言、主题、提醒阈值、首次引导和提醒去重状态。
 - `snapshot.json`：最近一次经过解析的非敏感额度快照；一旦跨过重置时间立即失效。
 
-普通版本不写日志。只有显式启用 Cargo `diagnostics` 特性时，才记录生命周期阶段和过滤后的错误摘要。
+普通版本不写运行日志。只有 Windows 拒绝托盘图标操作时，CodexStatus 才会额外写入一份 `tray-errors.log`，其中仅包含操作名、发布通道、EXE 路径、托盘标识、PID 和 Win32 错误码。显式启用 Cargo `diagnostics` 特性时，还会记录生命周期阶段和过滤后的错误摘要。
 
 ## 性能
 
-在 Windows 11 24H2 x64、v0.2.3 Release 版上的实测：
+在 Windows 11 24H2 x64、v0.3.0 Release 版上的实测：
 
 | 状态 | CodexStatus 工作集 | CPU | 子进程 |
 |---|---:|---:|---:|
@@ -77,10 +77,14 @@ app-server 是 Codex 本身，刷新时会有更大的瞬时占用；完成两�
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
+$env:CODEX_STATUS_CHANNEL = "stable"
 cargo build --release --locked
+Remove-Item Env:CODEX_STATUS_CHANNEL
 ```
 
-GitHub Actions 会为版本标签构建便携 ZIP 和 Inno Setup 安装包。本地也可使用 gnullvm 开发工具链；此时 llvm-mingw 的 `libunwind.dll` 只是本地开发依赖，正式 MSVC Release 是单文件程序。
+开发构建默认使用隔离的开发版托盘 GUID。只有打包相应安装通道时才把 `CODEX_STATUS_CHANNEL` 设为 `beta` 或 `stable`；各通道的窗口类和单实例互斥量也彼此隔离。不要直接从构建或暂存目录运行 stable 通道 EXE，应先安装到固定目录，让该 GUID 首次从正式路径完成注册。便携包使用 `CODEX_STATUS_CHANNEL=portable` 和受支持的 `HWND + uID` 标识，因为它的 EXE 路径本来就不固定。
+
+GitHub Actions 会为版本标签构建 stable 通道的便携 ZIP 和 Inno Setup 安装包。本地也可使用 gnullvm 开发工具链；此时 llvm-mingw 的 `libunwind.dll` 只是本地开发依赖，正式 MSVC Release 是单文件程序。
 
 ## 首版边界
 

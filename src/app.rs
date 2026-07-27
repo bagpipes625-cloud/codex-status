@@ -25,11 +25,13 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::Ime::ImmDisableIME;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+#[cfg(not(codex_status_channel = "portable"))]
+use windows::Win32::UI::Shell::NIF_GUID;
 use windows::Win32::UI::Shell::{
-    NIF_GUID, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO,
-    NIIF_RESPECT_QUIET_TIME, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT,
-    NOTIFYICON_VERSION_4, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect,
-    Shell_NotifyIconW, ShellExecuteW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIIF_RESPECT_QUIET_TIME,
+    NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NOTIFYICON_VERSION_4,
+    NOTIFYICONDATAW, NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect, Shell_NotifyIconW,
+    ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CS_DROPSHADOW, CS_HREDRAW, CS_VREDRAW, CreatePopupMenu, CreateWindowExW,
@@ -44,15 +46,55 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_NULL, WM_PAINT, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
 };
-use windows::core::{GUID, PCWSTR, w};
+#[cfg(not(codex_status_channel = "portable"))]
+use windows::core::GUID;
+use windows::core::{PCWSTR, w};
 
-const MAIN_CLASS: PCWSTR = w!("CodexStatus.MainWindow.v1");
-const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.FlyoutWindow.v1");
-const MUTEX_NAME: PCWSTR = w!("Local\\CodexStatus.4B7D5A91-45A5-4B78-A095-A9B43A2A4F7D");
-// This detached distribution owns a distinct notification-area identity so it
-// cannot collide with an original or stale CodexStatus registration.
-const TRAY_GUID: GUID = GUID::from_u128(0x039ac5a4_ecbd_4e3a_b30b_fdc8f048c1e1);
+const CHANNEL_NAME: &str = env!("CODEX_STATUS_CHANNEL");
 const TRAY_ID: u32 = 1;
+
+#[cfg(codex_status_channel = "stable")]
+const MAIN_CLASS: PCWSTR = w!("CodexStatus.MainWindow.v1");
+#[cfg(codex_status_channel = "stable")]
+const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.FlyoutWindow.v1");
+#[cfg(codex_status_channel = "stable")]
+const MUTEX_NAME: PCWSTR = w!("Local\\CodexStatus.4B7D5A91-45A5-4B78-A095-A9B43A2A4F7D");
+#[cfg(codex_status_channel = "stable")]
+const TRAY_GUID: GUID = GUID::from_u128(0xeab4363d_13a7_45eb_aa46_1b6d4e278d53);
+#[cfg(codex_status_channel = "stable")]
+const TRAY_IDENTITY_TEXT: &str = "GUID eab4363d-13a7-45eb-aa46-1b6d4e278d53";
+
+#[cfg(codex_status_channel = "beta")]
+const MAIN_CLASS: PCWSTR = w!("CodexStatus.Beta.MainWindow.v1");
+#[cfg(codex_status_channel = "beta")]
+const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.Beta.FlyoutWindow.v1");
+#[cfg(codex_status_channel = "beta")]
+const MUTEX_NAME: PCWSTR = w!("Local\\CodexStatus.Beta.C379EB04-3507-4D7C-8911-1ADC3AE077A6");
+#[cfg(codex_status_channel = "beta")]
+const TRAY_GUID: GUID = GUID::from_u128(0xc379eb04_3507_4d7c_8911_1adc3ae077a6);
+#[cfg(codex_status_channel = "beta")]
+const TRAY_IDENTITY_TEXT: &str = "GUID c379eb04-3507-4d7c-8911-1adc3ae077a6";
+
+#[cfg(codex_status_channel = "development")]
+const MAIN_CLASS: PCWSTR = w!("CodexStatus.Development.MainWindow.v1");
+#[cfg(codex_status_channel = "development")]
+const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.Development.FlyoutWindow.v1");
+#[cfg(codex_status_channel = "development")]
+const MUTEX_NAME: PCWSTR =
+    w!("Local\\CodexStatus.Development.3E70297E-FB9B-4F98-AF42-DE19BD4824EC");
+#[cfg(codex_status_channel = "development")]
+const TRAY_GUID: GUID = GUID::from_u128(0x3e70297e_fb9b_4f98_af42_de19bd4824ec);
+#[cfg(codex_status_channel = "development")]
+const TRAY_IDENTITY_TEXT: &str = "GUID 3e70297e-fb9b-4f98-af42-de19bd4824ec";
+
+#[cfg(codex_status_channel = "portable")]
+const MAIN_CLASS: PCWSTR = w!("CodexStatus.Portable.MainWindow.v1");
+#[cfg(codex_status_channel = "portable")]
+const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.Portable.FlyoutWindow.v1");
+#[cfg(codex_status_channel = "portable")]
+const MUTEX_NAME: PCWSTR = w!("Local\\CodexStatus.Portable.0D826064-8DC6-4308-BED6-7CB279AE4C9D");
+#[cfg(codex_status_channel = "portable")]
+const TRAY_IDENTITY_TEXT: &str = "HWND + uID 1";
 
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_REFRESH_COMPLETE: u32 = WM_APP + 2;
@@ -123,6 +165,7 @@ struct AppState {
     client: AppServerClient,
     tray_icon: Option<OwnedIcon>,
     tray_added: bool,
+    tray_failure_logged: bool,
     refreshing: bool,
     refresh_pending: bool,
     failures: u8,
@@ -149,9 +192,11 @@ pub fn run() -> Result<(), AppError> {
     let mutex_was_existing = unsafe { GetLastError() == ERROR_ALREADY_EXISTS };
     diagnostic("run:mutex");
     if mutex_was_existing {
-        if let Ok(existing) = unsafe { FindWindowW(MAIN_CLASS, PCWSTR::null()) } {
-            unsafe {
-                let _ = PostMessageW(Some(existing), WM_SHOW_EXISTING, WPARAM(0), LPARAM(0));
+        if !background {
+            if let Ok(existing) = unsafe { FindWindowW(MAIN_CLASS, PCWSTR::null()) } {
+                unsafe {
+                    let _ = PostMessageW(Some(existing), WM_SHOW_EXISTING, WPARAM(0), LPARAM(0));
+                }
             }
         }
         return Ok(());
@@ -214,6 +259,7 @@ pub fn run() -> Result<(), AppError> {
         client: AppServerClient::new(),
         tray_icon: None,
         tray_added: false,
+        tray_failure_logged: false,
         refreshing: false,
         refresh_pending: false,
         failures: 0,
@@ -225,20 +271,13 @@ pub fn run() -> Result<(), AppError> {
     STATE.with(|slot| slot.set(raw));
     diagnostic("run:state");
 
-    let initialization = unsafe {
+    let tray_ready = unsafe {
         let state = &mut *raw;
         ui::configure_flyout(state.flyout, state.theme);
         diagnostic("run:dwm");
         state.update_tray(true)
     };
     diagnostic("run:tray-returned");
-    if let Err(error) = initialization {
-        STATE.with(|slot| slot.set(ptr::null_mut()));
-        unsafe {
-            drop(Box::from_raw(raw));
-        }
-        return Err(error.into());
-    }
 
     unsafe {
         let state = &mut *raw;
@@ -247,6 +286,9 @@ pub fn run() -> Result<(), AppError> {
             let _ = SetTimer(Some(hwnd), TIMER_STARTUP, 30_000, None);
         } else {
             state.start_refresh(false);
+            if !tray_ready {
+                state.show_flyout();
+            }
         }
     }
     diagnostic("run:message-loop");
@@ -558,53 +600,77 @@ impl AppState {
         }
     }
 
-    fn update_tray(&mut self, force_add: bool) -> windows::core::Result<()> {
+    fn update_tray(&mut self, force_add: bool) -> bool {
         diagnostic("tray:render");
         let dpi = unsafe { GetDpiForSystem().max(96) };
         let size = unsafe { GetSystemMetricsForDpi(SM_CXSMICON, dpi).max(16) as u32 };
-        let icon = create_icon(
+        let icon = match create_icon(
             self.display.weekly_percent(),
             tone_for(&self.display),
             size,
             self.theme.high_contrast,
             self.theme.tray_dark,
-        )?;
+        ) {
+            Ok(icon) => icon,
+            Err(error) => {
+                self.tray_added = false;
+                self.record_tray_failure("render", error.code().0 as u32, &error.to_string());
+                return false;
+            }
+        };
         let mut data = self.notify_data();
-        data.uFlags = NIF_GUID | NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+        data.uFlags |= NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
         data.uCallbackMessage = WM_TRAY;
         data.hIcon = icon.handle();
         copy_utf16(&mut data.szTip, &ui::tooltip(&self.display, self.locale));
         let add = force_add || !self.tray_added;
         let operation = if add { NIM_ADD } else { NIM_MODIFY };
         diagnostic(if add { "tray:add" } else { "tray:modify" });
+        unsafe {
+            SetLastError(WIN32_ERROR(0));
+        }
         let mut succeeded = unsafe { Shell_NotifyIconW(operation, &data) }.as_bool();
         if add && !succeeded {
-            // A GUID identifies the icon independently of its old HWND. Rebind
-            // an existing Explorer entry to this instance before trying a
-            // delete-and-add recovery.
-            diagnostic("tray:reuse-existing");
-            succeeded = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) }.as_bool();
-        }
-        if add && !succeeded {
-            // Explorer can retain a GUID-backed icon briefly after an unclean exit.
-            // Remove that stale registration and retry once while this instance
-            // still owns the single-instance mutex.
-            diagnostic("tray:replace-stale");
-            let stale = self.notify_data();
-            let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &stale) };
+            // An abnormal termination can leave the old icon active briefly even though this
+            // channel's single-instance mutex is now unowned. Use the same tray identity for
+            // deletion and addition; a GUID bound to a different path remains protected.
+            diagnostic("tray:recover-after-unclean-exit");
+            let old = self.notify_data();
+            let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &old) };
+            unsafe {
+                SetLastError(WIN32_ERROR(0));
+            }
             succeeded = unsafe { Shell_NotifyIconW(NIM_ADD, &data) }.as_bool();
         }
         if !succeeded {
+            let last_error = unsafe { GetLastError() };
+            self.tray_added = false;
             diagnostic("tray:failed");
-            return Err(windows::core::Error::from_thread());
+            self.record_tray_failure(
+                if add { "NIM_ADD" } else { "NIM_MODIFY" },
+                last_error.0,
+                "Shell_NotifyIconW returned FALSE",
+            );
+            return false;
         }
         diagnostic("tray:ok");
+        self.tray_failure_logged = false;
         self.tray_icon = Some(icon);
         if add {
             self.tray_added = true;
             let mut version = self.notify_data();
             version.Anonymous.uVersion = NOTIFYICON_VERSION_4;
-            let _ = unsafe { Shell_NotifyIconW(NIM_SETVERSION, &version) };
+            unsafe {
+                SetLastError(WIN32_ERROR(0));
+            }
+            if !unsafe { Shell_NotifyIconW(NIM_SETVERSION, &version) }.as_bool() {
+                let last_error = unsafe { GetLastError() };
+                self.record_tray_failure(
+                    "NIM_SETVERSION",
+                    last_error.0,
+                    "Shell_NotifyIconW returned FALSE",
+                );
+            }
             if !self.settings.onboarding_shown {
                 self.show_balloon(
                     self.locale.text("CodexStatus is ready", "CodexStatus 已就绪"),
@@ -617,18 +683,50 @@ impl AppState {
                 let _ = self.store.save_settings(&self.settings);
             }
         }
-        Ok(())
+        true
     }
 
     fn notify_data(&self) -> NOTIFYICONDATAW {
-        NOTIFYICONDATAW {
-            cbSize: size_of::<NOTIFYICONDATAW>() as u32,
-            hWnd: self.hwnd,
-            uID: TRAY_ID,
-            guidItem: TRAY_GUID,
-            uFlags: NIF_GUID,
-            ..Default::default()
+        #[cfg(codex_status_channel = "portable")]
+        {
+            NOTIFYICONDATAW {
+                cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+                hWnd: self.hwnd,
+                uID: TRAY_ID,
+                ..Default::default()
+            }
         }
+        #[cfg(not(codex_status_channel = "portable"))]
+        {
+            NOTIFYICONDATAW {
+                cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+                hWnd: self.hwnd,
+                uID: TRAY_ID,
+                guidItem: TRAY_GUID,
+                uFlags: NIF_GUID,
+                ..Default::default()
+            }
+        }
+    }
+
+    fn record_tray_failure(&mut self, operation: &str, win32_error: u32, detail: &str) {
+        if self.tray_failure_logged {
+            return;
+        }
+        let executable = std::env::current_exe()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| "<unavailable>".to_owned());
+        let entry = format!(
+            "{} channel={} operation={} exe={executable:?} identity={} pid={} win32_error={} detail={detail:?}",
+            Utc::now().to_rfc3339(),
+            CHANNEL_NAME,
+            operation,
+            TRAY_IDENTITY_TEXT,
+            std::process::id(),
+            win32_error,
+        );
+        let _ = self.store.append_tray_error(&entry);
+        self.tray_failure_logged = true;
     }
 
     fn show_balloon(&self, title: &str, body: &str) {
@@ -636,7 +734,7 @@ impl AppState {
             return;
         }
         let mut data = self.notify_data();
-        data.uFlags = NIF_GUID | NIF_INFO;
+        data.uFlags |= NIF_INFO;
         data.dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
         copy_utf16(&mut data.szInfoTitle, title);
         copy_utf16(&mut data.szInfo, body);
@@ -794,6 +892,14 @@ impl AppState {
     }
 
     fn tray_rect(&self) -> Option<RECT> {
+        #[cfg(codex_status_channel = "portable")]
+        let identifier = NOTIFYICONIDENTIFIER {
+            cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
+            hWnd: self.hwnd,
+            uID: TRAY_ID,
+            ..Default::default()
+        };
+        #[cfg(not(codex_status_channel = "portable"))]
         let identifier = NOTIFYICONIDENTIFIER {
             cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
             hWnd: self.hwnd,

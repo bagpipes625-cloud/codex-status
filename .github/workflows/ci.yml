@@ -24,4 +24,6 @@ jobs:
       - name: Test
         run: cargo test --locked --all-targets --target x86_64-pc-windows-msvc
       - name: Release build
+        env:
+          CODEX_STATUS_CHANNEL: stable
         run: cargo build --locked --release --target x86_64-pc-windows-msvc

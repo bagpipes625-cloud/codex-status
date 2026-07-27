@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.2.3"
+  #define AppVersion "0.3.0"
 #endif
 
 #define AppName "CodexStatus"
@@ -14,7 +14,9 @@ AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}
 AppSupportURL={#AppURL}/issues
-DefaultDirName={localappdata}\Programs\CodexStatus
+DefaultDirName=F:\CodexStatus
+DisableDirPage=yes
+UsePreviousAppDir=no
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
@@ -34,15 +36,12 @@ MinVersion=10.0.17763
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
-[Tasks]
-Name: "startup"; Description: "Start CodexStatus with Windows"; GroupDescription: "Startup:"; Flags: checkedonce
-
 [Files]
 Source: "..\dist\CodexStatus.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "CodexStatus"; ValueData: """{app}\{#AppExeName}"" --background"; Tasks: startup; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "CodexStatus"; ValueData: """{app}\{#AppExeName}"" --background"; Flags: uninsdeletevalue
 
 [Icons]
 Name: "{group}\CodexStatus"; Filename: "{app}\{#AppExeName}"
