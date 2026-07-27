@@ -4,6 +4,11 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-27
+
+- Format Chinese reset timestamps as `8月2日 11:00` instead of `08/02 11:00`.
+- Increase the reset timestamp and quota forecast typography for easier reading.
+
 ## [0.3.1] - 2026-07-27
 
 - Restore the installation-directory page so the destination can be selected on every

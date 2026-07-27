@@ -358,7 +358,7 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
                 right: width - scale(30, dpi),
                 bottom: scale(132, dpi),
             },
-            scale(11, dpi),
+            scale(12, dpi),
             FW_NORMAL.0 as i32,
             theme.muted,
         );
@@ -465,7 +465,7 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
                     right: width - scale(18, dpi),
                     bottom: height - scale(7, dpi),
                 },
-                scale(11, dpi),
+                scale(13, dpi),
                 FW_SEMIBOLD.0 as i32,
                 projection_color(projection.ample, theme.high_contrast),
             );
@@ -674,7 +674,14 @@ fn reset_details(window: &QuotaWindow, locale: Locale) -> (String, String) {
         format!("{hours}h {minutes}m")
     };
     let local_time = DateTime::from_timestamp(reset, 0)
-        .map(|time| time.with_timezone(&Local).format("%m/%d %H:%M").to_string())
+        .map(|time| {
+            let time = time.with_timezone(&Local);
+            if locale == Locale::Chinese {
+                time.format("%-m月%-d日 %H:%M").to_string()
+            } else {
+                time.format("%m/%d %H:%M").to_string()
+            }
+        })
         .unwrap_or_else(|| "--".to_owned());
     (countdown, local_time)
 }
@@ -899,6 +906,22 @@ mod tests {
         };
         let (countdown, _) = reset_details(&window, Locale::English);
         assert!(!countdown.contains('-'));
+    }
+
+    #[test]
+    fn formats_localized_reset_timestamp_without_leading_zeroes_in_chinese() {
+        use chrono::TimeZone;
+
+        let reset = Local.with_ymd_and_hms(2026, 8, 2, 11, 0, 0).single().unwrap().timestamp();
+        let window = QuotaWindow {
+            used_percent: 0.0,
+            remaining_percent: 100.0,
+            window_minutes: 10_080,
+            resets_at: Some(reset),
+        };
+
+        assert_eq!(reset_details(&window, Locale::Chinese).1, "8月2日 11:00");
+        assert_eq!(reset_details(&window, Locale::English).1, "08/02 11:00");
     }
 
     #[test]
