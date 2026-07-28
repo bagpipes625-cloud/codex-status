@@ -11,6 +11,8 @@ All notable changes to CodexStatus are documented here.
   Microsoft YaHei UI typography, colors, labels, and information hierarchy.
 - Keep the previous double-buffered GDI renderer as an automatic compatibility
   fallback and release Direct2D resources when the flyout is hidden.
+- Vertically stretch only the three-digit `100` tray label so it occupies the
+  same width and height as the unchanged two-digit labels.
 
 ## [0.3.6] - 2026-07-27
 
