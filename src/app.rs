@@ -411,6 +411,7 @@ unsafe extern "system" fn main_window_proc(
                     return LRESULT(0);
                 }
                 WM_SETTINGCHANGE | WM_DISPLAYCHANGE => {
+                    ui::release_card_resources();
                     state.theme = ui::detect_theme(&state.settings.theme);
                     ui::configure_flyout(state.flyout, state.theme);
                     let _ = state.update_tray(false);
@@ -480,6 +481,7 @@ unsafe extern "system" fn flyout_window_proc(
                 return LRESULT(0);
             }
             WM_DPICHANGED => {
+                ui::release_card_resources();
                 let suggested = &*(lparam.0 as *const RECT);
                 let _ = SetWindowPos(
                     hwnd,
@@ -816,6 +818,7 @@ impl AppState {
             let _ = KillTimer(Some(self.hwnd), TIMER_CARD);
             let _ = ShowWindow(self.flyout, SW_HIDE);
         }
+        ui::release_card_resources();
     }
 
     fn handle_flyout_inactive(&mut self) {

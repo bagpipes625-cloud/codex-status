@@ -4,6 +4,14 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-28
+
+- Replace the flyout's primary GDI renderer with the upstream Direct2D and
+  DirectWrite architecture while retaining the existing compact layout,
+  Microsoft YaHei UI typography, colors, labels, and information hierarchy.
+- Keep the previous double-buffered GDI renderer as an automatic compatibility
+  fallback and release Direct2D resources when the flyout is hidden.
+
 ## [0.3.6] - 2026-07-27
 
 - Display the nearest available reset credit's expiration time without adding
