@@ -137,7 +137,7 @@ fn render_rgba(
     let text = foreground(dark_taskbar, tone.is_muted() && !high_contrast);
 
     if let Some(mask) = rasterize_label(&label, size) {
-        composite_mask(&mut pixels, size, &mask, text);
+        composite_mask(&mut pixels, size, &mask, text, label.chars().count() == 3);
     } else {
         draw_fallback_label(&mut pixels, size, &label, text);
     }
@@ -313,12 +313,27 @@ fn crop_grayscale(source: &[u8], width: usize, height: usize) -> Option<GrayMask
     Some(GrayMask { pixels, width: cropped_width, height: cropped_height })
 }
 
-fn composite_mask(pixels: &mut [[u8; 4]], size: u32, mask: &GrayMask, color: [u8; 4]) {
+fn composite_mask(
+    pixels: &mut [[u8; 4]],
+    size: u32,
+    mask: &GrayMask,
+    color: [u8; 4],
+    stretch_three_digits: bool,
+) {
     let max_width = size.saturating_sub(2) as usize;
     let max_height = size.saturating_sub(3) as usize;
     let width_limited_height = max_width * mask.height / mask.width.max(1);
-    let target_height = max_height.min(width_limited_height.max(1));
-    let target_width = (target_height * mask.width / mask.height.max(1)).clamp(1, max_width);
+    let aspect_height = max_height.min(width_limited_height.max(1));
+    let target_width = (aspect_height * mask.width / mask.height.max(1)).clamp(1, max_width);
+    // Three digits are width-bound and otherwise become visibly shorter than
+    // the established two-digit tray label. Stretch only the vertical sampling
+    // axis by the 3:2 digit-count ratio; the two-digit path remains bit-for-bit
+    // unchanged.
+    let target_height = if stretch_three_digits {
+        max_height.min(aspect_height.saturating_mul(3).div_ceil(2))
+    } else {
+        aspect_height
+    };
     let origin_x = (size as usize - target_width) / 2;
     let origin_y = (max_height.saturating_sub(target_height)) / 2;
 
@@ -449,6 +464,32 @@ mod tests {
         let right = visible.iter().map(|(index, _)| index % 16).max().unwrap();
         assert!(right - left + 1 >= 12);
         assert!(pixels.iter().filter(|pixel| pixel[3] == 0).count() > 16 * 8);
+    }
+
+    #[test]
+    fn three_digit_value_matches_two_digit_fill_without_changing_two_digit_layout() {
+        fn text_bounds(pixels: &[[u8; 4]], size: usize) -> (usize, usize) {
+            let visible: Vec<_> = pixels[..(size - 2) * size]
+                .iter()
+                .enumerate()
+                .filter(|(_, pixel)| pixel[3] > 20)
+                .collect();
+            let left = visible.iter().map(|(index, _)| index % size).min().unwrap();
+            let right = visible.iter().map(|(index, _)| index % size).max().unwrap();
+            let top = visible.iter().map(|(index, _)| index / size).min().unwrap();
+            let bottom = visible.iter().map(|(index, _)| index / size).max().unwrap();
+            (right - left + 1, bottom - top + 1)
+        }
+
+        for size in [16_usize, 20, 24, 32] {
+            let two = render_rgba(Some(87), IconTone::Healthy, size as u32, false, false);
+            let three = render_rgba(Some(100), IconTone::Healthy, size as u32, false, false);
+            let (two_width, two_height) = text_bounds(&two, size);
+            let (three_width, three_height) = text_bounds(&three, size);
+
+            assert!(three_width.abs_diff(two_width) <= 1, "size={size}");
+            assert!(three_height.abs_diff(two_height) <= 1, "size={size}");
+        }
     }
 
     #[test]

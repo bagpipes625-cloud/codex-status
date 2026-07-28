@@ -4,6 +4,11 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-07-28
+
+- Vertically stretch only the three-digit `100` tray label so it occupies the
+  same width and height as the unchanged two-digit labels.
+
 ## [0.3.6] - 2026-07-27
 
 - Display the nearest available reset credit's expiration time without adding
