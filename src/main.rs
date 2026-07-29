@@ -1,14 +1,7 @@
 #![cfg(windows)]
 #![cfg_attr(not(feature = "diagnostics"), windows_subsystem = "windows")]
 
-mod app;
-mod app_server;
-mod icon;
-mod model;
-mod settings;
-mod startup;
-mod ui;
-mod updater;
+use codex_status::app;
 
 fn main() {
     #[cfg(feature = "diagnostics")]
@@ -17,6 +10,6 @@ fn main() {
         #[cfg(feature = "diagnostics")]
         eprintln!("{error}");
         #[cfg(not(feature = "diagnostics"))]
-        ui::show_fatal_error(&error.to_string());
+        codex_status::ui::show_fatal_error(&error.to_string());
     }
 }

@@ -2,7 +2,13 @@ use crate::model::{QuotaKind, QuotaSnapshot};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Write};
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use windows::Win32::Storage::FileSystem::{
+    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, REPLACEFILE_WRITE_THROUGH,
+    ReplaceFileW,
+};
+use windows::core::PCWSTR;
 
 const APP_DIR: &str = "CodexStatus";
 
@@ -86,7 +92,7 @@ impl AppStore {
     }
 
     pub fn updates_directory(&self) -> PathBuf {
-        self.directory.join("updates")
+        self.directory.join("updates").join(env!("CODEX_STATUS_CHANNEL"))
     }
 
     pub fn append_tray_error(&self, entry: &str) -> io::Result<()> {
@@ -111,10 +117,36 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     let temporary = path.with_extension("tmp");
     let bytes = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
     fs::write(&temporary, bytes)?;
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
-    fs::rename(temporary, path)
+    replace_file(&temporary, path)
+}
+
+fn replace_file(temporary: &Path, destination: &Path) -> io::Result<()> {
+    let destination_exists = destination.exists();
+    let temporary = wide0(temporary);
+    let destination = wide0(destination);
+    let result = unsafe {
+        if destination_exists {
+            ReplaceFileW(
+                PCWSTR(destination.as_ptr()),
+                PCWSTR(temporary.as_ptr()),
+                PCWSTR::null(),
+                REPLACEFILE_WRITE_THROUGH,
+                None,
+                None,
+            )
+        } else {
+            MoveFileExW(
+                PCWSTR(temporary.as_ptr()),
+                PCWSTR(destination.as_ptr()),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        }
+    };
+    result.map_err(|_| io::Error::last_os_error())
+}
+
+fn wide0(path: &Path) -> Vec<u16> {
+    path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
 }
 
 #[cfg(test)]

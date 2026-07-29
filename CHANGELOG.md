@@ -4,6 +4,37 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-30
+
+- Replace the single primary quota panel with selectable five-hour and weekly
+  cards that remain visible side by side.
+- Show actual remaining quota on each outer gauge and time-paced remaining quota
+  on a neutral inner gauge, while preserving the green, amber, and red thresholds.
+- Move plan and reset-credit details into an equal two-column footer and remove
+  the obsolete weekly depletion forecast.
+- Render the flyout with a reusable Direct2D/DirectWrite HWND target for smooth
+  gauges and consistent text on Windows 10, while retaining GDI as a fallback.
+- Add a Windows 10 rounded window region and release all renderer resources plus
+  trim the working set shortly after the flyout is hidden.
+- Raise the three content cards by eight pixels to tighten the header gap and
+  balance the bottom margin against the sixteen-pixel side margins.
+- Adapt to accounts that expose only one valid quota window with a compact
+  336-by-284 flyout: preserve the quota card geometry and stack plan and reset
+  credits in the narrower right-hand card.
+- Hide quota-switch controls when only one quota is available and restore them
+  automatically when both quota windows return.
+- Make single-window fallback symmetric: both the tray number and its two-pixel
+  status rule follow whichever quota is available, while dual-window mode keeps
+  the number on the selected quota and the rule on the other quota.
+- Make low-quota alerts follow the selected window or the only available window,
+  and trigger strictly below the configured threshold.
+- Bound app-server reader cleanup after closing the complete Windows Job tree,
+  atomically replace settings and snapshots, and validate startup entries against
+  the current executable.
+- Isolate startup registry values by release channel, support resource builds
+  from Unicode repository paths, and reject release tags that disagree with the
+  package version.
+
 ## [0.4.4] - 2026-07-29
 
 - Make the primary quota card clickable so users can switch between the five-hour

@@ -22,6 +22,13 @@ impl QuotaKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaAvailability {
+    None,
+    Single(QuotaKind),
+    Both,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaWindow {
@@ -42,52 +49,6 @@ impl QuotaWindow {
             None => now.saturating_sub(fetched_at) < 15 * 60,
         }
     }
-
-    fn usage_projection(&self, observed_at: i64, now: i64) -> Option<UsageProjection> {
-        if !self.used_percent.is_finite() {
-            return None;
-        }
-        let used_percent = self.used_percent.clamp(0.0, 100.0);
-        if used_percent >= 100.0 {
-            return Some(UsageProjection::Exhausted);
-        }
-
-        let reset = self.resets_at?;
-        if reset <= observed_at || reset <= now {
-            return None;
-        }
-        let window_seconds = i64::try_from(self.window_minutes.checked_mul(60)?).ok()?;
-        let cycle_started_at = reset.checked_sub(window_seconds)?;
-        let elapsed_at_observation = observed_at.checked_sub(cycle_started_at)?;
-        if elapsed_at_observation <= 0 {
-            return None;
-        }
-
-        if used_percent <= f64::EPSILON {
-            return Some(UsageProjection::Ample);
-        }
-
-        let remaining_percent = 100.0 - used_percent;
-        let seconds_after_observation =
-            elapsed_at_observation as f64 * remaining_percent / used_percent;
-        if !seconds_after_observation.is_finite() {
-            return None;
-        }
-        let projected_depletion_at = observed_at as f64 + seconds_after_observation;
-        if projected_depletion_at >= reset as f64 {
-            return Some(UsageProjection::Ample);
-        }
-
-        let seconds = (projected_depletion_at - now as f64).ceil().max(0.0) as i64;
-        Some(UsageProjection::DepletesIn { seconds })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UsageProjection {
-    Ample,
-    Exhausted,
-    DepletesIn { seconds: i64 },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -120,10 +81,6 @@ impl QuotaSnapshot {
             QuotaKind::FiveHour => self.session.as_ref(),
             QuotaKind::Weekly => self.weekly.as_ref(),
         }
-    }
-
-    pub fn usage_projection(&self, kind: QuotaKind, now: i64) -> Option<UsageProjection> {
-        self.quota_window(kind)?.usage_projection(self.fetched_at, now)
     }
 }
 
@@ -159,14 +116,22 @@ impl DisplayState {
         self.quota_window(kind).map(QuotaWindow::display_percent)
     }
 
+    pub fn quota_availability(&self) -> QuotaAvailability {
+        match (
+            self.quota_window(QuotaKind::FiveHour).is_some(),
+            self.quota_window(QuotaKind::Weekly).is_some(),
+        ) {
+            (false, false) => QuotaAvailability::None,
+            (true, false) => QuotaAvailability::Single(QuotaKind::FiveHour),
+            (false, true) => QuotaAvailability::Single(QuotaKind::Weekly),
+            (true, true) => QuotaAvailability::Both,
+        }
+    }
+
     pub fn resolved_quota_kind(&self, preferred: QuotaKind) -> QuotaKind {
-        if preferred == QuotaKind::FiveHour
-            && self.quota_window(QuotaKind::FiveHour).is_none()
-            && self.quota_window(QuotaKind::Weekly).is_some()
-        {
-            QuotaKind::Weekly
-        } else {
-            preferred
+        match self.quota_availability() {
+            QuotaAvailability::Single(kind) => kind,
+            QuotaAvailability::None | QuotaAvailability::Both => preferred,
         }
     }
 
@@ -407,8 +372,30 @@ mod tests {
         let state = DisplayState::live(snapshot);
 
         assert_eq!(state.resolved_quota_kind(QuotaKind::FiveHour), QuotaKind::Weekly);
+        assert_eq!(state.quota_availability(), QuotaAvailability::Single(QuotaKind::Weekly));
         assert_eq!(state.quota_percent(QuotaKind::Weekly), Some(75));
         assert_eq!(state.quota_percent(QuotaKind::FiveHour), None);
+    }
+
+    #[test]
+    fn weekly_preference_falls_back_to_five_hour_without_changing_the_preference() {
+        let snapshot = QuotaSnapshot {
+            weekly: None,
+            session: Some(QuotaWindow {
+                used_percent: 60.0,
+                remaining_percent: 40.0,
+                window_minutes: SESSION_MINUTES,
+                resets_at: Some(i64::MAX),
+            }),
+            account: AccountSummary::default(),
+            fetched_at: 0,
+        };
+        let state = DisplayState::live(snapshot);
+
+        assert_eq!(state.resolved_quota_kind(QuotaKind::Weekly), QuotaKind::FiveHour);
+        assert_eq!(state.quota_availability(), QuotaAvailability::Single(QuotaKind::FiveHour));
+        assert_eq!(state.quota_percent(QuotaKind::FiveHour), Some(40));
+        assert_eq!(state.quota_percent(QuotaKind::Weekly), None);
     }
 
     #[test]
@@ -457,6 +444,7 @@ mod tests {
         let state = DisplayState::live(snapshot);
 
         assert_eq!(state.resolved_quota_kind(QuotaKind::Weekly), QuotaKind::Weekly);
+        assert_eq!(state.quota_availability(), QuotaAvailability::Both);
         assert_eq!(state.quota_percent(QuotaKind::Weekly), Some(75));
         assert_eq!(state.quota_percent(QuotaKind::FiveHour), Some(40));
     }
@@ -518,87 +506,5 @@ mod tests {
         let snapshot = parse_snapshot(&account(), &rate, 100).unwrap();
         assert!(snapshot.weekly.is_none());
         assert!(snapshot.session.is_none());
-    }
-
-    fn weekly_snapshot(
-        used_percent: f64,
-        fetched_at: i64,
-        resets_at: Option<i64>,
-    ) -> QuotaSnapshot {
-        QuotaSnapshot {
-            weekly: Some(QuotaWindow {
-                used_percent,
-                remaining_percent: (100.0 - used_percent).clamp(0.0, 100.0),
-                window_minutes: WEEK_MINUTES,
-                resets_at,
-            }),
-            session: None,
-            account: AccountSummary::default(),
-            fetched_at,
-        }
-    }
-
-    #[test]
-    fn projects_ample_usage_when_average_rate_outlasts_reset() {
-        let reset = WEEK_MINUTES as i64 * 60;
-        let fetched_at = 24 * 60 * 60;
-        let snapshot = weekly_snapshot(10.0, fetched_at, Some(reset));
-        assert_eq!(
-            snapshot.usage_projection(QuotaKind::Weekly, fetched_at),
-            Some(UsageProjection::Ample)
-        );
-    }
-
-    #[test]
-    fn projects_depletion_from_observed_cycle_rate() {
-        let reset = WEEK_MINUTES as i64 * 60;
-        let fetched_at = 24 * 60 * 60;
-        let snapshot = weekly_snapshot(50.0, fetched_at, Some(reset));
-        assert_eq!(
-            snapshot.usage_projection(QuotaKind::Weekly, fetched_at),
-            Some(UsageProjection::DepletesIn { seconds: 24 * 60 * 60 })
-        );
-        assert_eq!(
-            snapshot.usage_projection(QuotaKind::Weekly, fetched_at + 60 * 60),
-            Some(UsageProjection::DepletesIn { seconds: 23 * 60 * 60 })
-        );
-    }
-
-    #[test]
-    fn treats_zero_usage_as_ample_and_full_usage_as_exhausted() {
-        let reset = WEEK_MINUTES as i64 * 60;
-        let fetched_at = 24 * 60 * 60;
-        assert_eq!(
-            weekly_snapshot(0.0, fetched_at, Some(reset))
-                .usage_projection(QuotaKind::Weekly, fetched_at),
-            Some(UsageProjection::Ample)
-        );
-        assert_eq!(
-            weekly_snapshot(100.0, fetched_at, Some(reset))
-                .usage_projection(QuotaKind::Weekly, fetched_at),
-            Some(UsageProjection::Exhausted)
-        );
-    }
-
-    #[test]
-    fn reports_exhausted_even_without_a_reset_timestamp() {
-        assert_eq!(
-            weekly_snapshot(100.0, 100, None).usage_projection(QuotaKind::Weekly, 100),
-            Some(UsageProjection::Exhausted)
-        );
-    }
-
-    #[test]
-    fn omits_projection_without_a_trustworthy_active_cycle() {
-        let reset = WEEK_MINUTES as i64 * 60;
-        assert_eq!(weekly_snapshot(10.0, 100, None).usage_projection(QuotaKind::Weekly, 100), None);
-        assert_eq!(
-            weekly_snapshot(10.0, 0, Some(reset)).usage_projection(QuotaKind::Weekly, 0),
-            None
-        );
-        assert_eq!(
-            weekly_snapshot(10.0, reset, Some(reset)).usage_projection(QuotaKind::Weekly, reset),
-            None
-        );
     }
 }

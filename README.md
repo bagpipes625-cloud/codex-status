@@ -12,7 +12,7 @@
 |:--:|:--:|
 | ![CodexStatus light quota flyout](assets/screenshots/codexstatus-light.png) | ![CodexStatus dark quota flyout](assets/screenshots/codexstatus-dark.png) |
 
-CodexStatus is a tiny native Windows utility. Its notification-area icon is the selected five-hour or weekly quota—`0` to `100`, or `--` when unavailable. The two-pixel rule tracks the other quota window. Click it for both reset timings, plan information, and refresh status.
+CodexStatus is a tiny native Windows utility. Its notification-area icon is the selected five-hour or weekly quota—`0` to `100`, or `--` when unavailable. With both windows available, the two-pixel rule tracks the other quota. Click it for selectable side-by-side quota gauges, both reset timings, plan information, and refresh status. If Codex exposes only one quota window, the flyout automatically switches to a compact single-gauge layout.
 
 This repository is a community-maintained variant derived from
 [mmm1h/codex-status](https://github.com/mmm1h/codex-status). It retains the
@@ -21,13 +21,21 @@ line and product decisions.
 
 ## Highlights
 
-- Five-hour or weekly remaining quota selectable directly from the tray menu.
-- Transparent, theme-aware Segoe UI digits with a restrained green (≥50%), amber (20–49%), red (<20%), or muted status rule.
-- Native rounded flyout that follows light, dark, high-contrast, and per-monitor DPI settings.
+- Five-hour and weekly quota cards remain visible side by side and can be selected
+  directly in the flyout or from the tray menu when both are available. Accounts
+  exposing only one quota get a compact layout without redundant switch controls.
+- Each card combines an outer actual-remaining gauge with a neutral inner
+  time-paced remaining gauge, making headroom visible without another request.
+- Theme-aware Microsoft YaHei UI text with restrained green (≥50%),
+  amber (20–49%), and red (<20%) quota states.
+- Direct2D/DirectWrite rounded flyout with antialiased gauges, consistent text,
+  GDI fallback, and light, dark, high-contrast, and per-monitor DPI support.
 - System, light, and dark flyout themes selectable from the tray menu.
-- Weekly depletion forecast based on the current cycle's elapsed time and used quota.
 - Official Codex app-server RPC: `account/rateLimits/read`; no token scraping and no private endpoints.
 - Event-driven Win32 process with no Electron, WebView, WPF, WinUI, local HTTP server, or resident async runtime.
+- The HWND-sized renderer is released when the flyout closes; after a short
+  grace period the remaining Direct2D resources are dropped and the idle working
+  set is trimmed.
 - Five-minute default refresh, manual refresh, bounded failure backoff, safe cache expiry, and optional low-quota alerts.
 - User-initiated updates from this repository's GitHub Releases, with channel-specific assets and SHA-256 verification.
 - Single instance, Explorer-restart recovery, multi-monitor placement, and optional start with Windows.
@@ -46,13 +54,16 @@ The installer is not yet code-signed, so Microsoft Defender SmartScreen may show
 
 ## Use
 
-- **Left-click:** open or close the quota card; click the large quota panel to switch between the five-hour and weekly views.
+- **Left-click:** open or close the quota card; when both quotas are available, click either card to select what the tray number displays.
 - **Right-click:** refresh now, open the Codex usage page, choose a 1/5/15-minute interval, configure a low-quota alert, select a theme, toggle startup, check for updates, or exit.
-- **Tray label:** the selected five-hour or weekly remaining percentage, rounded to the nearest whole number; when five-hour data is unavailable, both the label and status rule fall back to weekly quota.
+- **Tray label:** the selected five-hour or weekly remaining percentage, rounded to the nearest whole number. With two windows, the status rule tracks the non-selected quota; with one window, both the label and rule follow the available quota.
 
 CodexStatus only calls the locally installed `codex app-server`. Each refresh performs `initialize → account/read → account/rateLimits/read`, then closes the process tree using a Windows Job Object. It selects an exact 10,080-minute window first and only accepts a 6–8 day fallback; a short window is never mislabeled as weekly quota.
 
-The footer extrapolates the average consumption rate observed since the weekly cycle began. It shows a green **Usage ample** status when the projected depletion is at or after reset, or a red estimated time to depletion when the quota is likely to run out first.
+Each quota card draws its actual remaining percentage on the outer gauge. The
+inner gauge shows the percentage of cycle time remaining, calculated locally
+from the existing reset timestamp and window length; it causes no additional
+network request.
 
 ## Privacy
 
@@ -61,20 +72,23 @@ CodexStatus never reads or stores your OAuth token, email address, project conte
 Two normal state files are stored under `%LOCALAPPDATA%\CodexStatus`:
 
 - `settings.json`: refresh interval, UI language, theme, alert threshold, onboarding state, and alert deduplication state.
-- `snapshot.json`: the latest non-sensitive parsed quota snapshot. It is discarded once its reset time passes.
+- `snapshot.json`: the latest non-sensitive parsed quota snapshot. Expired windows
+  are ignored immediately and the file is replaced by the next successful refresh.
 
 Normal builds do not write activity logs. If Windows rejects a notification icon operation, CodexStatus additionally writes one failure-only `tray-errors.log` containing the operation, release channel, executable path, tray identity, PID, and Win32 error code. The optional `diagnostics` Cargo feature records lifecycle stages and filtered error summaries.
 
 ## Performance
 
-Measured on Windows 11 24H2 x64 with the v0.3.0 release:
+Version 0.5.0 remains an event-driven native Win32 process. It performs no
+continuous animation or polling between configured refresh timers. Hiding the
+flyout releases its window-sized render target, drops the remaining Direct2D
+resources after a short grace period, and trims idle resident pages. Exact
+working-set figures vary by Windows version, DPI, graphics driver, and whether
+the flyout was opened recently.
 
-| State | CodexStatus working set | CPU | Child processes |
-|---|---:|---:|---:|
-| Idle after refresh | ~12 MB | ≤0.1% average | 0 |
-| Refreshing | <15 MB for the tray process | brief | 1 temporary `codex app-server` tree |
-
-The app-server process has a larger transient footprint because it is Codex itself; it exits immediately after the two account calls complete and is not part of the resident tray process.
+Refreshing briefly starts one local `codex app-server` process tree. That tree
+has Codex's own transient footprint and is closed as a unit when the RPC
+finishes or times out; it is not part of the resident tray process.
 
 ## Build
 

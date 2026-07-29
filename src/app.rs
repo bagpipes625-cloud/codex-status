@@ -1,6 +1,6 @@
 use crate::app_server::AppServerClient;
 use crate::icon::{OwnedIcon, create_icon, tone_for};
-use crate::model::{DisplayState, QuotaKind, QuotaSnapshot, RefreshState};
+use crate::model::{DisplayState, QuotaAvailability, QuotaKind, QuotaSnapshot, RefreshState};
 use crate::settings::{AppStore, Settings};
 use crate::{startup, ui, updater};
 use chrono::Utc;
@@ -19,10 +19,11 @@ use windows::Win32::Graphics::Gdi::{
     MonitorFromPoint,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::ProcessStatus::EmptyWorkingSet;
+use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess};
 use windows::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetDpiForWindow,
-    GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, GetDpiForSystem, GetDpiForWindow,
+    GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::Ime::ImmDisableIME;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_ESCAPE};
@@ -37,8 +38,8 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CS_DROPSHADOW, CS_HREDRAW, CS_VREDRAW, CreatePopupMenu, CreateWindowExW,
     DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW, GetCursorPos,
-    GetMessageW, HMENU, IDC_ARROW, IsWindowVisible, KillTimer, LoadCursorW, MF_CHECKED,
-    MF_SEPARATOR, MF_STRING, MSG, PostMessageW, PostQuitMessage, RegisterClassExW,
+    GetMessageW, GetWindowRect, HMENU, IDC_ARROW, IsWindowVisible, KillTimer, LoadCursorW,
+    MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, PostQuitMessage, RegisterClassExW,
     RegisterWindowMessageW, SM_CXSMICON, SW_HIDE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER,
     SWP_SHOWWINDOW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TPM_BOTTOMALIGN,
     TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WA_INACTIVE,
@@ -108,6 +109,8 @@ const TIMER_REFRESH: usize = 1;
 const TIMER_STARTUP: usize = 2;
 const TIMER_CARD: usize = 3;
 const TIMER_FLYOUT_ACTIVATE: usize = 4;
+const TIMER_WORKING_SET_TRIM: usize = 5;
+const WORKING_SET_TRIM_DELAY_MS: u32 = 2_000;
 
 const TRAY_ACTIVATION_DEBOUNCE: Duration = Duration::from_millis(300);
 const FLYOUT_ACTIVATION_GUARD: Duration = Duration::from_millis(220);
@@ -171,21 +174,44 @@ struct TrayQuotaState {
     refresh_state: RefreshState,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LowQuotaAlert {
+    kind: QuotaKind,
+    percent: u8,
+    reset: Option<i64>,
+}
+
 fn tray_quota_state(display: &DisplayState, preferred: QuotaKind) -> TrayQuotaState {
     let primary_kind = display.resolved_quota_kind(preferred);
-    let weekly_percent = display.quota_percent(QuotaKind::Weekly);
-    let five_hour_percent = display.quota_percent(QuotaKind::FiveHour);
-    let indicator_percent = if five_hour_percent.is_none() {
-        weekly_percent
-    } else {
-        display.quota_percent(primary_kind.other())
+    let primary_percent = display.quota_percent(primary_kind);
+    let indicator_percent = match display.quota_availability() {
+        QuotaAvailability::Single(_) => primary_percent,
+        QuotaAvailability::Both => display.quota_percent(primary_kind.other()),
+        QuotaAvailability::None => None,
     };
     TrayQuotaState {
         primary_kind,
-        primary_percent: display.quota_percent(primary_kind),
+        primary_percent,
         indicator_percent,
         refresh_state: display.refresh_state,
     }
+}
+
+fn quota_switching_available(display: &DisplayState) -> bool {
+    !matches!(display.quota_availability(), QuotaAvailability::Single(_))
+}
+
+fn quota_alert_state(display: &DisplayState, preferred: QuotaKind) -> Option<LowQuotaAlert> {
+    let kind = display.resolved_quota_kind(preferred);
+    let window = display.quota_window(kind)?;
+    Some(LowQuotaAlert { kind, percent: window.display_percent(), reset: window.resets_at })
+}
+
+fn alert_cycle_key(alert: LowQuotaAlert) -> i64 {
+    alert.reset.unwrap_or(match alert.kind {
+        QuotaKind::FiveHour => i64::MIN,
+        QuotaKind::Weekly => i64::MIN + 1,
+    })
 }
 
 enum LaunchMode {
@@ -215,7 +241,7 @@ struct AppState {
     last_tray_activation: Option<Instant>,
     flyout_ignore_inactive_until: Option<Instant>,
     flyout_hidden_for_tray_activation: Option<Instant>,
-    hero_pressed: bool,
+    pressed_quota: Option<QuotaKind>,
 }
 
 pub fn run() -> Result<(), AppError> {
@@ -317,7 +343,7 @@ pub fn run() -> Result<(), AppError> {
         last_tray_activation: None,
         flyout_ignore_inactive_until: None,
         flyout_hidden_for_tray_activation: None,
-        hero_pressed: false,
+        pressed_quota: None,
     });
     let raw = Box::into_raw(state);
     STATE.with(|slot| slot.set(raw));
@@ -480,6 +506,7 @@ unsafe extern "system" fn main_window_proc(
                             let _ = KillTimer(Some(hwnd), TIMER_FLYOUT_ACTIVATE);
                             state.finish_flyout_activation();
                         }
+                        TIMER_WORKING_SET_TRIM => state.trim_working_set(),
                         _ => {}
                     }
                     return LRESULT(0);
@@ -501,6 +528,7 @@ unsafe extern "system" fn main_window_proc(
                     return LRESULT(0);
                 }
                 WM_DESTROY => {
+                    ui::release_card_renderer();
                     PostQuitMessage(0);
                     return LRESULT(0);
                 }
@@ -528,7 +556,7 @@ unsafe extern "system" fn flyout_window_proc(
                     state.settings.display_quota,
                     state.locale,
                     state.theme,
-                    state.hero_pressed,
+                    state.pressed_quota,
                 );
                 return LRESULT(0);
             }
@@ -536,8 +564,8 @@ unsafe extern "system" fn flyout_window_proc(
                 let state = &mut *state_ptr;
                 let (x, y) = pointer_coordinates(lparam);
                 let dpi = GetDpiForWindow(hwnd).max(96);
-                if ui::hero_hit_test(x, y, dpi) {
-                    state.hero_pressed = true;
+                if let Some(kind) = ui::quota_card_hit_test(&state.display, x, y, dpi) {
+                    state.pressed_quota = Some(kind);
                     let _ = SetCapture(hwnd);
                     let _ = InvalidateRect(Some(hwnd), None, false);
                     return LRESULT(0);
@@ -545,14 +573,15 @@ unsafe extern "system" fn flyout_window_proc(
             }
             WM_LBUTTONUP if !state_ptr.is_null() => {
                 let state = &mut *state_ptr;
-                if state.hero_pressed {
+                if let Some(pressed) = state.pressed_quota {
                     let (x, y) = pointer_coordinates(lparam);
                     let dpi = GetDpiForWindow(hwnd).max(96);
-                    let activate = ui::hero_hit_test(x, y, dpi);
-                    state.hero_pressed = false;
+                    let activate =
+                        ui::quota_card_hit_test(&state.display, x, y, dpi) == Some(pressed);
+                    state.pressed_quota = None;
                     let _ = ReleaseCapture();
                     if activate {
-                        state.toggle_display_quota();
+                        state.select_display_quota(pressed);
                     } else {
                         let _ = InvalidateRect(Some(hwnd), None, false);
                     }
@@ -561,8 +590,7 @@ unsafe extern "system" fn flyout_window_proc(
             }
             WM_CAPTURECHANGED if !state_ptr.is_null() => {
                 let state = &mut *state_ptr;
-                if state.hero_pressed {
-                    state.hero_pressed = false;
+                if state.pressed_quota.take().is_some() {
                     let _ = InvalidateRect(Some(hwnd), None, false);
                 }
                 return LRESULT(0);
@@ -606,6 +634,7 @@ unsafe extern "system" fn flyout_window_proc(
                     suggested.bottom - suggested.top,
                     SWP_NOZORDER | SWP_NOACTIVATE,
                 );
+                ui::apply_flyout_shape(hwnd, GetDpiForWindow(hwnd).max(96));
                 return LRESULT(0);
             }
             _ => {}
@@ -688,6 +717,7 @@ impl AppState {
             }
         }
         let _ = self.update_tray(false);
+        self.sync_visible_flyout_layout();
         unsafe {
             let _ = InvalidateRect(Some(self.flyout), None, false);
         }
@@ -708,6 +738,7 @@ impl AppState {
         if self.tray_quota_state != Some(self.current_tray_quota_state()) {
             let _ = self.update_tray(false);
         }
+        self.sync_visible_flyout_layout();
     }
 
     fn reset_refresh_timer(&self, milliseconds: u32) {
@@ -893,8 +924,8 @@ impl AppState {
         tray_quota_state(&self.display, self.settings.display_quota)
     }
 
-    fn toggle_display_quota(&mut self) {
-        self.settings.display_quota = self.settings.display_quota.other();
+    fn select_display_quota(&mut self, kind: QuotaKind) {
+        self.settings.display_quota = kind;
         self.persist_settings();
         let _ = self.update_tray(false);
         unsafe {
@@ -963,28 +994,34 @@ impl AppState {
         let Some(threshold) = self.settings.alert_threshold else {
             return;
         };
-        let Some(snapshot) = self.display.snapshot.as_ref() else {
+        let Some(alert) = quota_alert_state(&self.display, self.settings.display_quota) else {
             return;
         };
-        let Some(weekly) = snapshot.weekly.as_ref() else {
+        let alert_key = alert_cycle_key(alert);
+        if alert.percent >= threshold {
+            // A quota window without a reset timestamp uses a stable synthetic
+            // key. Clear it after recovery so a later low-quota event can alert
+            // again instead of being suppressed forever.
+            if alert.reset.is_none() && self.settings.last_alert_reset == Some(alert_key) {
+                self.settings.last_alert_reset = None;
+                let _ = self.store.save_settings(&self.settings);
+            }
             return;
+        }
+        if self.settings.last_alert_reset == Some(alert_key) {
+            return;
+        }
+        let quota_label = match (self.locale, alert.kind) {
+            (ui::Locale::Chinese, QuotaKind::FiveHour) => "5 小时剩余：",
+            (ui::Locale::Chinese, QuotaKind::Weekly) => "本周剩余：",
+            (_, QuotaKind::FiveHour) => "5-hour remaining:",
+            (_, QuotaKind::Weekly) => "Weekly remaining:",
         };
-        if weekly.display_percent() > threshold {
-            return;
-        }
-        let reset = weekly.resets_at.unwrap_or(0);
-        if self.settings.last_alert_reset == Some(reset) {
-            return;
-        }
         self.show_balloon(
-            self.locale.text("Codex quota is running low", "Codex 周额度偏低"),
-            &format!(
-                "{} {}%",
-                self.locale.text("Weekly remaining:", "本周剩余："),
-                weekly.display_percent()
-            ),
+            self.locale.text("Codex quota is running low", "Codex 额度偏低"),
+            &format!("{quota_label} {}%", alert.percent),
         );
-        self.settings.last_alert_reset = Some(reset);
+        self.settings.last_alert_reset = Some(alert_key);
         let _ = self.store.save_settings(&self.settings);
     }
 
@@ -1027,11 +1064,30 @@ impl AppState {
     fn hide_flyout(&mut self) {
         self.flyout_ignore_inactive_until = None;
         self.flyout_hidden_for_tray_activation = None;
-        self.hero_pressed = false;
+        self.pressed_quota = None;
         unsafe {
             let _ = ReleaseCapture();
             let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
+            let _ = KillTimer(Some(self.hwnd), TIMER_WORKING_SET_TRIM);
             let _ = ShowWindow(self.flyout, SW_HIDE);
+            let _ =
+                SetTimer(Some(self.hwnd), TIMER_WORKING_SET_TRIM, WORKING_SET_TRIM_DELAY_MS, None);
+        }
+        ui::release_card_surface();
+    }
+
+    fn trim_working_set(&self) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_WORKING_SET_TRIM);
+            if IsWindowVisible(self.flyout).as_bool() {
+                return;
+            }
+            if self.refreshing || self.update_checking {
+                let _ = SetTimer(Some(self.hwnd), TIMER_WORKING_SET_TRIM, 1_000, None);
+                return;
+            }
+            ui::release_card_renderer();
+            let _ = EmptyWorkingSet(GetCurrentProcess());
         }
     }
 
@@ -1076,8 +1132,34 @@ impl AppState {
 
     fn show_flyout(&mut self) {
         self.flyout_hidden_for_tray_activation = None;
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_WORKING_SET_TRIM);
+        }
         self.theme = ui::detect_theme(&self.settings.theme);
         ui::configure_flyout(self.flyout, self.theme);
+        self.position_flyout(true);
+    }
+
+    fn sync_visible_flyout_layout(&mut self) {
+        if !unsafe { IsWindowVisible(self.flyout) }.as_bool() {
+            return;
+        }
+        let dpi = unsafe { GetDpiForWindow(self.flyout) }.max(96);
+        let dimensions = ui::flyout_dimensions(&self.display);
+        let desired_width = ui::scale(dimensions.width, dpi);
+        let desired_height = ui::scale(dimensions.height, dpi);
+        let mut current = RECT::default();
+        unsafe {
+            let _ = GetWindowRect(self.flyout, &mut current);
+        }
+        if current.right - current.left != desired_width
+            || current.bottom - current.top != desired_height
+        {
+            self.position_flyout(false);
+        }
+    }
+
+    fn position_flyout(&mut self, show: bool) {
         let anchor = self.tray_rect().unwrap_or_else(cursor_rect);
         let point =
             POINT { x: (anchor.left + anchor.right) / 2, y: (anchor.top + anchor.bottom) / 2 };
@@ -1087,9 +1169,20 @@ impl AppState {
         unsafe {
             let _ = GetMonitorInfoW(monitor, &mut info);
         }
-        let dpi = unsafe { GetDpiForWindow(self.flyout).max(GetDpiForSystem()).max(96) };
-        let width = ui::scale(ui::CARD_WIDTH, dpi);
-        let height = ui::scale(ui::CARD_HEIGHT, dpi);
+        let mut monitor_dpi_x = 96;
+        let mut monitor_dpi_y = 96;
+        let dpi = unsafe {
+            if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut monitor_dpi_x, &mut monitor_dpi_y)
+                .is_ok()
+            {
+                monitor_dpi_x.max(96)
+            } else {
+                GetDpiForWindow(self.flyout).max(96)
+            }
+        };
+        let dimensions = ui::flyout_dimensions(&self.display);
+        let width = ui::scale(dimensions.width, dpi);
+        let height = ui::scale(dimensions.height, dpi);
         let gap = ui::scale(10, dpi);
         let mut x = point.x - width / 2;
         let mut y = anchor.top - height - gap;
@@ -1101,8 +1194,12 @@ impl AppState {
         self.flyout_ignore_inactive_until = Some(Instant::now() + FLYOUT_ACTIVATION_GUARD);
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
-            let _ = SetWindowPos(self.flyout, None, x, y, width, height, SWP_SHOWWINDOW);
-            let _ = SetForegroundWindow(self.flyout);
+            let flags = if show { SWP_SHOWWINDOW } else { SWP_NOACTIVATE | SWP_NOZORDER };
+            let _ = SetWindowPos(self.flyout, None, x, y, width, height, flags);
+            ui::apply_flyout_shape(self.flyout, dpi);
+            if show {
+                let _ = SetForegroundWindow(self.flyout);
+            }
             let _ = InvalidateRect(Some(self.flyout), None, false);
         }
     }
@@ -1161,19 +1258,21 @@ impl AppState {
                 false,
             )?;
             separator(menu)?;
-            append(
-                menu,
-                CMD_DISPLAY_FIVE_HOUR,
-                self.locale.text("Show 5-hour quota", "显示5小时额度"),
-                self.settings.display_quota == QuotaKind::FiveHour,
-            )?;
-            append(
-                menu,
-                CMD_DISPLAY_WEEKLY,
-                self.locale.text("Show weekly quota", "显示周额度"),
-                self.settings.display_quota == QuotaKind::Weekly,
-            )?;
-            separator(menu)?;
+            if quota_switching_available(&self.display) {
+                append(
+                    menu,
+                    CMD_DISPLAY_FIVE_HOUR,
+                    self.locale.text("Show 5-hour quota", "显示5小时额度"),
+                    self.settings.display_quota == QuotaKind::FiveHour,
+                )?;
+                append(
+                    menu,
+                    CMD_DISPLAY_WEEKLY,
+                    self.locale.text("Show weekly quota", "显示周额度"),
+                    self.settings.display_quota == QuotaKind::Weekly,
+                )?;
+                separator(menu)?;
+            }
             append(
                 menu,
                 CMD_INTERVAL_1,
@@ -1253,14 +1352,12 @@ impl AppState {
                 CMD_USAGE => self.open_url(USAGE_URL),
                 CMD_UPDATE => self.start_update_check(),
                 CMD_DISPLAY_FIVE_HOUR | CMD_DISPLAY_WEEKLY => {
-                    self.settings.display_quota = if command == CMD_DISPLAY_WEEKLY {
+                    let kind = if command == CMD_DISPLAY_WEEKLY {
                         QuotaKind::Weekly
                     } else {
                         QuotaKind::FiveHour
                     };
-                    self.persist_settings();
-                    let _ = self.update_tray(false);
-                    let _ = InvalidateRect(Some(self.flyout), None, false);
+                    self.select_display_quota(kind);
                 }
                 CMD_INTERVAL_1 | CMD_INTERVAL_5 | CMD_INTERVAL_15 => {
                     self.settings.refresh_minutes = match command {
@@ -1431,7 +1528,7 @@ mod tests {
     use super::*;
     use crate::model::{AccountSummary, QuotaWindow, SESSION_MINUTES, WEEK_MINUTES};
 
-    fn display_with_quotas(weekly: u8, five_hour: Option<u8>) -> DisplayState {
+    fn display_with_quotas(weekly: Option<u8>, five_hour: Option<u8>) -> DisplayState {
         let window = |percent: u8, window_minutes| QuotaWindow {
             used_percent: f64::from(100 - percent),
             remaining_percent: f64::from(percent),
@@ -1439,7 +1536,7 @@ mod tests {
             resets_at: Some(i64::MAX),
         };
         DisplayState::live(QuotaSnapshot {
-            weekly: Some(window(weekly, WEEK_MINUTES)),
+            weekly: weekly.map(|percent| window(percent, WEEK_MINUTES)),
             session: five_hour.map(|percent| window(percent, SESSION_MINUTES)),
             account: AccountSummary::default(),
             fetched_at: 0,
@@ -1469,18 +1566,31 @@ mod tests {
 
     #[test]
     fn tray_indicator_uses_weekly_quota_when_five_hour_is_unavailable() {
-        let display = display_with_quotas(66, None);
+        let display = display_with_quotas(Some(66), None);
         for preferred in [QuotaKind::FiveHour, QuotaKind::Weekly] {
             let state = tray_quota_state(&display, preferred);
             assert_eq!(state.primary_kind, QuotaKind::Weekly);
             assert_eq!(state.primary_percent, Some(66));
             assert_eq!(state.indicator_percent, Some(66));
         }
+        assert!(!quota_switching_available(&display));
+    }
+
+    #[test]
+    fn tray_indicator_uses_five_hour_quota_when_weekly_is_unavailable() {
+        let display = display_with_quotas(None, Some(85));
+        for preferred in [QuotaKind::FiveHour, QuotaKind::Weekly] {
+            let state = tray_quota_state(&display, preferred);
+            assert_eq!(state.primary_kind, QuotaKind::FiveHour);
+            assert_eq!(state.primary_percent, Some(85));
+            assert_eq!(state.indicator_percent, Some(85));
+        }
+        assert!(!quota_switching_available(&display));
     }
 
     #[test]
     fn tray_indicator_uses_the_other_quota_when_both_are_available() {
-        let display = display_with_quotas(66, Some(85));
+        let display = display_with_quotas(Some(66), Some(85));
         let five_hour = tray_quota_state(&display, QuotaKind::FiveHour);
         assert_eq!(five_hour.primary_percent, Some(85));
         assert_eq!(five_hour.indicator_percent, Some(66));
@@ -1488,5 +1598,56 @@ mod tests {
         let weekly = tray_quota_state(&display, QuotaKind::Weekly);
         assert_eq!(weekly.primary_percent, Some(66));
         assert_eq!(weekly.indicator_percent, Some(85));
+        assert!(quota_switching_available(&display));
+    }
+
+    #[test]
+    fn tray_has_no_quota_values_when_both_are_unavailable() {
+        let display = display_with_quotas(None, None);
+        let state = tray_quota_state(&display, QuotaKind::Weekly);
+        assert_eq!(state.primary_kind, QuotaKind::Weekly);
+        assert_eq!(state.primary_percent, None);
+        assert_eq!(state.indicator_percent, None);
+        assert!(quota_switching_available(&display));
+    }
+
+    #[test]
+    fn low_quota_alert_follows_selection_or_the_only_available_quota() {
+        let both = display_with_quotas(Some(18), Some(9));
+        assert_eq!(
+            quota_alert_state(&both, QuotaKind::FiveHour).map(|alert| alert.kind),
+            Some(QuotaKind::FiveHour)
+        );
+        assert_eq!(
+            quota_alert_state(&both, QuotaKind::Weekly).map(|alert| alert.kind),
+            Some(QuotaKind::Weekly)
+        );
+
+        let five_only = display_with_quotas(None, Some(9));
+        assert_eq!(
+            quota_alert_state(&five_only, QuotaKind::Weekly).map(|alert| alert.kind),
+            Some(QuotaKind::FiveHour)
+        );
+        let weekly_only = display_with_quotas(Some(18), None);
+        assert_eq!(
+            quota_alert_state(&weekly_only, QuotaKind::FiveHour).map(|alert| alert.kind),
+            Some(QuotaKind::Weekly)
+        );
+    }
+
+    #[test]
+    fn low_quota_alert_requires_remaining_quota_to_be_strictly_below_threshold() {
+        let display = display_with_quotas(Some(20), None);
+        let alert = quota_alert_state(&display, QuotaKind::Weekly).unwrap();
+        assert!(!(alert.percent < 20));
+        assert!(alert.percent < 30);
+    }
+
+    #[test]
+    fn missing_reset_alert_keys_are_stable_and_distinct_by_quota() {
+        let five_hour = LowQuotaAlert { kind: QuotaKind::FiveHour, percent: 9, reset: None };
+        let weekly = LowQuotaAlert { kind: QuotaKind::Weekly, percent: 9, reset: None };
+        assert_eq!(alert_cycle_key(five_hour), alert_cycle_key(five_hour));
+        assert_ne!(alert_cycle_key(five_hour), alert_cycle_key(weekly));
     }
 }

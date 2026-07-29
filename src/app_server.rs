@@ -13,14 +13,20 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
     SetInformationJobObject,
 };
-use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+use windows::Win32::System::Threading::{
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
+};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+const READER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 const ERROR_LIMIT: usize = 240;
 
 #[derive(Debug, thiserror::Error)]
@@ -33,6 +39,8 @@ pub enum AppServerError {
     UnsupportedWrapper(String),
     #[error("Could not start Codex app-server: {0}")]
     Spawn(#[source] std::io::Error),
+    #[error("Could not isolate the Codex app-server process tree: {0}")]
+    ProcessIsolation(String),
     #[error("Could not communicate with Codex app-server: {0}")]
     Io(#[source] std::io::Error),
     #[error("Codex app-server did not respond within 8 seconds")]
@@ -96,8 +104,18 @@ impl Default for AppServerClient {
 }
 
 fn fetch_with_command(command: &CommandSpec) -> Result<QuotaSnapshot, AppServerError> {
-    let mut child = spawn(command)?;
-    let _job = JobGuard::assign(&child).ok();
+    let (mut child, suspended_thread) = spawn_suspended(command)?;
+    let job = match JobGuard::assign(&child) {
+        Ok(job) => job,
+        Err(error) => {
+            terminate(&mut child);
+            return Err(AppServerError::ProcessIsolation(error.to_string()));
+        }
+    };
+    if let Err(error) = suspended_thread.resume() {
+        terminate(&mut child);
+        return Err(AppServerError::ProcessIsolation(error.to_string()));
+    }
     let stdout = child.stdout.take().ok_or(AppServerError::Closed)?;
     let stderr = child.stderr.take().ok_or(AppServerError::Closed)?;
     let mut stdin = child.stdin.take().ok_or(AppServerError::Closed)?;
@@ -109,7 +127,10 @@ fn fetch_with_command(command: &CommandSpec) -> Result<QuotaSnapshot, AppServerE
             }
         }
     });
-    let error_reader = thread::spawn(move || read_capped(stderr, 4096));
+    let (error_sender, error_receiver) = mpsc::channel();
+    let error_reader = thread::spawn(move || {
+        let _ = error_sender.send(read_capped(stderr, 4096));
+    });
 
     let result = (|| {
         write_json(
@@ -145,9 +166,17 @@ fn fetch_with_command(command: &CommandSpec) -> Result<QuotaSnapshot, AppServerE
     })();
 
     drop(stdin);
+    // Closing the job first terminates the complete app-server process tree. A
+    // descendant can inherit stdout/stderr, so joining readers before this
+    // close could otherwise block forever even after the direct child exits.
+    drop(job);
     terminate(&mut child);
-    let _ = reader.join();
-    let stderr = error_reader.join().unwrap_or_default();
+    let stderr = error_receiver.recv_timeout(READER_CLEANUP_TIMEOUT).unwrap_or_default();
+    // Dropping a JoinHandle detaches it. The job close normally makes both
+    // readers finish immediately; the bounded receive also protects the rare
+    // case where assigning the process to a job was rejected by Windows.
+    drop(reader);
+    drop(error_reader);
 
     match result {
         Err(AppServerError::Closed) if !stderr.trim().is_empty() => {
@@ -157,7 +186,7 @@ fn fetch_with_command(command: &CommandSpec) -> Result<QuotaSnapshot, AppServerE
     }
 }
 
-fn spawn(spec: &CommandSpec) -> Result<Child, AppServerError> {
+fn spawn_suspended(spec: &CommandSpec) -> Result<(Child, SuspendedThread), AppServerError> {
     let mut command = Command::new(&spec.program);
     command
         .args(&spec.args)
@@ -166,8 +195,15 @@ fn spawn(spec: &CommandSpec) -> Result<Child, AppServerError> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .creation_flags(CREATE_NO_WINDOW.0);
-    command.spawn().map_err(AppServerError::Spawn)
+        .creation_flags(CREATE_NO_WINDOW.0 | CREATE_SUSPENDED.0);
+    let mut child = command.spawn().map_err(AppServerError::Spawn)?;
+    match SuspendedThread::find(child.id()) {
+        Ok(thread) => Ok((child, thread)),
+        Err(error) => {
+            terminate(&mut child);
+            Err(AppServerError::ProcessIsolation(error.to_string()))
+        }
+    }
 }
 
 fn terminate(child: &mut Child) {
@@ -382,6 +418,47 @@ fn path_directories() -> Vec<PathBuf> {
 }
 
 struct JobGuard(HANDLE);
+
+struct SuspendedThread(HANDLE);
+
+impl SuspendedThread {
+    fn find(process_id: u32) -> windows::core::Result<Self> {
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)?;
+            let mut entry = THREADENTRY32 {
+                dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+                ..Default::default()
+            };
+            let result = (|| {
+                Thread32First(snapshot, &mut entry)?;
+                loop {
+                    if entry.th32OwnerProcessID == process_id {
+                        return OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID)
+                            .map(Self);
+                    }
+                    if Thread32Next(snapshot, &mut entry).is_err() {
+                        return Err(windows::core::Error::from_thread());
+                    }
+                }
+            })();
+            let _ = CloseHandle(snapshot);
+            result
+        }
+    }
+
+    fn resume(&self) -> windows::core::Result<()> {
+        let previous_count = unsafe { ResumeThread(self.0) };
+        if previous_count == u32::MAX { Err(windows::core::Error::from_thread()) } else { Ok(()) }
+    }
+}
+
+impl Drop for SuspendedThread {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
 
 impl JobGuard {
     fn assign(child: &Child) -> windows::core::Result<Self> {

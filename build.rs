@@ -28,7 +28,31 @@ fn compile_resource() {}
 
 #[cfg(target_env = "msvc")]
 fn compile_resource() {
-    let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+    use std::hash::{Hash, Hasher};
+
+    let cargo_output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+    let output = if cargo_output.to_string_lossy().is_ascii() {
+        cargo_output.clone()
+    } else {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        cargo_output.hash(&mut hasher);
+        let suffix = format!("{:016x}", hasher.finish());
+        ["CARGO_HOME", "RUSTUP_HOME", "TEMP", "TMP", "LOCALAPPDATA"]
+            .into_iter()
+            .filter_map(std::env::var_os)
+            .map(std::path::PathBuf::from)
+            .filter(|path| path.to_string_lossy().is_ascii())
+            .map(|path| path.join("codex-status-resource").join(&suffix))
+            .find(|path| std::fs::create_dir_all(path).is_ok())
+            .unwrap_or_else(|| {
+                panic!(
+                    "RC.EXE cannot compile resources through the non-ASCII OUT_DIR {:?}. \
+                     Set CARGO_TARGET_DIR to a writable ASCII-only path.",
+                    cargo_output
+                )
+            })
+    };
+    std::fs::create_dir_all(&output).expect("create resource output directory");
     let package_version = std::env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
     let (major, minor, patch) = resource_version(&package_version);
     let manifest_version = format!("{major}.{minor}.{patch}.0");
@@ -90,7 +114,17 @@ END
 "#
     );
     std::fs::write(&resource, rc).expect("write generated resource");
-    embed_resource::compile(resource, embed_resource::NONE).manifest_required().unwrap();
+    // The legacy Windows resource compiler still mishandles Unicode /fo and /I
+    // paths. Point embed-resource at the ASCII staging directory while keeping
+    // Cargo's real OUT_DIR unchanged for the rest of the build.
+    unsafe {
+        std::env::set_var("OUT_DIR", &output);
+    }
+    let result = embed_resource::compile(resource, embed_resource::NONE).manifest_required();
+    unsafe {
+        std::env::set_var("OUT_DIR", &cargo_output);
+    }
+    result.unwrap();
 }
 
 #[cfg(target_env = "msvc")]

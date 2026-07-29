@@ -16,6 +16,19 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
           components: rustfmt, clippy
+      - name: Verify release version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+)$') {
+            throw "Release tag '$tag' must use the exact form vX.Y.Z."
+          }
+          $tagVersion = $Matches.version
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $packageVersion = ($metadata.packages | Where-Object name -eq "codex-status").version
+          if ($tagVersion -ne $packageVersion) {
+            throw "Release tag version '$tagVersion' does not match Cargo package version '$packageVersion'."
+          }
       - name: Verify
         run: |
           cargo fmt --check
