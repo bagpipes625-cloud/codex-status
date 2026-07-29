@@ -25,7 +25,7 @@ use windows::Win32::UI::HiDpi::{
     GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::Ime::ImmDisableIME;
-use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_ESCAPE};
 #[cfg(not(codex_status_channel = "portable"))]
 use windows::Win32::UI::Shell::NIF_GUID;
 use windows::Win32::UI::Shell::{
@@ -42,10 +42,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     RegisterWindowMessageW, SM_CXSMICON, SW_HIDE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER,
     SWP_SHOWWINDOW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TPM_BOTTOMALIGN,
     TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WA_INACTIVE,
-    WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE,
-    WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
-    WM_NULL, WM_PAINT, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
+    WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY,
+    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_NULL, WM_PAINT, WM_QUERYENDSESSION, WM_RBUTTONUP,
+    WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED,
+    WS_POPUP,
 };
 #[cfg(not(codex_status_channel = "portable"))]
 use windows::core::GUID;
@@ -214,6 +215,7 @@ struct AppState {
     last_tray_activation: Option<Instant>,
     flyout_ignore_inactive_until: Option<Instant>,
     flyout_hidden_for_tray_activation: Option<Instant>,
+    hero_pressed: bool,
 }
 
 pub fn run() -> Result<(), AppError> {
@@ -315,6 +317,7 @@ pub fn run() -> Result<(), AppError> {
         last_tray_activation: None,
         flyout_ignore_inactive_until: None,
         flyout_hidden_for_tray_activation: None,
+        hero_pressed: false,
     });
     let raw = Box::into_raw(state);
     STATE.with(|slot| slot.set(raw));
@@ -371,6 +374,13 @@ fn parse_arguments() -> Result<LaunchMode, AppError> {
         }
         _ => Err(AppError::InvalidArguments),
     }
+}
+
+fn pointer_coordinates(lparam: LPARAM) -> (i32, i32) {
+    let packed = lparam.0 as u32;
+    let x = i32::from(packed as u16 as i16);
+    let y = i32::from((packed >> 16) as u16 as i16);
+    (x, y)
 }
 
 fn register_classes(instance: HINSTANCE) -> windows::core::Result<()> {
@@ -518,7 +528,43 @@ unsafe extern "system" fn flyout_window_proc(
                     state.settings.display_quota,
                     state.locale,
                     state.theme,
+                    state.hero_pressed,
                 );
+                return LRESULT(0);
+            }
+            WM_LBUTTONDOWN if !state_ptr.is_null() => {
+                let state = &mut *state_ptr;
+                let (x, y) = pointer_coordinates(lparam);
+                let dpi = GetDpiForWindow(hwnd).max(96);
+                if ui::hero_hit_test(x, y, dpi) {
+                    state.hero_pressed = true;
+                    let _ = SetCapture(hwnd);
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                    return LRESULT(0);
+                }
+            }
+            WM_LBUTTONUP if !state_ptr.is_null() => {
+                let state = &mut *state_ptr;
+                if state.hero_pressed {
+                    let (x, y) = pointer_coordinates(lparam);
+                    let dpi = GetDpiForWindow(hwnd).max(96);
+                    let activate = ui::hero_hit_test(x, y, dpi);
+                    state.hero_pressed = false;
+                    let _ = ReleaseCapture();
+                    if activate {
+                        state.toggle_display_quota();
+                    } else {
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    }
+                    return LRESULT(0);
+                }
+            }
+            WM_CAPTURECHANGED if !state_ptr.is_null() => {
+                let state = &mut *state_ptr;
+                if state.hero_pressed {
+                    state.hero_pressed = false;
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
                 return LRESULT(0);
             }
             WM_ERASEBKGND => return LRESULT(1),
@@ -847,6 +893,15 @@ impl AppState {
         tray_quota_state(&self.display, self.settings.display_quota)
     }
 
+    fn toggle_display_quota(&mut self) {
+        self.settings.display_quota = self.settings.display_quota.other();
+        self.persist_settings();
+        let _ = self.update_tray(false);
+        unsafe {
+            let _ = InvalidateRect(Some(self.flyout), None, false);
+        }
+    }
+
     fn notify_data(&self) -> NOTIFYICONDATAW {
         #[cfg(codex_status_channel = "portable")]
         {
@@ -972,7 +1027,9 @@ impl AppState {
     fn hide_flyout(&mut self) {
         self.flyout_ignore_inactive_until = None;
         self.flyout_hidden_for_tray_activation = None;
+        self.hero_pressed = false;
         unsafe {
+            let _ = ReleaseCapture();
             let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
             let _ = ShowWindow(self.flyout, SW_HIDE);
         }
@@ -1402,6 +1459,12 @@ mod tests {
         let mut target = [9_u16; 4];
         copy_utf16(&mut target, "abcdef");
         assert_eq!(target[3], 0);
+    }
+
+    #[test]
+    fn pointer_coordinates_sign_extend_both_axes() {
+        let packed = u32::from(0xfffe_u16) | (u32::from(0xfffd_u16) << 16);
+        assert_eq!(pointer_coordinates(LPARAM(packed as isize)), (-2, -3));
     }
 
     #[test]

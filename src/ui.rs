@@ -207,6 +207,7 @@ pub fn paint_card(
     preferred: QuotaKind,
     locale: Locale,
     theme: Theme,
+    hero_pressed: bool,
 ) {
     unsafe {
         let mut paint = PAINTSTRUCT::default();
@@ -221,11 +222,11 @@ pub fn paint_card(
         let bitmap = CreateCompatibleBitmap(hdc, width, height);
         if !buffer.is_invalid() && !bitmap.is_invalid() {
             let old_bitmap = SelectObject(buffer, HGDIOBJ(bitmap.0));
-            draw_card(buffer, state, preferred, locale, theme, dpi);
+            draw_card(buffer, state, preferred, locale, theme, hero_pressed, dpi);
             let _ = BitBlt(hdc, 0, 0, width, height, Some(buffer), 0, 0, SRCCOPY);
             let _ = SelectObject(buffer, old_bitmap);
         } else {
-            draw_card(hdc, state, preferred, locale, theme, dpi);
+            draw_card(hdc, state, preferred, locale, theme, hero_pressed, dpi);
         }
         if !bitmap.is_invalid() {
             let _ = DeleteObject(HGDIOBJ(bitmap.0));
@@ -243,6 +244,7 @@ unsafe fn draw_card(
     preferred: QuotaKind,
     locale: Locale,
     theme: Theme,
+    hero_pressed: bool,
     dpi: u32,
 ) {
     unsafe {
@@ -315,13 +317,15 @@ unsafe fn draw_card(
             theme.muted,
         );
 
-        let hero = RECT {
-            left: scale(16, dpi),
-            top: scale(48, dpi),
-            right: width - scale(16, dpi),
-            bottom: scale(176, dpi),
-        };
-        outlined_surface(hdc, hero, scale(14, dpi), theme.surface, theme.line, dpi);
+        let hero = hero_rect(width, dpi);
+        outlined_surface(
+            hdc,
+            hero,
+            scale(14, dpi),
+            if hero_pressed { theme.surface_alt } else { theme.surface },
+            if hero_pressed { pressed_line_color(theme) } else { theme.line },
+            dpi,
+        );
 
         draw_text(
             hdc,
@@ -376,9 +380,9 @@ unsafe fn draw_card(
             &reset.0,
             RECT {
                 left: scale(220, dpi),
-                top: scale(79, dpi),
+                top: scale(80, dpi),
                 right: width - scale(30, dpi),
-                bottom: scale(108, dpi),
+                bottom: scale(109, dpi),
             },
             scale(17, dpi),
             FW_SEMIBOLD.0 as i32,
@@ -941,6 +945,30 @@ fn accent_for(state: &DisplayState, percent: Option<u8>, high_contrast: bool) ->
     }
 }
 
+fn hero_rect(width: i32, dpi: u32) -> RECT {
+    RECT {
+        left: scale(16, dpi),
+        top: scale(48, dpi),
+        right: width - scale(16, dpi),
+        bottom: scale(176, dpi),
+    }
+}
+
+pub fn hero_hit_test(x: i32, y: i32, dpi: u32) -> bool {
+    let rect = hero_rect(scale(CARD_WIDTH, dpi), dpi);
+    x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
+}
+
+fn pressed_line_color(theme: Theme) -> COLORREF {
+    if theme.high_contrast {
+        theme.text
+    } else if theme.dark {
+        rgb(91, 91, 91)
+    } else {
+        rgb(207, 209, 209)
+    }
+}
+
 unsafe fn draw_text(
     hdc: HDC,
     locale: Locale,
@@ -1150,7 +1178,17 @@ mod tests {
     #[test]
     fn version_label_uses_the_running_package_version() {
         assert_eq!(version_text(), format!(" - v{}", env!("CARGO_PKG_VERSION")));
-        assert_eq!(version_text(), " - v0.4.3");
+        assert_eq!(version_text(), " - v0.4.4");
+    }
+
+    #[test]
+    fn hero_hit_target_matches_the_visible_card_at_100_percent_dpi() {
+        assert!(hero_hit_test(16, 48, 96));
+        assert!(hero_hit_test(359, 175, 96));
+        assert!(!hero_hit_test(15, 48, 96));
+        assert!(!hero_hit_test(360, 175, 96));
+        assert!(!hero_hit_test(16, 47, 96));
+        assert!(!hero_hit_test(16, 176, 96));
     }
 
     #[test]

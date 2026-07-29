@@ -46,7 +46,7 @@ The installer is not yet code-signed, so Microsoft Defender SmartScreen may show
 
 ## Use
 
-- **Left-click:** open or close the quota card.
+- **Left-click:** open or close the quota card; click the large quota panel to switch between the five-hour and weekly views.
 - **Right-click:** refresh now, open the Codex usage page, choose a 1/5/15-minute interval, configure a low-quota alert, select a theme, toggle startup, check for updates, or exit.
 - **Tray label:** the selected five-hour or weekly remaining percentage, rounded to the nearest whole number; when five-hour data is unavailable, both the label and status rule fall back to weekly quota.
 

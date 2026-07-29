@@ -4,6 +4,15 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-07-29
+
+- Make the primary quota card clickable so users can switch between the five-hour
+  and weekly quota without opening the tray menu.
+- Add pressed-state feedback and cancel the switch when the pointer is released
+  outside the card.
+- Move the primary reset countdown down by one pixel to equalize its visual
+  spacing between the label and timestamp.
+
 ## [0.4.3] - 2026-07-29
 
 - Rename the on-demand update menu command to **Check for updates** for clearer behavior.
