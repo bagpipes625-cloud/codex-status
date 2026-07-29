@@ -13,10 +13,10 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateCompatibleBitmap,
     CreateCompatibleDC, CreateFontW, CreateRoundRectRgn, CreateSolidBrush, DEFAULT_CHARSET,
-    DEFAULT_PITCH, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
-    DT_VCENTER, DeleteDC, DeleteObject, DrawTextW, EndPaint, FF_SWISS, FONT_QUALITY, FW_NORMAL,
-    FW_SEMIBOLD, FillRect, FillRgn, GetTextExtentPoint32W, HDC, HGDIOBJ, OUT_DEFAULT_PRECIS,
-    PAINTSTRUCT, SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    DEFAULT_PITCH, DT_BOTTOM, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT,
+    DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW, EndPaint, FF_SWISS, FONT_QUALITY,
+    FW_NORMAL, FW_SEMIBOLD, FillRect, FillRgn, GetTextExtentPoint32W, HDC, HGDIOBJ,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -33,6 +33,7 @@ const HERO_DIVIDER_X: i32 = 202;
 const METRICS_LEFT_X: i32 = 16;
 const METRICS_FIRST_DIVIDER_X: i32 = 140;
 const METRICS_SECOND_DIVIDER_X: i32 = 264;
+const HEADER_TEXT_BOTTOM: i32 = 34;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Locale {
@@ -268,30 +269,46 @@ unsafe fn draw_card(
             scale(2, dpi),
             status_color,
         );
-        draw_text(
+        draw_text_bottom(
             hdc,
             locale,
             "CodexStatus",
             RECT {
                 left: scale(29, dpi),
-                top: scale(7, dpi),
+                top: 0,
                 right: scale(180, dpi),
-                bottom: scale(41, dpi),
+                bottom: scale(HEADER_TEXT_BOTTOM, dpi),
             },
             scale(14, dpi),
             FW_SEMIBOLD.0 as i32,
             theme.text,
         );
+        let title_right = scale(29, dpi)
+            + measure_text_width(hdc, locale, "CodexStatus", scale(14, dpi), FW_SEMIBOLD.0 as i32);
+        draw_text_bottom(
+            hdc,
+            locale,
+            &version_text(),
+            RECT {
+                left: title_right,
+                top: 0,
+                right: scale(188, dpi),
+                bottom: scale(HEADER_TEXT_BOTTOM, dpi),
+            },
+            scale(11, dpi),
+            FW_NORMAL.0 as i32,
+            theme.muted,
+        );
 
-        draw_text_right(
+        draw_text_right_bottom(
             hdc,
             locale,
             &updated_text(state, locale),
             RECT {
                 left: scale(190, dpi),
-                top: scale(8, dpi),
+                top: 0,
                 right: width - scale(18, dpi),
-                bottom: scale(40, dpi),
+                bottom: scale(HEADER_TEXT_BOTTOM, dpi),
             },
             scale(11, dpi),
             FW_NORMAL.0 as i32,
@@ -512,9 +529,9 @@ unsafe fn draw_percentage(hdc: HDC, percent: Option<u8>, locale: Locale, theme: 
                 "--",
                 RECT {
                     left: scale(30, dpi),
-                    top: scale(79, dpi),
+                    top: scale(81, dpi),
                     right: scale(174, dpi),
-                    bottom: scale(132, dpi),
+                    bottom: scale(134, dpi),
                 },
                 scale(40, dpi),
                 FW_SEMIBOLD.0 as i32,
@@ -529,9 +546,9 @@ unsafe fn draw_percentage(hdc: HDC, percent: Option<u8>, locale: Locale, theme: 
             &number,
             RECT {
                 left: scale(30, dpi),
-                top: scale(77, dpi),
+                top: scale(79, dpi),
                 right: scale(160, dpi),
-                bottom: scale(134, dpi),
+                bottom: scale(136, dpi),
             },
             scale(40, dpi),
             FW_SEMIBOLD.0 as i32,
@@ -546,9 +563,9 @@ unsafe fn draw_percentage(hdc: HDC, percent: Option<u8>, locale: Locale, theme: 
             "%",
             RECT {
                 left: number_left + number_width + scale(3, dpi),
-                top: scale(97, dpi),
+                top: scale(99, dpi),
                 right: scale(177, dpi),
-                bottom: scale(134, dpi),
+                bottom: scale(136, dpi),
             },
             scale(17, dpi),
             FW_SEMIBOLD.0 as i32,
@@ -600,9 +617,9 @@ unsafe fn quota_metric_column(
             content.value,
             RECT {
                 left,
-                top: rect.top + scale(19, dpi),
+                top: rect.top + scale(21, dpi),
                 right: rect.right - scale(10, dpi),
-                bottom: rect.top + scale(52, dpi),
+                bottom: rect.top + scale(54, dpi),
             },
             scale(18, dpi),
             FW_SEMIBOLD.0 as i32,
@@ -622,9 +639,9 @@ unsafe fn quota_metric_column(
                 "%",
                 RECT {
                     left: left + number_width + scale(2, dpi),
-                    top: rect.top + scale(25, dpi),
+                    top: rect.top + scale(27, dpi),
                     right: rect.right - scale(10, dpi),
-                    bottom: rect.top + scale(52, dpi),
+                    bottom: rect.top + scale(54, dpi),
                 },
                 scale(12, dpi),
                 FW_NORMAL.0 as i32,
@@ -679,9 +696,9 @@ unsafe fn metric_column(
             content.value,
             RECT {
                 left: rect.left + scale(12, dpi),
-                top: rect.top + scale(19, dpi),
+                top: rect.top + scale(21, dpi),
                 right: rect.right - scale(10, dpi),
-                bottom: rect.top + scale(52, dpi),
+                bottom: rect.top + scale(54, dpi),
             },
             scale(18, dpi),
             FW_SEMIBOLD.0 as i32,
@@ -746,6 +763,10 @@ fn updated_text(state: &DisplayState, locale: Locale) -> String {
         _ => locale.text("Updated", "更新"),
     };
     time.map_or_else(|| prefix.to_owned(), |time| format!("{prefix} {time}"))
+}
+
+fn version_text() -> String {
+    format!(" - v{}", env!("CARGO_PKG_VERSION"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -933,7 +954,7 @@ unsafe fn draw_text(
     unsafe { draw_text_with_alignment(hdc, locale, value, rect, style, DT_LEFT) }
 }
 
-unsafe fn draw_text_right(
+unsafe fn draw_text_bottom(
     hdc: HDC,
     locale: Locale,
     value: &str,
@@ -943,7 +964,20 @@ unsafe fn draw_text_right(
     color: COLORREF,
 ) {
     let style = TextStyle { height, weight, color };
-    unsafe { draw_text_with_alignment(hdc, locale, value, rect, style, DT_RIGHT) }
+    unsafe { draw_text_with_bottom_alignment(hdc, locale, value, rect, style, DT_LEFT) }
+}
+
+unsafe fn draw_text_right_bottom(
+    hdc: HDC,
+    locale: Locale,
+    value: &str,
+    rect: RECT,
+    height: i32,
+    weight: i32,
+    color: COLORREF,
+) {
+    let style = TextStyle { height, weight, color };
+    unsafe { draw_text_with_bottom_alignment(hdc, locale, value, rect, style, DT_RIGHT) }
 }
 
 unsafe fn draw_text_center(
@@ -984,6 +1018,30 @@ unsafe fn draw_text_with_alignment(
             &mut text,
             &mut rect,
             alignment | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+        let _ = SelectObject(hdc, old);
+        let _ = DeleteObject(HGDIOBJ(font.0));
+    }
+}
+
+unsafe fn draw_text_with_bottom_alignment(
+    hdc: HDC,
+    locale: Locale,
+    value: &str,
+    mut rect: RECT,
+    style: TextStyle,
+    alignment: windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT,
+) {
+    unsafe {
+        let font = create_ui_font(locale, style.height, style.weight);
+        let old = SelectObject(hdc, HGDIOBJ(font.0));
+        let _ = SetTextColor(hdc, style.color);
+        let mut text: Vec<u16> = value.encode_utf16().collect();
+        let _ = DrawTextW(
+            hdc,
+            &mut text,
+            &mut rect,
+            alignment | DT_BOTTOM | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
         );
         let _ = SelectObject(hdc, old);
         let _ = DeleteObject(HGDIOBJ(font.0));
@@ -1087,6 +1145,12 @@ mod tests {
             DisplayState { snapshot: None, refresh_state: RefreshState::Unavailable, error: None };
         assert!(tooltip(&state, QuotaKind::FiveHour, Locale::English).contains("unavailable"));
         assert!(tooltip(&state, QuotaKind::FiveHour, Locale::Chinese).contains("不可用"));
+    }
+
+    #[test]
+    fn version_label_uses_the_running_package_version() {
+        assert_eq!(version_text(), format!(" - v{}", env!("CARGO_PKG_VERSION")));
+        assert_eq!(version_text(), " - v0.4.2");
     }
 
     #[test]

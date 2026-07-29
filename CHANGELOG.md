@@ -4,6 +4,15 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-07-29
+
+- Display the running package version beside the CodexStatus title.
+- Measure the title with GDI before placing the version label, preventing overlap
+  across DPI settings.
+- Bottom-align the title, version, and refresh status on one shared baseline.
+- Move the primary quota number and percent sign, secondary quota number and
+  percent sign, reset-credit value, and plan value down by two pixels.
+
 ## [0.4.1] - 2026-07-29
 
 - Add persistent tray-menu selection between the five-hour and weekly quota,
