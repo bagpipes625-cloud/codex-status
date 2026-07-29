@@ -137,7 +137,9 @@ fn render_rgba(
     let text = foreground(dark_taskbar, tone.is_muted() && !high_contrast);
 
     if let Some(mask) = rasterize_label(&label, size) {
-        composite_mask(&mut pixels, size, &mask, text);
+        let two_digit_scale =
+            (label.chars().count() == 1).then(|| rasterize_label("65", size)).flatten();
+        composite_mask(&mut pixels, size, &mask, two_digit_scale.as_ref(), text);
     } else {
         draw_fallback_label(&mut pixels, size, &label, text);
     }
@@ -313,10 +315,20 @@ fn crop_grayscale(source: &[u8], width: usize, height: usize) -> Option<GrayMask
     Some(GrayMask { pixels, width: cropped_width, height: cropped_height })
 }
 
-fn composite_mask(pixels: &mut [[u8; 4]], size: u32, mask: &GrayMask, color: [u8; 4]) {
+fn composite_mask(
+    pixels: &mut [[u8; 4]],
+    size: u32,
+    mask: &GrayMask,
+    scale_reference: Option<&GrayMask>,
+    color: [u8; 4],
+) {
     let max_width = size.saturating_sub(2) as usize;
     let max_height = size.saturating_sub(3) as usize;
-    let width_limited_height = max_width * mask.height / mask.width.max(1);
+    // A lone digit must use the same font scale as the established two-digit
+    // label. Use a representative two-digit mask only to choose the height;
+    // the actual digit keeps its own proportions and is centered below.
+    let sizing_mask = scale_reference.unwrap_or(mask);
+    let width_limited_height = max_width * sizing_mask.height / sizing_mask.width.max(1);
     let target_height = max_height.min(width_limited_height.max(1));
     let target_width = (target_height * mask.width / mask.height.max(1)).clamp(1, max_width);
     let origin_x = (size as usize - target_width) / 2;
@@ -366,7 +378,8 @@ fn draw_fallback_label(pixels: &mut [[u8; 4]], size: u32, label: &str, color: [u
     let glyph_height = 7_i32;
     let glyph_count = label.chars().count() as i32;
     let units_width = glyph_count * glyph_width + (glyph_count - 1).max(0);
-    let scale_x = ((size as i32 - 2) / units_width).max(1);
+    let layout_units_width = if glyph_count == 1 { glyph_width * 2 + 1 } else { units_width };
+    let scale_x = ((size as i32 - 2) / layout_units_width).max(1);
     let scale_y = ((size as i32 - 3) / glyph_height).max(1);
     let width = units_width * scale_x;
     let height = glyph_height * scale_y;
@@ -449,6 +462,32 @@ mod tests {
         let right = visible.iter().map(|(index, _)| index % 16).max().unwrap();
         assert!(right - left + 1 >= 12);
         assert!(pixels.iter().filter(|pixel| pixel[3] == 0).count() > 16 * 8);
+    }
+
+    #[test]
+    fn one_digit_label_uses_the_same_height_as_two_digit_labels() {
+        fn text_bounds(pixels: &[[u8; 4]], size: usize) -> (usize, usize, usize) {
+            let visible: Vec<_> = pixels[..(size - 2) * size]
+                .iter()
+                .enumerate()
+                .filter(|(_, pixel)| pixel[3] > 20)
+                .collect();
+            let left = visible.iter().map(|(index, _)| index % size).min().unwrap();
+            let right = visible.iter().map(|(index, _)| index % size).max().unwrap();
+            let top = visible.iter().map(|(index, _)| index / size).min().unwrap();
+            let bottom = visible.iter().map(|(index, _)| index / size).max().unwrap();
+            (left, right, bottom - top + 1)
+        }
+
+        for size in [16_usize, 20, 24, 32] {
+            let single = render_rgba(Some(5), IconTone::Healthy, size as u32, false, false);
+            let double = render_rgba(Some(65), IconTone::Healthy, size as u32, false, false);
+            let (single_left, single_right, single_height) = text_bounds(&single, size);
+            let (_, _, double_height) = text_bounds(&double, size);
+
+            assert!(single_height.abs_diff(double_height) <= 1, "size={size}");
+            assert!(single_left.abs_diff(size - 1 - single_right) <= 1, "size={size}");
+        }
     }
 
     #[test]

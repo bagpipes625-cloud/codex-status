@@ -4,6 +4,11 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-29
+
+- Keep one-digit tray labels at the established two-digit font size and center
+  them horizontally, without changing the existing status bar or flyout.
+
 ## [0.3.6] - 2026-07-27
 
 - Display the nearest available reset credit's expiration time without adding
