@@ -83,6 +83,10 @@ impl AppStore {
         write_json_atomic(&self.directory.join("snapshot.json"), snapshot)
     }
 
+    pub fn updates_directory(&self) -> PathBuf {
+        self.directory.join("updates")
+    }
+
     pub fn append_tray_error(&self, entry: &str) -> io::Result<()> {
         fs::create_dir_all(&self.directory)?;
         let mut file = fs::OpenOptions::new()

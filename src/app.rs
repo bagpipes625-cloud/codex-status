@@ -2,10 +2,11 @@ use crate::app_server::AppServerClient;
 use crate::icon::{OwnedIcon, create_icon, tone_for};
 use crate::model::{DisplayState, QuotaSnapshot, RefreshState};
 use crate::settings::{AppStore, Settings};
-use crate::{startup, ui};
+use crate::{startup, ui, updater};
 use chrono::Utc;
 use std::cell::Cell;
 use std::mem::size_of;
+use std::path::PathBuf;
 use std::ptr;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -100,6 +101,7 @@ const WM_TRAY: u32 = WM_APP + 1;
 const WM_REFRESH_COMPLETE: u32 = WM_APP + 2;
 const WM_SHOW_EXISTING: u32 = WM_APP + 3;
 const WM_TOGGLE_FLYOUT: u32 = WM_APP + 4;
+const WM_UPDATE_COMPLETE: u32 = WM_APP + 5;
 
 const TIMER_REFRESH: usize = 1;
 const TIMER_STARTUP: usize = 2;
@@ -120,6 +122,7 @@ const CMD_ALERT_10: u32 = 131;
 const CMD_ALERT_20: u32 = 132;
 const CMD_ALERT_30: u32 = 133;
 const CMD_STARTUP: u32 = 140;
+const CMD_UPDATE: u32 = 150;
 const CMD_THEME_SYSTEM: u32 = 160;
 const CMD_THEME_LIGHT: u32 = 161;
 const CMD_THEME_DARK: u32 = 162;
@@ -153,6 +156,16 @@ struct RefreshOutcome {
     result: Result<QuotaSnapshot, String>,
 }
 
+struct UpdateOutcome {
+    result: Result<Option<updater::StagedUpdate>, updater::UpdateError>,
+}
+
+enum LaunchMode {
+    Normal,
+    Background,
+    ApplyUpdate { parent_pid: u32, target: PathBuf },
+}
+
 struct AppState {
     hwnd: HWND,
     flyout: HWND,
@@ -168,6 +181,7 @@ struct AppState {
     tray_failure_logged: bool,
     refreshing: bool,
     refresh_pending: bool,
+    update_checking: bool,
     failures: u8,
     last_tray_activation: Option<Instant>,
     flyout_ignore_inactive_until: Option<Instant>,
@@ -176,7 +190,12 @@ struct AppState {
 
 pub fn run() -> Result<(), AppError> {
     diagnostic("run:enter");
-    let background = parse_arguments()?;
+    let launch_mode = parse_arguments()?;
+    if let LaunchMode::ApplyUpdate { parent_pid, target } = launch_mode {
+        updater::apply_update_silently(parent_pid, &target);
+        return Ok(());
+    }
+    let background = matches!(launch_mode, LaunchMode::Background);
     diagnostic("run:arguments");
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -262,6 +281,7 @@ pub fn run() -> Result<(), AppError> {
         tray_failure_logged: false,
         refreshing: false,
         refresh_pending: false,
+        update_checking: false,
         failures: 0,
         last_tray_activation: None,
         flyout_ignore_inactive_until: None,
@@ -309,11 +329,16 @@ pub fn run() -> Result<(), AppError> {
     Ok(())
 }
 
-fn parse_arguments() -> Result<bool, AppError> {
+fn parse_arguments() -> Result<LaunchMode, AppError> {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     match arguments.as_slice() {
-        [] => Ok(false),
-        [argument] if argument == "--background" => Ok(true),
+        [] => Ok(LaunchMode::Normal),
+        [argument] if argument == "--background" => Ok(LaunchMode::Background),
+        [mode, parent_pid, target] if mode == "--apply-update" => {
+            let parent_pid =
+                parent_pid.to_string_lossy().parse().map_err(|_| AppError::InvalidArguments)?;
+            Ok(LaunchMode::ApplyUpdate { parent_pid, target: PathBuf::from(target) })
+        }
         _ => Err(AppError::InvalidArguments),
     }
 }
@@ -384,6 +409,13 @@ unsafe extern "system" fn main_window_proc(
                     if lparam.0 != 0 {
                         let outcome = *Box::from_raw(lparam.0 as *mut RefreshOutcome);
                         state.finish_refresh(outcome);
+                    }
+                    return LRESULT(0);
+                }
+                WM_UPDATE_COMPLETE => {
+                    if lparam.0 != 0 {
+                        let outcome = *Box::from_raw(lparam.0 as *mut UpdateOutcome);
+                        state.finish_update_check(outcome);
                     }
                     return LRESULT(0);
                 }
@@ -598,6 +630,86 @@ impl AppState {
             let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH);
             let _ = SetTimer(Some(self.hwnd), TIMER_REFRESH, milliseconds.max(1_000), None);
         }
+    }
+
+    fn start_update_check(&mut self) {
+        if self.update_checking {
+            self.show_balloon(
+                self.locale.text("Update in progress", "正在更新"),
+                self.locale
+                    .text("Please wait for the current update check.", "请等待当前更新检查完成。"),
+            );
+            return;
+        }
+        self.update_checking = true;
+        self.show_balloon(
+            self.locale.text("Checking for updates", "正在检查更新"),
+            self.locale.text(
+                "CodexStatus is checking your GitHub release.",
+                "CodexStatus 正在检查你的 GitHub 发布版本。",
+            ),
+        );
+
+        let hwnd_value = self.hwnd.0 as isize;
+        let updates_directory = self.store.updates_directory();
+        let spawn_result = thread::Builder::new()
+            .name("codex-status-update".to_owned())
+            .stack_size(512 * 1024)
+            .spawn(move || {
+                let hwnd = HWND(hwnd_value as *mut std::ffi::c_void);
+                let outcome =
+                    UpdateOutcome { result: updater::check_and_stage(&updates_directory) };
+                let raw = Box::into_raw(Box::new(outcome));
+                let posted = unsafe {
+                    PostMessageW(Some(hwnd), WM_UPDATE_COMPLETE, WPARAM(0), LPARAM(raw as isize))
+                };
+                if posted.is_err() {
+                    unsafe {
+                        drop(Box::from_raw(raw));
+                    }
+                }
+            });
+        if let Err(error) = spawn_result {
+            self.update_checking = false;
+            self.show_update_failure(&error.to_string());
+        }
+    }
+
+    fn finish_update_check(&mut self, outcome: UpdateOutcome) {
+        self.update_checking = false;
+        match outcome.result {
+            Ok(Some(update)) => {
+                self.show_balloon(
+                    self.locale.text("Update ready", "更新已准备好"),
+                    self.locale.text(
+                        "The verified update will restart CodexStatus.",
+                        "已验证更新，CodexStatus 将重启并完成替换。",
+                    ),
+                );
+                match updater::launch_staged_update(&update) {
+                    Ok(()) => unsafe {
+                        let _ = DestroyWindow(self.hwnd);
+                    },
+                    Err(error) => self.show_update_failure(&error.to_string()),
+                }
+            }
+            Ok(None) => self.show_balloon(
+                self.locale.text("CodexStatus is up to date", "CodexStatus 已是最新版本"),
+                &format!(
+                    "{} {}",
+                    self.locale.text("Current version", "当前版本"),
+                    env!("CARGO_PKG_VERSION")
+                ),
+            ),
+            Err(error) => self.show_update_failure(&error.to_string()),
+        }
+    }
+
+    fn show_update_failure(&self, error: &str) {
+        self.show_balloon(
+            self.locale.text("Update failed", "更新失败"),
+            &format!("{}: {error}", self.locale.text("Reason", "原因")),
+        );
     }
 
     fn update_tray(&mut self, force_add: bool) -> bool {
@@ -1005,6 +1117,7 @@ impl AppState {
                 self.settings.theme == "dark",
             )?;
             separator(menu)?;
+            append(menu, CMD_UPDATE, self.locale.text("Update now", "立即更新"), false)?;
             append(
                 menu,
                 CMD_EXIT,
@@ -1021,6 +1134,7 @@ impl AppState {
                 0 => {}
                 CMD_REFRESH => self.start_refresh(true),
                 CMD_USAGE => self.open_url(USAGE_URL),
+                CMD_UPDATE => self.start_update_check(),
                 CMD_INTERVAL_1 | CMD_INTERVAL_5 | CMD_INTERVAL_15 => {
                     self.settings.refresh_minutes = match command {
                         CMD_INTERVAL_1 => 1,

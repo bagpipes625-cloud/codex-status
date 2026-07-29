@@ -8,6 +8,11 @@ All notable changes to CodexStatus are documented here.
 
 - Keep one-digit tray labels at the established two-digit font size and center
   them horizontally, without changing the existing status bar or flyout.
+- Add an on-demand **Update now** tray command backed by this repository's
+  GitHub Releases, with release-channel isolation, strict download boundaries,
+  SHA-256 digest verification, in-place replacement, and automatic restart.
+- Keep update checks entirely user initiated; no update timer or background
+  GitHub request is added.
 
 ## [0.3.6] - 2026-07-27
 

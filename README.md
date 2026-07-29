@@ -14,6 +14,11 @@
 
 CodexStatus is a tiny native Windows utility. Its notification-area icon is the number itself—`0` to `100`, or `--` when no trustworthy weekly value is available. Click it for reset timing, the optional five-hour window, plan information, and refresh status.
 
+This repository is a community-maintained variant derived from
+[mmm1h/codex-status](https://github.com/mmm1h/codex-status). It retains the
+upstream MIT license and copyright notice while carrying a separate release
+line and product decisions.
+
 ## Highlights
 
 - Weekly remaining quota drawn directly into the standard tray icon.
@@ -24,6 +29,7 @@ CodexStatus is a tiny native Windows utility. Its notification-area icon is the 
 - Official Codex app-server RPC: `account/rateLimits/read`; no token scraping and no private endpoints.
 - Event-driven Win32 process with no Electron, WebView, WPF, WinUI, local HTTP server, or resident async runtime.
 - Five-minute default refresh, manual refresh, bounded failure backoff, safe cache expiry, and optional low-quota alerts.
+- User-initiated updates from this repository's GitHub Releases, with channel-specific assets and SHA-256 verification.
 - Single instance, Explorer-restart recovery, multi-monitor placement, and optional start with Windows.
 - English and Simplified Chinese UI, selected from Windows automatically.
 
@@ -41,7 +47,7 @@ The installer is not yet code-signed, so Microsoft Defender SmartScreen may show
 ## Use
 
 - **Left-click:** open or close the quota card.
-- **Right-click:** refresh now, open the Codex usage page, choose a 1/5/15-minute interval, configure a low-quota alert, select a theme, toggle startup, or exit.
+- **Right-click:** refresh now, open the Codex usage page, choose a 1/5/15-minute interval, configure a low-quota alert, select a theme, toggle startup, update now, or exit.
 - **Tray label:** weekly remaining percentage rounded to the nearest whole number.
 
 CodexStatus only calls the locally installed `codex app-server`. Each refresh performs `initialize → account/read → account/rateLimits/read`, then closes the process tree using a Windows Job Object. It selects an exact 10,080-minute window first and only accepts a 6–8 day fallback; a short window is never mislabeled as weekly quota.
@@ -50,7 +56,7 @@ The footer extrapolates the average consumption rate observed since the weekly c
 
 ## Privacy
 
-CodexStatus never reads or stores your OAuth token, email address, project content, prompts, or raw app-server response. It sends no telemetry or background network requests.
+CodexStatus never reads or stores your OAuth token, email address, project content, prompts, or raw app-server response. It sends no telemetry. It contacts GitHub only after you choose **Update now**; there is no background update timer.
 
 Two normal state files are stored under `%LOCALAPPDATA%\CodexStatus`:
 
@@ -85,7 +91,7 @@ Remove-Item Env:CODEX_STATUS_CHANNEL
 
 Development builds default to an isolated development tray GUID. Set `CODEX_STATUS_CHANNEL` to `beta` or `stable` only when packaging that installed channel; each channel also has its own window classes and single-instance mutex. Do not run a stable-channel binary from the build or staging directory—install it first so its persistent GUID is initially registered from the fixed executable path. Portable packages use `CODEX_STATUS_CHANNEL=portable` and the supported `HWND + uID` identity because their executable path is intentionally not fixed.
 
-For version tags, GitHub Actions builds a path-independent portable-channel ZIP and a stable-channel Inno Setup installer. Local development can also use the gnullvm target; llvm-mingw's `libunwind.dll` is then a development-only runtime dependency. Official release builds use MSVC and are a single executable.
+For version tags, GitHub Actions builds separate stable and portable executables, a path-independent portable ZIP, and a stable-channel Inno Setup installer. Local development can also use the gnullvm target; llvm-mingw's `libunwind.dll` is then a development-only runtime dependency. Official release builds use MSVC and are a single executable.
 
 ## Design boundaries
 
@@ -93,7 +99,17 @@ CodexStatus intentionally does not inject private taskbar UI, collect cost/token
 
 ## Thanks
 
-CodexStatus was informed by the interaction and information design of [CodexBar](https://github.com/steipete/CodexBar), [TaskbarQuota](https://github.com/zioder/TaskbarQuota), [CodexQuotaTaskbar](https://github.com/zHysie/CodexQuotaTaskbar), [codex-win-widget](https://github.com/Mauriciog87/codex-win-widget), and [Claude & Codex Battery](https://github.com/dennykim123/claude-codex-battery). Its compact flyout also takes cues from [Windows app design guidance](https://learn.microsoft.com/windows/apps/design/), [Twinkle Tray](https://github.com/xanderfrangos/twinkle-tray), and [EarTrumpet](https://github.com/File-New-Project/EarTrumpet). No source code was copied from those projects.
+This variant is derived from and remains grateful to the upstream
+[mmm1h/codex-status](https://github.com/mmm1h/codex-status) project. Its MIT
+license and copyright notice are preserved in [LICENSE](LICENSE). Additional
+interaction references include [CodexBar](https://github.com/steipete/CodexBar),
+[TaskbarQuota](https://github.com/zioder/TaskbarQuota),
+[CodexQuotaTaskbar](https://github.com/zHysie/CodexQuotaTaskbar),
+[codex-win-widget](https://github.com/Mauriciog87/codex-win-widget), and
+[Claude & Codex Battery](https://github.com/dennykim123/claude-codex-battery).
+The compact flyout also takes cues from [Windows app design guidance](https://learn.microsoft.com/windows/apps/design/),
+[Twinkle Tray](https://github.com/xanderfrangos/twinkle-tray), and
+[EarTrumpet](https://github.com/File-New-Project/EarTrumpet).
 
 The quota transport follows the official [Codex app-server rate-limit documentation](https://learn.chatgpt.com/docs/app-server#6-rate-limits-chatgpt). Notification-area behavior follows [Microsoft's guidance](https://learn.microsoft.com/windows/win32/uxguide/winenv-notification).
 

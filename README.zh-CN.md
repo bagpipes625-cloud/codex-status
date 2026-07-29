@@ -14,6 +14,10 @@
 
 CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标本身就是 `0–100` 的周剩余额度数字；暂时没有可信数据时显示 `--`。左键点击可查看重置倒计时、可选的 5 小时窗口、套餐和刷新状态。
 
+本仓库是基于上游
+[mmm1h/codex-status](https://github.com/mmm1h/codex-status)
+持续维护的社区衍生版本，保留上游 MIT 许可证与版权声明，同时采用独立的版本线和产品取舍。
+
 ## 主要特点
 
 - 在标准系统托盘图标内直接绘制周剩余额度。
@@ -24,6 +28,7 @@ CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标本身�
 - 只使用官方 Codex app-server RPC `account/rateLimits/read`，不读取 Token，不访问私有接口。
 - 纯 Win32 事件驱动；没有 Electron、WebView、WPF、WinUI、本地 HTTP 服务或常驻异步运行时。
 - 默认 5 分钟刷新，支持手动刷新、失败退避、安全缓存过期和可选低额度提醒。
+- 仅由用户主动触发的 GitHub Release 更新，区分安装版与便携版产物并校验 SHA-256。
 - 单实例、Explorer 重启恢复、多屏定位和开机启动。
 - 根据 Windows 自动选择英文或简体中文。
 
@@ -41,7 +46,7 @@ CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标本身�
 ## 使用
 
 - **左键：** 打开或关闭额度卡片。
-- **右键：** 立即刷新、打开 Codex 用量页、选择 1/5/15 分钟刷新、配置低额度提醒、选择主题、切换开机启动或退出。
+- **右键：** 立即刷新、打开 Codex 用量页、选择 1/5/15 分钟刷新、配置低额度提醒、选择主题、切换开机启动、立即更新或退出。
 - **托盘数字：** 周剩余百分比四舍五入到整数。
 
 每次刷新会短暂启动本机 `codex app-server`，完成 `initialize → account/read → account/rateLimits/read` 后，使用 Windows Job Object 关闭整个子进程树。周窗口优先精确匹配 10,080 分钟；否则只接受 6–8 天窗口，绝不会把短窗口误标成周额度。
@@ -50,7 +55,7 @@ CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标本身�
 
 ## 隐私
 
-CodexStatus 不读取或保存 OAuth Token、邮箱、项目内容、提示词和 app-server 原始响应，也不收集遥测或发起后台网络请求。
+CodexStatus 不读取或保存 OAuth Token、邮箱、项目内容、提示词和 app-server 原始响应，也不收集遥测。只有用户选择 **立即更新** 后才会访问 GitHub，不设置后台更新定时器。
 
 `%LOCALAPPDATA%\CodexStatus` 下通常只有两个状态文件：
 
@@ -85,7 +90,7 @@ Remove-Item Env:CODEX_STATUS_CHANNEL
 
 开发构建默认使用隔离的开发版托盘 GUID。只有打包相应安装通道时才把 `CODEX_STATUS_CHANNEL` 设为 `beta` 或 `stable`；各通道的窗口类和单实例互斥量也彼此隔离。不要直接从构建或暂存目录运行 stable 通道 EXE，应先安装到固定目录，让该 GUID 首次从正式路径完成注册。便携包使用 `CODEX_STATUS_CHANNEL=portable` 和受支持的 `HWND + uID` 标识，因为它的 EXE 路径本来就不固定。
 
-GitHub Actions 会为版本标签分别构建路径无关的 portable 通道 ZIP 和 stable 通道 Inno Setup 安装包。本地也可使用 gnullvm 开发工具链；此时 llvm-mingw 的 `libunwind.dll` 只是本地开发依赖，正式 MSVC Release 是单文件程序。
+GitHub Actions 会为版本标签分别构建 stable 与 portable 可执行文件、路径无关的便携 ZIP 和 stable 通道 Inno Setup 安装包。本地也可使用 gnullvm 开发工具链；此时 llvm-mingw 的 `libunwind.dll` 只是本地开发依赖，正式 MSVC Release 是单文件程序。
 
 ## 首版边界
 
@@ -93,7 +98,17 @@ GitHub Actions 会为版本标签分别构建路径无关的 portable 通道 ZIP
 
 ## 致谢
 
-交互和信息层级参考了 [CodexBar](https://github.com/steipete/CodexBar)、[TaskbarQuota](https://github.com/zioder/TaskbarQuota)、[CodexQuotaTaskbar](https://github.com/zHysie/CodexQuotaTaskbar)、[codex-win-widget](https://github.com/Mauriciog87/codex-win-widget) 和 [Claude & Codex Battery](https://github.com/dennykim123/claude-codex-battery)；紧凑浮层也借鉴了 [Windows 应用设计指南](https://learn.microsoft.com/windows/apps/design/)、[Twinkle Tray](https://github.com/xanderfrangos/twinkle-tray) 与 [EarTrumpet](https://github.com/File-New-Project/EarTrumpet) 的交互思路。本项目独立实现，没有复制这些项目的源代码。
+本衍生版本基于并感谢上游
+[mmm1h/codex-status](https://github.com/mmm1h/codex-status)，其 MIT
+许可证与版权声明完整保留在 [LICENSE](LICENSE) 中。其他交互参考包括
+[CodexBar](https://github.com/steipete/CodexBar)、
+[TaskbarQuota](https://github.com/zioder/TaskbarQuota)、
+[CodexQuotaTaskbar](https://github.com/zHysie/CodexQuotaTaskbar)、
+[codex-win-widget](https://github.com/Mauriciog87/codex-win-widget) 和
+[Claude & Codex Battery](https://github.com/dennykim123/claude-codex-battery)；
+紧凑浮层也借鉴了 [Windows 应用设计指南](https://learn.microsoft.com/windows/apps/design/)、
+[Twinkle Tray](https://github.com/xanderfrangos/twinkle-tray) 与
+[EarTrumpet](https://github.com/File-New-Project/EarTrumpet) 的交互思路。
 
 额度通信遵循官方 [Codex app-server 文档](https://learn.chatgpt.com/docs/app-server#6-rate-limits-chatgpt)，通知区域行为遵循 [Microsoft 指南](https://learn.microsoft.com/windows/win32/uxguide/winenv-notification)。
 
