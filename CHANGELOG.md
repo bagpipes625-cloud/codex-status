@@ -4,6 +4,13 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-07-29
+
+- Rename the on-demand update menu command to **Check for updates** for clearer behavior.
+- Move both lower-card reset timestamps down by one pixel for balanced vertical spacing.
+- When the five-hour quota is unavailable, use the weekly quota for both the tray
+  number and its two-pixel status rule regardless of the saved display preference.
+
 ## [0.4.2] - 2026-07-29
 
 - Display the running package version beside the CodexStatus title.

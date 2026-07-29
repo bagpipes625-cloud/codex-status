@@ -47,8 +47,8 @@ The installer is not yet code-signed, so Microsoft Defender SmartScreen may show
 ## Use
 
 - **Left-click:** open or close the quota card.
-- **Right-click:** refresh now, open the Codex usage page, choose a 1/5/15-minute interval, configure a low-quota alert, select a theme, toggle startup, update now, or exit.
-- **Tray label:** weekly remaining percentage rounded to the nearest whole number.
+- **Right-click:** refresh now, open the Codex usage page, choose a 1/5/15-minute interval, configure a low-quota alert, select a theme, toggle startup, check for updates, or exit.
+- **Tray label:** the selected five-hour or weekly remaining percentage, rounded to the nearest whole number; when five-hour data is unavailable, both the label and status rule fall back to weekly quota.
 
 CodexStatus only calls the locally installed `codex app-server`. Each refresh performs `initialize → account/read → account/rateLimits/read`, then closes the process tree using a Windows Job Object. It selects an exact 10,080-minute window first and only accepts a 6–8 day fallback; a short window is never mislabeled as weekly quota.
 
@@ -56,7 +56,7 @@ The footer extrapolates the average consumption rate observed since the weekly c
 
 ## Privacy
 
-CodexStatus never reads or stores your OAuth token, email address, project content, prompts, or raw app-server response. It sends no telemetry. It contacts GitHub only after you choose **Update now**; there is no background update timer.
+CodexStatus never reads or stores your OAuth token, email address, project content, prompts, or raw app-server response. It sends no telemetry. It contacts GitHub only after you choose **Check for updates**; there is no background update timer.
 
 Two normal state files are stored under `%LOCALAPPDATA%\CodexStatus`:
 

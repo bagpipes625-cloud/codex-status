@@ -170,6 +170,23 @@ struct TrayQuotaState {
     refresh_state: RefreshState,
 }
 
+fn tray_quota_state(display: &DisplayState, preferred: QuotaKind) -> TrayQuotaState {
+    let primary_kind = display.resolved_quota_kind(preferred);
+    let weekly_percent = display.quota_percent(QuotaKind::Weekly);
+    let five_hour_percent = display.quota_percent(QuotaKind::FiveHour);
+    let indicator_percent = if five_hour_percent.is_none() {
+        weekly_percent
+    } else {
+        display.quota_percent(primary_kind.other())
+    };
+    TrayQuotaState {
+        primary_kind,
+        primary_percent: display.quota_percent(primary_kind),
+        indicator_percent,
+        refresh_state: display.refresh_state,
+    }
+}
+
 enum LaunchMode {
     Normal,
     Background,
@@ -827,13 +844,7 @@ impl AppState {
     }
 
     fn current_tray_quota_state(&self) -> TrayQuotaState {
-        let primary_kind = self.display.resolved_quota_kind(self.settings.display_quota);
-        TrayQuotaState {
-            primary_kind,
-            primary_percent: self.display.quota_percent(primary_kind),
-            indicator_percent: self.display.quota_percent(primary_kind.other()),
-            refresh_state: self.display.refresh_state,
-        }
+        tray_quota_state(&self.display, self.settings.display_quota)
     }
 
     fn notify_data(&self) -> NOTIFYICONDATAW {
@@ -1166,7 +1177,7 @@ impl AppState {
                 self.settings.theme == "dark",
             )?;
             separator(menu)?;
-            append(menu, CMD_UPDATE, self.locale.text("Update now", "立即更新"), false)?;
+            append(menu, CMD_UPDATE, self.locale.text("Check for updates", "检查更新"), false)?;
             append(
                 menu,
                 CMD_EXIT,
@@ -1361,6 +1372,22 @@ fn diagnostic(_stage: &str) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{AccountSummary, QuotaWindow, SESSION_MINUTES, WEEK_MINUTES};
+
+    fn display_with_quotas(weekly: u8, five_hour: Option<u8>) -> DisplayState {
+        let window = |percent: u8, window_minutes| QuotaWindow {
+            used_percent: f64::from(100 - percent),
+            remaining_percent: f64::from(percent),
+            window_minutes,
+            resets_at: Some(i64::MAX),
+        };
+        DisplayState::live(QuotaSnapshot {
+            weekly: Some(window(weekly, WEEK_MINUTES)),
+            session: five_hour.map(|percent| window(percent, SESSION_MINUTES)),
+            account: AccountSummary::default(),
+            fetched_at: 0,
+        })
+    }
 
     #[test]
     fn rejects_unknown_options() {
@@ -1375,5 +1402,28 @@ mod tests {
         let mut target = [9_u16; 4];
         copy_utf16(&mut target, "abcdef");
         assert_eq!(target[3], 0);
+    }
+
+    #[test]
+    fn tray_indicator_uses_weekly_quota_when_five_hour_is_unavailable() {
+        let display = display_with_quotas(66, None);
+        for preferred in [QuotaKind::FiveHour, QuotaKind::Weekly] {
+            let state = tray_quota_state(&display, preferred);
+            assert_eq!(state.primary_kind, QuotaKind::Weekly);
+            assert_eq!(state.primary_percent, Some(66));
+            assert_eq!(state.indicator_percent, Some(66));
+        }
+    }
+
+    #[test]
+    fn tray_indicator_uses_the_other_quota_when_both_are_available() {
+        let display = display_with_quotas(66, Some(85));
+        let five_hour = tray_quota_state(&display, QuotaKind::FiveHour);
+        assert_eq!(five_hour.primary_percent, Some(85));
+        assert_eq!(five_hour.indicator_percent, Some(66));
+
+        let weekly = tray_quota_state(&display, QuotaKind::Weekly);
+        assert_eq!(weekly.primary_percent, Some(66));
+        assert_eq!(weekly.indicator_percent, Some(85));
     }
 }

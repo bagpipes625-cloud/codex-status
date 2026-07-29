@@ -655,9 +655,9 @@ unsafe fn quota_metric_column(
                 detail,
                 RECT {
                     left,
-                    top: rect.top + scale(47, dpi),
+                    top: rect.top + scale(48, dpi),
                     right: rect.right - scale(10, dpi),
-                    bottom: rect.bottom - scale(4, dpi),
+                    bottom: rect.bottom - scale(3, dpi),
                 },
                 scale(12, dpi),
                 FW_NORMAL.0 as i32,
@@ -711,9 +711,9 @@ unsafe fn metric_column(
                 detail,
                 RECT {
                     left: rect.left + scale(12, dpi),
-                    top: rect.top + scale(47, dpi),
+                    top: rect.top + scale(48, dpi),
                     right: rect.right - scale(10, dpi),
-                    bottom: rect.bottom - scale(4, dpi),
+                    bottom: rect.bottom - scale(3, dpi),
                 },
                 scale(12, dpi),
                 FW_NORMAL.0 as i32,
@@ -1150,7 +1150,7 @@ mod tests {
     #[test]
     fn version_label_uses_the_running_package_version() {
         assert_eq!(version_text(), format!(" - v{}", env!("CARGO_PKG_VERSION")));
-        assert_eq!(version_text(), " - v0.4.2");
+        assert_eq!(version_text(), " - v0.4.3");
     }
 
     #[test]
