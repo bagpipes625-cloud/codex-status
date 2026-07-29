@@ -1,4 +1,4 @@
-use crate::model::QuotaSnapshot;
+use crate::model::{QuotaKind, QuotaSnapshot};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Write};
@@ -10,6 +10,7 @@ const APP_DIR: &str = "CodexStatus";
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
     pub refresh_minutes: u32,
+    pub display_quota: QuotaKind,
     pub alert_threshold: Option<u8>,
     pub locale: String,
     pub theme: String,
@@ -21,6 +22,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             refresh_minutes: 5,
+            display_quota: QuotaKind::FiveHour,
             alert_threshold: None,
             locale: "auto".to_owned(),
             theme: "system".to_owned(),
@@ -131,6 +133,17 @@ mod tests {
         };
         settings.normalize();
         assert_eq!(settings, Settings::default());
+    }
+
+    #[test]
+    fn old_settings_default_to_the_five_hour_quota() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "refreshMinutes": 5,
+            "locale": "auto",
+            "theme": "system"
+        }))
+        .unwrap();
+        assert_eq!(settings.display_quota, QuotaKind::FiveHour);
     }
 
     #[test]

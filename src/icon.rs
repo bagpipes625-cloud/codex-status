@@ -41,15 +41,11 @@ impl IconTone {
     }
 }
 
-pub fn tone_for(state: &DisplayState) -> IconTone {
+pub fn tone_for(state: &DisplayState, percent: Option<u8>) -> IconTone {
     if state.refresh_state != RefreshState::Live {
-        return if state.weekly_percent().is_some() {
-            IconTone::Stale
-        } else {
-            IconTone::Unavailable
-        };
+        return if percent.is_some() { IconTone::Stale } else { IconTone::Unavailable };
     }
-    quota_tone(state.weekly_percent())
+    quota_tone(percent)
 }
 
 fn quota_tone(percent: Option<u8>) -> IconTone {
@@ -78,14 +74,16 @@ impl Drop for OwnedIcon {
 }
 
 pub fn create_icon(
-    percent: Option<u8>,
+    display_percent: Option<u8>,
+    indicator_percent: Option<u8>,
     tone: IconTone,
     size: u32,
     high_contrast: bool,
     dark_taskbar: bool,
 ) -> windows::core::Result<OwnedIcon> {
     let size = size.clamp(16, 32);
-    let xor = render_bgra(percent, tone, size, high_contrast, dark_taskbar);
+    let xor =
+        render_bgra(display_percent, indicator_percent, tone, size, high_contrast, dark_taskbar);
     let mask_stride = size.div_ceil(32) * 4;
     let and_mask = vec![0_u8; (mask_stride * size) as usize];
     let icon = unsafe {
@@ -103,14 +101,16 @@ pub fn create_icon(
 }
 
 pub fn render_bgra(
-    percent: Option<u8>,
+    display_percent: Option<u8>,
+    indicator_percent: Option<u8>,
     tone: IconTone,
     size: u32,
     high_contrast: bool,
     dark_taskbar: bool,
 ) -> Vec<u8> {
     let size = size.clamp(16, 32);
-    let pixels = render_rgba(percent, tone, size, high_contrast, dark_taskbar);
+    let pixels =
+        render_rgba(display_percent, indicator_percent, tone, size, high_contrast, dark_taskbar);
     let mut bytes = Vec::with_capacity((size * size * 4) as usize);
 
     // CreateIcon's 32-bpp XOR input is consumed in the same top-left order as
@@ -126,14 +126,15 @@ pub fn render_bgra(
 }
 
 fn render_rgba(
-    percent: Option<u8>,
+    display_percent: Option<u8>,
+    indicator_percent: Option<u8>,
     tone: IconTone,
     size: u32,
     high_contrast: bool,
     dark_taskbar: bool,
 ) -> Vec<[u8; 4]> {
     let mut pixels = vec![[0_u8; 4]; (size * size) as usize];
-    let label = percent.map_or_else(|| "--".to_owned(), |value| value.min(100).to_string());
+    let label = display_percent.map_or_else(|| "--".to_owned(), |value| value.min(100).to_string());
     let text = foreground(dark_taskbar, tone.is_muted() && !high_contrast);
 
     if let Some(mask) = rasterize_label(&label, size) {
@@ -144,7 +145,7 @@ fn render_rgba(
         draw_fallback_label(&mut pixels, size, &label, text);
     }
 
-    draw_quota_status_bar(&mut pixels, size, percent, high_contrast, dark_taskbar);
+    draw_quota_status_bar(&mut pixels, size, indicator_percent, high_contrast, dark_taskbar);
     pixels
 }
 
@@ -445,7 +446,7 @@ mod tests {
                 for value in
                     [None, Some(0), Some(9), Some(20), Some(49), Some(50), Some(87), Some(100)]
                 {
-                    let pixels = render_bgra(value, IconTone::Healthy, size, false, dark);
+                    let pixels = render_bgra(value, value, IconTone::Healthy, size, false, dark);
                     assert_eq!(pixels.len(), (size * size * 4) as usize);
                     assert!(pixels.iter().any(|byte| *byte != 0));
                 }
@@ -455,7 +456,7 @@ mod tests {
 
     #[test]
     fn common_two_digit_value_is_readable_but_keeps_a_transparent_background() {
-        let pixels = render_rgba(Some(87), IconTone::Healthy, 16, false, false);
+        let pixels = render_rgba(Some(87), Some(87), IconTone::Healthy, 16, false, false);
         let visible: Vec<_> =
             pixels.iter().enumerate().filter(|(_, pixel)| pixel[3] > 20).collect();
         let left = visible.iter().map(|(index, _)| index % 16).min().unwrap();
@@ -480,8 +481,10 @@ mod tests {
         }
 
         for size in [16_usize, 20, 24, 32] {
-            let single = render_rgba(Some(5), IconTone::Healthy, size as u32, false, false);
-            let double = render_rgba(Some(65), IconTone::Healthy, size as u32, false, false);
+            let single =
+                render_rgba(Some(5), Some(5), IconTone::Healthy, size as u32, false, false);
+            let double =
+                render_rgba(Some(65), Some(65), IconTone::Healthy, size as u32, false, false);
             let (single_left, single_right, single_height) = text_bounds(&single, size);
             let (_, _, double_height) = text_bounds(&double, size);
 
@@ -492,8 +495,8 @@ mod tests {
 
     #[test]
     fn light_and_dark_taskbars_get_opposite_foreground_colors() {
-        let light = render_rgba(Some(87), IconTone::Healthy, 16, false, false);
-        let dark = render_rgba(Some(87), IconTone::Healthy, 16, false, true);
+        let light = render_rgba(Some(87), Some(87), IconTone::Healthy, 16, false, false);
+        let dark = render_rgba(Some(87), Some(87), IconTone::Healthy, 16, false, true);
         let sample = light
             .iter()
             .zip(&dark)
@@ -504,7 +507,7 @@ mod tests {
 
     #[test]
     fn quota_status_bar_is_two_pixels_high_and_keeps_horizontal_margins() {
-        let pixels = render_rgba(Some(50), IconTone::Healthy, 16, false, false);
+        let pixels = render_rgba(Some(50), Some(50), IconTone::Healthy, 16, false, false);
         let accent = quota_tone(Some(50)).accent(false, false);
         for y in [14, 15] {
             assert_eq!(pixels[y * 16], [0, 0, 0, 0]);
@@ -515,7 +518,7 @@ mod tests {
 
     #[test]
     fn create_icon_bytes_keep_the_quota_status_bar_on_the_bottom() {
-        let pixels = render_bgra(Some(50), IconTone::Healthy, 16, false, false);
+        let pixels = render_bgra(Some(50), Some(50), IconTone::Healthy, 16, false, false);
         let accent = quota_tone(Some(50)).accent(false, false);
         let accent_bgra = [accent[2], accent[1], accent[0], accent[3]];
         let pixel = |x: usize, y: usize| &pixels[(y * 16 + x) * 4..][..4];
@@ -536,7 +539,7 @@ mod tests {
             (0, IconTone::Critical),
         ];
         for (percent, expected_tone) in cases {
-            let pixels = render_rgba(Some(percent), expected_tone, 16, false, false);
+            let pixels = render_rgba(Some(percent), Some(percent), expected_tone, 16, false, false);
             let accent = expected_tone.accent(false, false);
             let bar = &pixels[15 * 16 + 1..15 * 16 + 15];
             assert!(bar.iter().all(|pixel| *pixel == accent), "percent={percent}");
@@ -544,8 +547,15 @@ mod tests {
     }
 
     #[test]
+    fn status_bar_uses_the_non_displayed_quota() {
+        let pixels = render_rgba(Some(85), Some(19), IconTone::Healthy, 16, false, false);
+        let critical = quota_tone(Some(19)).accent(false, false);
+        assert!(pixels[15 * 16 + 1..15 * 16 + 15].iter().all(|pixel| *pixel == critical));
+    }
+
+    #[test]
     fn unavailable_quota_uses_a_full_width_neutral_status_bar() {
-        let pixels = render_rgba(None, IconTone::Unavailable, 16, false, false);
+        let pixels = render_rgba(None, None, IconTone::Unavailable, 16, false, false);
         let track = quota_track(false, false);
         assert!(pixels[15 * 16 + 1..15 * 16 + 15].iter().all(|pixel| *pixel == track));
     }
@@ -570,9 +580,9 @@ mod tests {
                 error: None,
             }
         }
-        assert_eq!(tone_for(&state(19)), IconTone::Critical);
-        assert_eq!(tone_for(&state(20)), IconTone::Warning);
-        assert_eq!(tone_for(&state(49)), IconTone::Warning);
-        assert_eq!(tone_for(&state(50)), IconTone::Healthy);
+        assert_eq!(tone_for(&state(19), Some(19)), IconTone::Critical);
+        assert_eq!(tone_for(&state(20), Some(20)), IconTone::Warning);
+        assert_eq!(tone_for(&state(49), Some(49)), IconTone::Warning);
+        assert_eq!(tone_for(&state(50), Some(50)), IconTone::Healthy);
     }
 }

@@ -1,4 +1,6 @@
-use crate::model::{AccountSummary, DisplayState, QuotaWindow, RefreshState, UsageProjection};
+use crate::model::{
+    AccountSummary, DisplayState, QuotaKind, QuotaWindow, RefreshState, UsageProjection,
+};
 use chrono::{DateTime, Local};
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -26,10 +28,11 @@ use winreg::RegKey;
 use winreg::enums::HKEY_CURRENT_USER;
 
 pub const CARD_WIDTH: i32 = 376;
-pub const CARD_HEIGHT: i32 = 296;
+pub const CARD_HEIGHT: i32 = 304;
 const HERO_DIVIDER_X: i32 = 202;
 const METRICS_LEFT_X: i32 = 16;
-const METRICS_LEFT_DIVIDER_X: i32 = (METRICS_LEFT_X + HERO_DIVIDER_X) / 2;
+const METRICS_FIRST_DIVIDER_X: i32 = 140;
+const METRICS_SECOND_DIVIDER_X: i32 = 264;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Locale {
@@ -181,24 +184,29 @@ pub fn show_fatal_error(message: &str) {
     }
 }
 
-pub fn tooltip(state: &DisplayState, locale: Locale) -> String {
+pub fn tooltip(state: &DisplayState, preferred: QuotaKind, locale: Locale) -> String {
     let status = match state.refresh_state {
         RefreshState::Loading => locale.text("refreshing", "刷新中"),
         RefreshState::Live => locale.text("live", "实时"),
         RefreshState::Cached => locale.text("cached", "缓存"),
         RefreshState::Unavailable => locale.text("unavailable", "不可用"),
     };
-    match state.weekly_percent() {
-        Some(percent) => format!(
-            "CodexStatus · {} {}% · {status}",
-            locale.text("weekly remaining", "周剩余"),
-            percent
-        ),
+    let kind = state.resolved_quota_kind(preferred);
+    match state.quota_percent(kind) {
+        Some(percent) => {
+            format!("CodexStatus · {} {}% · {status}", quota_remaining_label(kind, locale), percent)
+        }
         None => format!("CodexStatus · {status}"),
     }
 }
 
-pub fn paint_card(hwnd: HWND, state: &DisplayState, locale: Locale, theme: Theme) {
+pub fn paint_card(
+    hwnd: HWND,
+    state: &DisplayState,
+    preferred: QuotaKind,
+    locale: Locale,
+    theme: Theme,
+) {
     unsafe {
         let mut paint = PAINTSTRUCT::default();
         let hdc = BeginPaint(hwnd, &mut paint);
@@ -212,11 +220,11 @@ pub fn paint_card(hwnd: HWND, state: &DisplayState, locale: Locale, theme: Theme
         let bitmap = CreateCompatibleBitmap(hdc, width, height);
         if !buffer.is_invalid() && !bitmap.is_invalid() {
             let old_bitmap = SelectObject(buffer, HGDIOBJ(bitmap.0));
-            draw_card(buffer, state, locale, theme, dpi);
+            draw_card(buffer, state, preferred, locale, theme, dpi);
             let _ = BitBlt(hdc, 0, 0, width, height, Some(buffer), 0, 0, SRCCOPY);
             let _ = SelectObject(buffer, old_bitmap);
         } else {
-            draw_card(hdc, state, locale, theme, dpi);
+            draw_card(hdc, state, preferred, locale, theme, dpi);
         }
         if !bitmap.is_invalid() {
             let _ = DeleteObject(HGDIOBJ(bitmap.0));
@@ -228,15 +236,27 @@ pub fn paint_card(hwnd: HWND, state: &DisplayState, locale: Locale, theme: Theme
     }
 }
 
-unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme, dpi: u32) {
+unsafe fn draw_card(
+    hdc: HDC,
+    state: &DisplayState,
+    preferred: QuotaKind,
+    locale: Locale,
+    theme: Theme,
+    dpi: u32,
+) {
     unsafe {
         let width = scale(CARD_WIDTH, dpi);
         let height = scale(CARD_HEIGHT, dpi);
         fill(hdc, RECT { left: 0, top: 0, right: width, bottom: height }, theme.background);
         let _ = SetBkMode(hdc, TRANSPARENT);
 
-        let status_color = accent_for(state, theme.high_contrast);
-        let quota_bar_color = quota_bar_color(state.weekly_percent(), theme.high_contrast);
+        let primary_kind = state.resolved_quota_kind(preferred);
+        let secondary_kind = primary_kind.other();
+        let primary_window = state.quota_window(primary_kind);
+        let secondary_window = state.quota_window(secondary_kind);
+        let primary_percent = primary_window.map(QuotaWindow::display_percent);
+        let status_color = accent_for(state, primary_percent, theme.high_contrast);
+        let quota_bar_color = quota_bar_color(primary_percent, theme.high_contrast);
         fill_rounded(
             hdc,
             RECT {
@@ -289,7 +309,7 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
         draw_text(
             hdc,
             locale,
-            locale.text("Weekly remaining", "本周剩余"),
+            quota_remaining_label(primary_kind, locale),
             RECT {
                 left: scale(30, dpi),
                 top: scale(59, dpi),
@@ -300,14 +320,10 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
             FW_SEMIBOLD.0 as i32,
             theme.muted,
         );
-        draw_percentage(hdc, state.weekly_percent(), locale, theme, dpi);
+        draw_percentage(hdc, primary_percent, locale, theme, dpi);
 
-        let reset = state
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.weekly.as_ref())
-            .map(|window| reset_details(window, locale))
-            .unwrap_or_else(|| {
+        let reset =
+            primary_window.map(|window| reset_details(window, locale)).unwrap_or_else(|| {
                 (
                     locale.text("Unavailable", "暂无").to_owned(),
                     locale.text("Reset time", "重置时间").to_owned(),
@@ -373,7 +389,7 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
             bottom: scale(154, dpi),
         };
         fill_rounded(hdc, bar, scale(6, dpi), theme.line);
-        if let Some(value) = state.weekly_percent() {
+        if let Some(value) = primary_percent {
             let filled = (bar.left + (bar.right - bar.left) * i32::from(value) / 100)
                 .max(bar.left + (bar.bottom - bar.top));
             if value > 0 {
@@ -386,11 +402,10 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
             }
         }
 
-        let session = state
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.session.as_ref())
-            .map_or_else(|| "--".to_owned(), |window| format!("{}%", window.display_percent()));
+        let secondary = secondary_window
+            .map_or_else(|| "--".to_owned(), |window| window.display_percent().to_string());
+        let secondary_detail =
+            secondary_window.and_then(|window| quota_reset_time_detail(window, locale));
         let plan = state
             .snapshot
             .as_ref()
@@ -413,13 +428,13 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
             left: scale(METRICS_LEFT_X, dpi),
             top: scale(184, dpi),
             right: width - scale(16, dpi),
-            bottom: scale(252, dpi),
+            bottom: scale(260, dpi),
         };
         outlined_surface(hdc, metrics, scale(12, dpi), theme.surface_alt, theme.line, dpi);
         let divider_width = scale(1, dpi).max(1);
-        let left_divider = scale(METRICS_LEFT_DIVIDER_X, dpi);
-        let aligned_divider = scale(HERO_DIVIDER_X, dpi);
-        for divider in [left_divider, aligned_divider] {
+        let first_divider = scale(METRICS_FIRST_DIVIDER_X, dpi);
+        let second_divider = scale(METRICS_SECOND_DIVIDER_X, dpi);
+        for divider in [first_divider, second_divider] {
             fill(
                 hdc,
                 RECT {
@@ -431,14 +446,15 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
                 theme.line,
             );
         }
-        metric_column(
+        quota_metric_column(
             hdc,
             locale,
-            RECT { right: left_divider, ..metrics },
-            MetricContent {
-                label: locale.text("5-hour quota", "5 小时额度"),
-                value: &session,
-                detail: None,
+            RECT { right: first_divider, ..metrics },
+            QuotaMetricContent {
+                label: quota_label(secondary_kind, locale),
+                value: &secondary,
+                show_percent: secondary_window.is_some(),
+                detail: secondary_detail.as_deref(),
             },
             theme,
             dpi,
@@ -446,15 +462,7 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
         metric_column(
             hdc,
             locale,
-            RECT { left: left_divider + divider_width, right: aligned_divider, ..metrics },
-            MetricContent { label: locale.text("Plan", "套餐"), value: &plan, detail: None },
-            theme,
-            dpi,
-        );
-        metric_column(
-            hdc,
-            locale,
-            RECT { left: aligned_divider + divider_width, ..metrics },
+            RECT { left: first_divider + divider_width, right: second_divider, ..metrics },
             MetricContent {
                 label: locale.text("Reset credits", "重置机会"),
                 value: &credits,
@@ -463,11 +471,18 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
             theme,
             dpi,
         );
+        metric_column(
+            hdc,
+            locale,
+            RECT { left: second_divider + divider_width, ..metrics },
+            MetricContent { label: locale.text("Plan", "套餐"), value: &plan, detail: None },
+            theme,
+            dpi,
+        );
 
-        let projection = state
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.weekly_usage_projection(Local::now().timestamp()))
+        let projection = primary_window
+            .and(state.snapshot.as_ref())
+            .and_then(|snapshot| snapshot.usage_projection(primary_kind, Local::now().timestamp()))
             .map(|projection| projection_label(projection, locale));
         if let Some(projection) = projection {
             draw_text_center(
@@ -476,7 +491,7 @@ unsafe fn draw_card(hdc: HDC, state: &DisplayState, locale: Locale, theme: Theme
                 &projection.text,
                 RECT {
                     left: scale(18, dpi),
-                    top: scale(258, dpi),
+                    top: scale(266, dpi),
                     right: width - scale(18, dpi),
                     bottom: height - scale(7, dpi),
                 },
@@ -548,6 +563,93 @@ struct MetricContent<'a> {
     detail: Option<&'a str>,
 }
 
+struct QuotaMetricContent<'a> {
+    label: &'a str,
+    value: &'a str,
+    show_percent: bool,
+    detail: Option<&'a str>,
+}
+
+unsafe fn quota_metric_column(
+    hdc: HDC,
+    locale: Locale,
+    rect: RECT,
+    content: QuotaMetricContent<'_>,
+    theme: Theme,
+    dpi: u32,
+) {
+    unsafe {
+        let left = rect.left + scale(12, dpi);
+        draw_text(
+            hdc,
+            locale,
+            content.label,
+            RECT {
+                left,
+                top: rect.top + scale(5, dpi),
+                right: rect.right - scale(10, dpi),
+                bottom: rect.top + scale(25, dpi),
+            },
+            scale(11, dpi),
+            FW_NORMAL.0 as i32,
+            theme.muted,
+        );
+        draw_text(
+            hdc,
+            locale,
+            content.value,
+            RECT {
+                left,
+                top: rect.top + scale(19, dpi),
+                right: rect.right - scale(10, dpi),
+                bottom: rect.top + scale(52, dpi),
+            },
+            scale(18, dpi),
+            FW_SEMIBOLD.0 as i32,
+            theme.text,
+        );
+        if content.show_percent {
+            let number_width = measure_text_width(
+                hdc,
+                locale,
+                content.value,
+                scale(18, dpi),
+                FW_SEMIBOLD.0 as i32,
+            );
+            draw_text(
+                hdc,
+                locale,
+                "%",
+                RECT {
+                    left: left + number_width + scale(2, dpi),
+                    top: rect.top + scale(25, dpi),
+                    right: rect.right - scale(10, dpi),
+                    bottom: rect.top + scale(52, dpi),
+                },
+                scale(12, dpi),
+                FW_NORMAL.0 as i32,
+                theme.text,
+            );
+        }
+        if let Some(detail) = content.detail {
+            draw_text(
+                hdc,
+                locale,
+                detail,
+                RECT {
+                    left,
+                    top: rect.top + scale(47, dpi),
+                    right: rect.right - scale(10, dpi),
+                    bottom: rect.bottom - scale(4, dpi),
+                },
+                scale(12, dpi),
+                FW_NORMAL.0 as i32,
+                theme.muted,
+            );
+        }
+    }
+}
+
 unsafe fn metric_column(
     hdc: HDC,
     locale: Locale,
@@ -579,7 +681,7 @@ unsafe fn metric_column(
                 left: rect.left + scale(12, dpi),
                 top: rect.top + scale(19, dpi),
                 right: rect.right - scale(10, dpi),
-                bottom: rect.bottom - scale(16, dpi),
+                bottom: rect.top + scale(52, dpi),
             },
             scale(18, dpi),
             FW_SEMIBOLD.0 as i32,
@@ -596,7 +698,7 @@ unsafe fn metric_column(
                     right: rect.right - scale(10, dpi),
                     bottom: rect.bottom - scale(4, dpi),
                 },
-                scale(10, dpi),
+                scale(12, dpi),
                 FW_NORMAL.0 as i32,
                 theme.muted,
             );
@@ -695,20 +797,7 @@ fn reset_details(window: &QuotaWindow, locale: Locale) -> (String, String) {
     };
     let now = Local::now().timestamp();
     let seconds = reset.saturating_sub(now).max(0);
-    let days = seconds / 86_400;
-    let hours = (seconds % 86_400) / 3_600;
-    let minutes = (seconds % 3_600) / 60;
-    let countdown = if locale == Locale::Chinese {
-        if days > 0 {
-            format!("{days} 天 {hours} 小时")
-        } else {
-            format!("{hours} 小时 {minutes} 分")
-        }
-    } else if days > 0 {
-        format!("{days}d {hours}h")
-    } else {
-        format!("{hours}h {minutes}m")
-    };
+    let countdown = reset_countdown(seconds, locale);
     let local_time = DateTime::from_timestamp(reset, 0)
         .map(|time| {
             let time = time.with_timezone(&Local);
@@ -722,6 +811,32 @@ fn reset_details(window: &QuotaWindow, locale: Locale) -> (String, String) {
     (countdown, local_time)
 }
 
+fn reset_countdown(seconds: i64, locale: Locale) -> String {
+    let days = seconds / 86_400;
+    let hours = (seconds % 86_400) / 3_600;
+    let total_minutes = seconds / 60;
+    let minutes = total_minutes % 60;
+    if locale == Locale::Chinese {
+        if seconds >= 86_400 {
+            format!("{days}天{hours}小时")
+        } else if seconds >= 3_600 {
+            format!("{hours}小时{minutes}分")
+        } else if seconds >= 60 {
+            format!("{total_minutes}分钟")
+        } else {
+            "不足1分钟".to_owned()
+        }
+    } else if seconds >= 86_400 {
+        format!("{days}d {hours}h")
+    } else if seconds >= 3_600 {
+        format!("{hours}h {minutes}m")
+    } else if seconds >= 60 {
+        format!("{total_minutes}m")
+    } else {
+        "Less than 1m".to_owned()
+    }
+}
+
 fn reset_credit_detail(account: &AccountSummary, locale: Locale) -> Option<String> {
     match account.reset_credits {
         Some(0) => Some(locale.text("No reset credits available", "暂无可用重置券").to_owned()),
@@ -729,13 +844,38 @@ fn reset_credit_detail(account: &AccountSummary, locale: Locale) -> Option<Strin
             DateTime::from_timestamp(expires_at, 0).map(|time| {
                 let time = time.with_timezone(&Local);
                 if locale == Locale::Chinese {
-                    format!("最近到期 {}", time.format("%-m月%-d日 %H:%M:%S"))
+                    time.format("%-m月%-d日 %H:%M").to_string()
                 } else {
-                    format!("Expires {}", time.format("%m/%d %H:%M:%S"))
+                    time.format("%m/%d %H:%M").to_string()
                 }
             })
         }),
         None => None,
+    }
+}
+
+fn quota_reset_time_detail(window: &QuotaWindow, locale: Locale) -> Option<String> {
+    DateTime::from_timestamp(window.resets_at?, 0).map(|time| {
+        let time = time.with_timezone(&Local);
+        if locale == Locale::Chinese {
+            time.format("%-m月%-d日 %H:%M").to_string()
+        } else {
+            time.format("%m/%d %H:%M").to_string()
+        }
+    })
+}
+
+fn quota_remaining_label(kind: QuotaKind, locale: Locale) -> &'static str {
+    match kind {
+        QuotaKind::FiveHour => locale.text("5-hour remaining", "5小时剩余"),
+        QuotaKind::Weekly => locale.text("Weekly remaining", "本周剩余"),
+    }
+}
+
+fn quota_label(kind: QuotaKind, locale: Locale) -> &'static str {
+    match kind {
+        QuotaKind::FiveHour => locale.text("5-hour quota", "5 小时额度"),
+        QuotaKind::Weekly => locale.text("Weekly quota", "周额度"),
     }
 }
 
@@ -765,14 +905,14 @@ fn quota_bar_color(percent: Option<u8>, high_contrast: bool) -> COLORREF {
     }
 }
 
-fn accent_for(state: &DisplayState, high_contrast: bool) -> COLORREF {
+fn accent_for(state: &DisplayState, percent: Option<u8>, high_contrast: bool) -> COLORREF {
     if high_contrast {
         return rgb(255, 255, 255);
     }
     if state.refresh_state != RefreshState::Live {
         return rgb(91, 123, 153);
     }
-    match state.weekly_percent() {
+    match percent {
         Some(value) if value < 20 => rgb(211, 64, 73),
         Some(value) if value < 50 => rgb(210, 134, 0),
         Some(_) => rgb(16, 163, 127),
@@ -945,8 +1085,8 @@ mod tests {
     fn localizes_tooltip_status() {
         let state =
             DisplayState { snapshot: None, refresh_state: RefreshState::Unavailable, error: None };
-        assert!(tooltip(&state, Locale::English).contains("unavailable"));
-        assert!(tooltip(&state, Locale::Chinese).contains("不可用"));
+        assert!(tooltip(&state, QuotaKind::FiveHour, Locale::English).contains("unavailable"));
+        assert!(tooltip(&state, QuotaKind::FiveHour, Locale::Chinese).contains("不可用"));
     }
 
     #[test]
@@ -959,6 +1099,14 @@ mod tests {
         };
         let (countdown, _) = reset_details(&window, Locale::English);
         assert!(!countdown.contains('-'));
+    }
+
+    #[test]
+    fn formats_reset_countdown_at_each_requested_boundary() {
+        assert_eq!(reset_countdown(2 * 86_400 + 3 * 3_600, Locale::Chinese), "2天3小时");
+        assert_eq!(reset_countdown(23 * 3_600 + 7 * 60, Locale::Chinese), "23小时7分");
+        assert_eq!(reset_countdown(59 * 60, Locale::Chinese), "59分钟");
+        assert_eq!(reset_countdown(59, Locale::Chinese), "不足1分钟");
     }
 
     #[test]
@@ -978,7 +1126,7 @@ mod tests {
     }
 
     #[test]
-    fn formats_the_nearest_reset_credit_expiration_with_seconds() {
+    fn formats_the_nearest_reset_credit_expiration_to_minutes() {
         use chrono::TimeZone;
 
         let expires_at = Local.with_ymd_and_hms(2026, 8, 1, 3, 8, 34).single().unwrap().timestamp();
@@ -988,14 +1136,8 @@ mod tests {
             ..AccountSummary::default()
         };
 
-        assert_eq!(
-            reset_credit_detail(&account, Locale::Chinese).as_deref(),
-            Some("最近到期 8月1日 03:08:34")
-        );
-        assert_eq!(
-            reset_credit_detail(&account, Locale::English).as_deref(),
-            Some("Expires 08/01 03:08:34")
-        );
+        assert_eq!(reset_credit_detail(&account, Locale::Chinese).as_deref(), Some("8月1日 03:08"));
+        assert_eq!(reset_credit_detail(&account, Locale::English).as_deref(), Some("08/01 03:08"));
     }
 
     #[test]

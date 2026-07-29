@@ -1,6 +1,6 @@
 use crate::app_server::AppServerClient;
 use crate::icon::{OwnedIcon, create_icon, tone_for};
-use crate::model::{DisplayState, QuotaSnapshot, RefreshState};
+use crate::model::{DisplayState, QuotaKind, QuotaSnapshot, RefreshState};
 use crate::settings::{AppStore, Settings};
 use crate::{startup, ui, updater};
 use chrono::Utc;
@@ -114,6 +114,8 @@ const TRAY_CLOSE_COALESCE: Duration = Duration::from_millis(250);
 
 const CMD_REFRESH: u32 = 100;
 const CMD_USAGE: u32 = 101;
+const CMD_DISPLAY_FIVE_HOUR: u32 = 105;
+const CMD_DISPLAY_WEEKLY: u32 = 106;
 const CMD_INTERVAL_1: u32 = 111;
 const CMD_INTERVAL_5: u32 = 115;
 const CMD_INTERVAL_15: u32 = 125;
@@ -160,6 +162,14 @@ struct UpdateOutcome {
     result: Result<Option<updater::StagedUpdate>, updater::UpdateError>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TrayQuotaState {
+    primary_kind: QuotaKind,
+    primary_percent: Option<u8>,
+    indicator_percent: Option<u8>,
+    refresh_state: RefreshState,
+}
+
 enum LaunchMode {
     Normal,
     Background,
@@ -177,6 +187,7 @@ struct AppState {
     display: DisplayState,
     client: AppServerClient,
     tray_icon: Option<OwnedIcon>,
+    tray_quota_state: Option<TrayQuotaState>,
     tray_added: bool,
     tray_failure_logged: bool,
     refreshing: bool,
@@ -277,6 +288,7 @@ pub fn run() -> Result<(), AppError> {
         display,
         client: AppServerClient::new(),
         tray_icon: None,
+        tray_quota_state: None,
         tray_added: false,
         tray_failure_logged: false,
         refreshing: false,
@@ -302,6 +314,7 @@ pub fn run() -> Result<(), AppError> {
     unsafe {
         let state = &mut *raw;
         state.reset_refresh_timer(state.settings.refresh_minutes.saturating_mul(60_000));
+        let _ = SetTimer(Some(hwnd), TIMER_CARD, 30_000, None);
         if background {
             let _ = SetTimer(Some(hwnd), TIMER_STARTUP, 30_000, None);
         } else {
@@ -431,8 +444,10 @@ unsafe extern "system" fn main_window_proc(
                             state.start_refresh(false);
                         }
                         TIMER_CARD => {
-                            state.expire_cache_if_needed();
-                            let _ = InvalidateRect(Some(state.flyout), None, false);
+                            state.refresh_time_sensitive_state();
+                            if IsWindowVisible(state.flyout).as_bool() {
+                                let _ = InvalidateRect(Some(state.flyout), None, false);
+                            }
                         }
                         TIMER_FLYOUT_ACTIVATE => {
                             let _ = KillTimer(Some(hwnd), TIMER_FLYOUT_ACTIVATE);
@@ -480,7 +495,13 @@ unsafe extern "system" fn flyout_window_proc(
         match message {
             WM_PAINT if !state_ptr.is_null() => {
                 let state = &*state_ptr;
-                ui::paint_card(hwnd, &state.display, state.locale, state.theme);
+                ui::paint_card(
+                    hwnd,
+                    &state.display,
+                    state.settings.display_quota,
+                    state.locale,
+                    state.theme,
+                );
                 return LRESULT(0);
             }
             WM_ERASEBKGND => return LRESULT(1),
@@ -613,14 +634,15 @@ impl AppState {
         }
     }
 
-    fn expire_cache_if_needed(&mut self) {
-        if self.display.refresh_state == RefreshState::Live {
-            return;
-        }
+    fn refresh_time_sensitive_state(&mut self) {
         let now = Utc::now().timestamp();
-        if self.display.snapshot.as_ref().is_some_and(|value| !value.is_cache_valid(now)) {
+        if self.display.refresh_state != RefreshState::Live
+            && self.display.snapshot.as_ref().is_some_and(|value| !value.is_cache_valid(now))
+        {
             self.display.snapshot = None;
             self.display.refresh_state = RefreshState::Unavailable;
+        }
+        if self.tray_quota_state != Some(self.current_tray_quota_state()) {
             let _ = self.update_tray(false);
         }
     }
@@ -716,9 +738,11 @@ impl AppState {
         diagnostic("tray:render");
         let dpi = unsafe { GetDpiForSystem().max(96) };
         let size = unsafe { GetSystemMetricsForDpi(SM_CXSMICON, dpi).max(16) as u32 };
+        let quota_state = self.current_tray_quota_state();
         let icon = match create_icon(
-            self.display.weekly_percent(),
-            tone_for(&self.display),
+            quota_state.primary_percent,
+            quota_state.indicator_percent,
+            tone_for(&self.display, quota_state.primary_percent),
             size,
             self.theme.high_contrast,
             self.theme.tray_dark,
@@ -734,7 +758,10 @@ impl AppState {
         data.uFlags |= NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
         data.uCallbackMessage = WM_TRAY;
         data.hIcon = icon.handle();
-        copy_utf16(&mut data.szTip, &ui::tooltip(&self.display, self.locale));
+        copy_utf16(
+            &mut data.szTip,
+            &ui::tooltip(&self.display, self.settings.display_quota, self.locale),
+        );
         let add = force_add || !self.tray_added;
         let operation = if add { NIM_ADD } else { NIM_MODIFY };
         diagnostic(if add { "tray:add" } else { "tray:modify" });
@@ -767,6 +794,7 @@ impl AppState {
         }
         diagnostic("tray:ok");
         self.tray_failure_logged = false;
+        self.tray_quota_state = Some(quota_state);
         self.tray_icon = Some(icon);
         if add {
             self.tray_added = true;
@@ -787,8 +815,8 @@ impl AppState {
                 self.show_balloon(
                     self.locale.text("CodexStatus is ready", "CodexStatus 已就绪"),
                     self.locale.text(
-                        "Your weekly quota is shown in the tray. Drag the icon out of the overflow area to keep it visible.",
-                        "周剩余额度会直接显示在托盘图标中。可将图标从折叠区拖出，保持常显。",
+                        "Your selected quota is shown in the tray. Drag the icon out of the overflow area to keep it visible.",
+                        "你选择的额度会直接显示在托盘图标中。可将图标从折叠区拖出，保持常显。",
                     ),
                 );
                 self.settings.onboarding_shown = true;
@@ -796,6 +824,16 @@ impl AppState {
             }
         }
         true
+    }
+
+    fn current_tray_quota_state(&self) -> TrayQuotaState {
+        let primary_kind = self.display.resolved_quota_kind(self.settings.display_quota);
+        TrayQuotaState {
+            primary_kind,
+            primary_percent: self.display.quota_percent(primary_kind),
+            indicator_percent: self.display.quota_percent(primary_kind.other()),
+            refresh_state: self.display.refresh_state,
+        }
     }
 
     fn notify_data(&self) -> NOTIFYICONDATAW {
@@ -925,7 +963,6 @@ impl AppState {
         self.flyout_hidden_for_tray_activation = None;
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
-            let _ = KillTimer(Some(self.hwnd), TIMER_CARD);
             let _ = ShowWindow(self.flyout, SW_HIDE);
         }
     }
@@ -998,7 +1035,6 @@ impl AppState {
             let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
             let _ = SetWindowPos(self.flyout, None, x, y, width, height, SWP_SHOWWINDOW);
             let _ = SetForegroundWindow(self.flyout);
-            let _ = SetTimer(Some(self.hwnd), TIMER_CARD, 30_000, None);
             let _ = InvalidateRect(Some(self.flyout), None, false);
         }
     }
@@ -1055,6 +1091,19 @@ impl AppState {
                 CMD_USAGE,
                 self.locale.text("Open Codex usage", "打开 Codex 用量页"),
                 false,
+            )?;
+            separator(menu)?;
+            append(
+                menu,
+                CMD_DISPLAY_FIVE_HOUR,
+                self.locale.text("Show 5-hour quota", "显示5小时额度"),
+                self.settings.display_quota == QuotaKind::FiveHour,
+            )?;
+            append(
+                menu,
+                CMD_DISPLAY_WEEKLY,
+                self.locale.text("Show weekly quota", "显示周额度"),
+                self.settings.display_quota == QuotaKind::Weekly,
             )?;
             separator(menu)?;
             append(
@@ -1135,6 +1184,16 @@ impl AppState {
                 CMD_REFRESH => self.start_refresh(true),
                 CMD_USAGE => self.open_url(USAGE_URL),
                 CMD_UPDATE => self.start_update_check(),
+                CMD_DISPLAY_FIVE_HOUR | CMD_DISPLAY_WEEKLY => {
+                    self.settings.display_quota = if command == CMD_DISPLAY_WEEKLY {
+                        QuotaKind::Weekly
+                    } else {
+                        QuotaKind::FiveHour
+                    };
+                    self.persist_settings();
+                    let _ = self.update_tray(false);
+                    let _ = InvalidateRect(Some(self.flyout), None, false);
+                }
                 CMD_INTERVAL_1 | CMD_INTERVAL_5 | CMD_INTERVAL_15 => {
                     self.settings.refresh_minutes = match command {
                         CMD_INTERVAL_1 => 1,

@@ -74,7 +74,7 @@ BEGIN
   BLOCK "040904E4"
   BEGIN
    VALUE "CompanyName", "CodexStatus Contributors\0"
-   VALUE "FileDescription", "Codex weekly quota in the Windows tray\0"
+   VALUE "FileDescription", "Codex quota in the Windows tray\0"
    VALUE "FileVersion", "{package_version}\0"
    VALUE "InternalName", "CodexStatus\0"
    VALUE "OriginalFilename", "CodexStatus.exe\0"

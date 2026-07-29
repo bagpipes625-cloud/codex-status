@@ -2,7 +2,7 @@
 
 # CodexStatus
 
-**在 Windows 托盘里一眼看清 Codex 周剩余额度。**
+**在 Windows 托盘里一眼看清 Codex 剩余额度。**
 
 [English](README.md) · [下载](https://github.com/bagpipes625-cloud/codex-status/releases/latest) · [反馈问题](https://github.com/bagpipes625-cloud/codex-status/issues)
 
@@ -12,7 +12,7 @@
 |:--:|:--:|
 | ![CodexStatus 浅色额度卡片](assets/screenshots/codexstatus-light.png) | ![CodexStatus 深色额度卡片](assets/screenshots/codexstatus-dark.png) |
 
-CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标本身就是 `0–100` 的周剩余额度数字；暂时没有可信数据时显示 `--`。左键点击可查看重置倒计时、可选的 5 小时窗口、套餐和刷新状态。
+CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标显示用户选择的 5 小时或周剩余额度 `0–100`；不可用时显示 `--`，底部 2px 色条同时反映另一周期。左键点击可查看两个周期的重置时间、套餐和刷新状态。
 
 本仓库是基于上游
 [mmm1h/codex-status](https://github.com/mmm1h/codex-status)
@@ -20,7 +20,7 @@ CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标本身�
 
 ## 主要特点
 
-- 在标准系统托盘图标内直接绘制周剩余额度。
+- 可从托盘菜单选择在系统托盘图标内显示 5 小时或周剩余额度。
 - 透明背景、随任务栏明暗切换的 Segoe UI 数字；底部仅用一条细线标记绿色（≥50%）、琥珀色（20–49%）、红色（<20%）或缓存状态。
 - 原生圆角卡片，自动适配浅色、深色、高对比度和多显示器 DPI。
 - 可从托盘菜单选择跟随系统、浅色或深色界面主题。

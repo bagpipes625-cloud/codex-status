@@ -4,6 +4,18 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-29
+
+- Add persistent tray-menu selection between the five-hour and weekly quota,
+  defaulting to the five-hour window and falling back to weekly when unavailable.
+- Swap the flyout's primary and secondary quota sections with the selected window,
+  including percentage, reset timing, progress bar, and forecast.
+- Keep the tray number on the displayed quota while its two-pixel status rule tracks
+  the other quota window using the existing green, amber, and red thresholds.
+- Refine reset countdowns for day, hour, minute, and sub-minute intervals.
+- Align lower-card values and render the percentage sign at timestamp size and
+  normal weight.
+
 ## [0.4.0] - 2026-07-29
 
 - Keep one-digit tray labels at the established two-digit font size and center

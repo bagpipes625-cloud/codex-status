@@ -2,7 +2,7 @@
 
 # CodexStatus
 
-**Your Codex weekly quota, readable at a glance in the Windows tray.**
+**Your Codex quota, readable at a glance in the Windows tray.**
 
 [简体中文](README.zh-CN.md) · [Download](https://github.com/bagpipes625-cloud/codex-status/releases/latest) · [Report an issue](https://github.com/bagpipes625-cloud/codex-status/issues)
 
@@ -12,7 +12,7 @@
 |:--:|:--:|
 | ![CodexStatus light quota flyout](assets/screenshots/codexstatus-light.png) | ![CodexStatus dark quota flyout](assets/screenshots/codexstatus-dark.png) |
 
-CodexStatus is a tiny native Windows utility. Its notification-area icon is the number itself—`0` to `100`, or `--` when no trustworthy weekly value is available. Click it for reset timing, the optional five-hour window, plan information, and refresh status.
+CodexStatus is a tiny native Windows utility. Its notification-area icon is the selected five-hour or weekly quota—`0` to `100`, or `--` when unavailable. The two-pixel rule tracks the other quota window. Click it for both reset timings, plan information, and refresh status.
 
 This repository is a community-maintained variant derived from
 [mmm1h/codex-status](https://github.com/mmm1h/codex-status). It retains the
@@ -21,7 +21,7 @@ line and product decisions.
 
 ## Highlights
 
-- Weekly remaining quota drawn directly into the standard tray icon.
+- Five-hour or weekly remaining quota selectable directly from the tray menu.
 - Transparent, theme-aware Segoe UI digits with a restrained green (≥50%), amber (20–49%), red (<20%), or muted status rule.
 - Native rounded flyout that follows light, dark, high-contrast, and per-monitor DPI settings.
 - System, light, and dark flyout themes selectable from the tray menu.
