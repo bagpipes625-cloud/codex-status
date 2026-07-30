@@ -4,6 +4,17 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-07-30
+
+- Add subtle cached Direct2D shadows to quota and account cards without adding
+  an offscreen surface or composition device tree.
+- Render healthy, warning, and critical quota arcs with restrained light-to-dark
+  gradients while preserving the existing green, yellow, and red thresholds.
+- Align the visible bottoms of the plan, reset-credit count, and expiration
+  timestamp in the dual-quota footer.
+- Keep high-contrast rendering free of decorative shadows and retain the solid
+  system-readable quota colors.
+
 ## [0.5.2] - 2026-07-30
 
 - Match the Windows 10 fallback window shape and the rendered outer border to

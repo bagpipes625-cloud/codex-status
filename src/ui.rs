@@ -872,7 +872,7 @@ unsafe fn draw_bottom_metrics(
                 left,
                 top: metrics.top + scale(20, dpi),
                 right: divider - scale(10, dpi),
-                bottom: metrics.bottom - scale(7, dpi),
+                bottom: metrics.bottom - scale(8, dpi),
             },
             scale(20, dpi),
             FW_SEMIBOLD.0 as i32,
@@ -895,7 +895,7 @@ unsafe fn draw_bottom_metrics(
         let value_width =
             measure_text_width(hdc, locale, credits, scale(20, dpi), FW_SEMIBOLD.0 as i32);
         let value_right = (right_left + value_width).min(metrics.right - scale(10, dpi));
-        let bottom = metrics.bottom - scale(7, dpi);
+        let value_bottom = metrics.bottom - scale(10, dpi);
         draw_text_bottom(
             hdc,
             locale,
@@ -904,7 +904,7 @@ unsafe fn draw_bottom_metrics(
                 left: right_left,
                 top: metrics.top + scale(20, dpi),
                 right: value_right,
-                bottom,
+                bottom: value_bottom,
             },
             scale(20, dpi),
             FW_SEMIBOLD.0 as i32,
@@ -919,7 +919,7 @@ unsafe fn draw_bottom_metrics(
                     left: value_right + scale(10, dpi),
                     top: metrics.top + scale(24, dpi),
                     right: metrics.right - scale(10, dpi),
-                    bottom,
+                    bottom: metrics.bottom - scale(7, dpi),
                 },
                 scale(11, dpi),
                 FW_NORMAL.0 as i32,

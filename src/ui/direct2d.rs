@@ -18,15 +18,17 @@ use std::cell::{Cell, RefCell};
 use windows::Win32::Foundation::{COLORREF, D2DERR_RECREATE_TARGET, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_HOLLOW,
-    D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
+    D2D1_FIGURE_END_OPEN, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
-    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LINE_JOIN_ROUND, D2D1_PRESENT_OPTIONS_NONE,
+    D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
+    D2D1_GAMMA_2_2, D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LINE_JOIN_ROUND,
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE,
     D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
     D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
-    D2D1CreateFactory, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    D2D1CreateFactory, ID2D1Brush, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1LinearGradientBrush,
+    ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -231,6 +233,7 @@ impl Surface {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Palette {
+    dark: bool,
     status: COLORREF,
     background: COLORREF,
     text: COLORREF,
@@ -271,6 +274,7 @@ impl Palette {
         let (weekly_surface, weekly_border) =
             quota_card_colors(input.theme, weekly_selected, weekly_pressed);
         Self {
+            dark: input.theme.dark,
             status,
             background: input.theme.background,
             text: input.theme.text,
@@ -322,10 +326,28 @@ struct Brushes {
     weekly_actual: ID2D1SolidColorBrush,
     inner_track: ID2D1SolidColorBrush,
     theoretical: ID2D1SolidColorBrush,
+    shadow_far: ID2D1SolidColorBrush,
+    shadow_near: ID2D1SolidColorBrush,
+    healthy_gradient: ID2D1LinearGradientBrush,
+    warning_gradient: ID2D1LinearGradientBrush,
+    critical_gradient: ID2D1LinearGradientBrush,
 }
 
 impl Brushes {
     fn new(target: &ID2D1HwndRenderTarget, palette: Palette) -> Result<Self> {
+        let (healthy, warning, critical) = if palette.dark {
+            (
+                ((43, 190, 154), (10, 137, 103)),
+                ((230, 171, 61), (185, 113, 8)),
+                ((228, 102, 109), (184, 55, 65)),
+            )
+        } else {
+            (
+                ((37, 181, 147), (7, 139, 105)),
+                ((226, 161, 42), (184, 105, 0)),
+                ((226, 91, 99), (184, 45, 56)),
+            )
+        };
         Ok(Self {
             status: brush(target, palette.status)?,
             background: brush(target, palette.background)?,
@@ -345,6 +367,11 @@ impl Brushes {
             weekly_actual: brush(target, palette.weekly_actual)?,
             inner_track: brush(target, palette.inner_track)?,
             theoretical: brush(target, palette.theoretical)?,
+            shadow_far: alpha_brush(target, if palette.dark { 0.22 } else { 0.055 })?,
+            shadow_near: alpha_brush(target, if palette.dark { 0.28 } else { 0.075 })?,
+            healthy_gradient: gradient_brush(target, healthy.0, healthy.1)?,
+            warning_gradient: gradient_brush(target, warning.0, warning.1)?,
+            critical_gradient: gradient_brush(target, critical.0, critical.1)?,
         })
     }
 }
@@ -643,6 +670,9 @@ fn draw_quota_panel(
     let right = right as f32;
     let center_x = center_x as f32;
     let card = rounded_rect(left + 0.5, 40.5, right - 0.5, 267.5, 10.0);
+    if !input.theme.high_contrast {
+        draw_card_shadow(target, &card, brushes);
+    }
     unsafe {
         target.FillRoundedRectangle(&card, surface);
         target.DrawRoundedRectangle(&card, border, 1.0, None::<&ID2D1StrokeStyle>);
@@ -677,17 +707,17 @@ fn draw_quota_panel(
         window.and_then(|window| theoretical_remaining_percent(window, Local::now().timestamp()));
     draw_arc(target, factory, stroke_style, center_x, 149.0, 66.0, 10.0, 100, track)?;
     if let Some(percent) = actual.filter(|percent| *percent > 0) {
-        draw_arc(
-            target,
-            factory,
-            stroke_style,
-            center_x,
-            149.0,
-            66.0,
-            10.0,
-            percent,
-            actual_brush,
-        )?;
+        let arc_brush: &ID2D1Brush = if input.theme.high_contrast {
+            actual_brush
+        } else {
+            let gradient = quota_gradient(brushes, percent);
+            unsafe {
+                gradient.SetStartPoint(Vector2 { X: center_x - 66.0, Y: 149.0 });
+                gradient.SetEndPoint(Vector2 { X: center_x + 66.0, Y: 149.0 });
+            }
+            gradient
+        };
+        draw_arc(target, factory, stroke_style, center_x, 149.0, 66.0, 10.0, percent, arc_brush)?;
     }
     draw_arc(target, factory, stroke_style, center_x, 149.0, 54.0, 8.0, 100, &brushes.inner_track)?;
     if let Some(percent) = theoretical.filter(|percent| *percent > 0) {
@@ -733,6 +763,9 @@ fn draw_stacked_metrics(
     account: &AccountMetrics,
 ) {
     let metrics = rounded_rect(192.5, 40.5, 319.5, 267.5, 10.0);
+    if !input.theme.high_contrast {
+        draw_card_shadow(target, &metrics, brushes);
+    }
     unsafe {
         target.FillRoundedRectangle(&metrics, &brushes.five_surface);
         target.DrawRoundedRectangle(&metrics, &brushes.line, 1.0, None::<&ID2D1StrokeStyle>);
@@ -792,6 +825,9 @@ fn draw_bottom_metrics(
     account: &AccountMetrics,
 ) {
     let metrics = rounded_rect(16.5, 276.5, 359.5, 335.5, 10.0);
+    if !input.theme.high_contrast {
+        draw_card_shadow(target, &metrics, brushes);
+    }
     unsafe {
         target.FillRoundedRectangle(&metrics, &brushes.metrics_surface);
         target.DrawRoundedRectangle(&metrics, &brushes.line, 1.0, None::<&ID2D1StrokeStyle>);
@@ -813,7 +849,7 @@ fn draw_bottom_metrics(
     draw_text(
         target,
         &account.plan,
-        rect(30.0, 299.0, 178.0, 335.0),
+        rect(30.0, 298.0, 178.0, 334.0),
         &formats.metric_value,
         &brushes.text,
     );
@@ -827,7 +863,7 @@ fn draw_bottom_metrics(
     draw_text(
         target,
         &account.credits,
-        rect(203.0, 299.0, 350.0, 335.0),
+        rect(203.0, 296.0, 350.0, 332.0),
         &formats.metric_value,
         &brushes.text,
     );
@@ -886,7 +922,7 @@ fn draw_arc(
     radius: f32,
     width: f32,
     percent: u8,
-    brush: &ID2D1SolidColorBrush,
+    brush: &ID2D1Brush,
 ) -> Result<()> {
     if percent == 0 {
         return Ok(());
@@ -904,6 +940,41 @@ fn draw_arc(
         target.DrawGeometry(&geometry, brush, width, stroke_style);
     }
     Ok(())
+}
+
+fn quota_gradient(brushes: &Brushes, percent: u8) -> &ID2D1LinearGradientBrush {
+    if percent > 49 {
+        &brushes.healthy_gradient
+    } else if percent > 19 {
+        &brushes.warning_gradient
+    } else {
+        &brushes.critical_gradient
+    }
+}
+
+fn draw_card_shadow(target: &ID2D1HwndRenderTarget, card: &D2D1_ROUNDED_RECT, brushes: &Brushes) {
+    unsafe {
+        target.FillRoundedRectangle(
+            &rounded_rect(
+                card.rect.left - 1.0,
+                card.rect.top + 1.5,
+                card.rect.right + 1.0,
+                card.rect.bottom + 3.5,
+                card.radiusX + 1.0,
+            ),
+            &brushes.shadow_far,
+        );
+        target.FillRoundedRectangle(
+            &rounded_rect(
+                card.rect.left - 0.5,
+                card.rect.top + 0.75,
+                card.rect.right + 0.5,
+                card.rect.bottom + 2.0,
+                card.radiusX + 0.5,
+            ),
+            &brushes.shadow_near,
+        );
+    }
 }
 
 fn arc_points(center_x: f32, center_y: f32, radius: f32, percent: u8) -> Vec<Vector2> {
@@ -953,6 +1024,42 @@ fn measure_text(
 
 fn brush(target: &ID2D1HwndRenderTarget, value: COLORREF) -> Result<ID2D1SolidColorBrush> {
     unsafe { target.CreateSolidColorBrush(&color(value), None) }
+}
+
+fn alpha_brush(target: &ID2D1HwndRenderTarget, alpha: f32) -> Result<ID2D1SolidColorBrush> {
+    unsafe { target.CreateSolidColorBrush(&rgba(0, 0, 0, alpha), None) }
+}
+
+fn gradient_brush(
+    target: &ID2D1HwndRenderTarget,
+    start: (u8, u8, u8),
+    end: (u8, u8, u8),
+) -> Result<ID2D1LinearGradientBrush> {
+    let stops = [
+        D2D1_GRADIENT_STOP { position: 0.0, color: rgba(start.0, start.1, start.2, 1.0) },
+        D2D1_GRADIENT_STOP { position: 1.0, color: rgba(end.0, end.1, end.2, 1.0) },
+    ];
+    unsafe {
+        let collection =
+            target.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)?;
+        target.CreateLinearGradientBrush(
+            &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                startPoint: Vector2 { X: 0.0, Y: 0.0 },
+                endPoint: Vector2 { X: 1.0, Y: 0.0 },
+            },
+            None,
+            &collection,
+        )
+    }
+}
+
+fn rgba(red: u8, green: u8, blue: u8, alpha: f32) -> D2D1_COLOR_F {
+    D2D1_COLOR_F {
+        r: f32::from(red) / 255.0,
+        g: f32::from(green) / 255.0,
+        b: f32::from(blue) / 255.0,
+        a: alpha,
+    }
 }
 
 fn color(value: COLORREF) -> D2D1_COLOR_F {
