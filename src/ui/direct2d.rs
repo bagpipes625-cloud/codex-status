@@ -527,7 +527,7 @@ fn draw_frame(
     unsafe {
         target.FillRectangle(&rect(0.0, 0.0, width, height), &brushes.background);
         target.DrawRoundedRectangle(
-            &rounded_rect(0.5, 0.5, width - 0.5, height - 0.5, 12.0),
+            &rounded_rect(0.5, 0.5, width - 0.5, height - 0.5, 8.0),
             &brushes.line,
             1.0,
             None::<&ID2D1StrokeStyle>,
@@ -642,7 +642,7 @@ fn draw_quota_panel(
     let left = left as f32;
     let right = right as f32;
     let center_x = center_x as f32;
-    let card = rounded_rect(left + 0.5, 40.5, right - 0.5, 267.5, 15.0);
+    let card = rounded_rect(left + 0.5, 40.5, right - 0.5, 267.5, 10.0);
     unsafe {
         target.FillRoundedRectangle(&card, surface);
         target.DrawRoundedRectangle(&card, border, 1.0, None::<&ID2D1StrokeStyle>);
@@ -732,7 +732,7 @@ fn draw_stacked_metrics(
     input: &PaintInput<'_>,
     account: &AccountMetrics,
 ) {
-    let metrics = rounded_rect(192.5, 40.5, 319.5, 267.5, 15.0);
+    let metrics = rounded_rect(192.5, 40.5, 319.5, 267.5, 10.0);
     unsafe {
         target.FillRoundedRectangle(&metrics, &brushes.five_surface);
         target.DrawRoundedRectangle(&metrics, &brushes.line, 1.0, None::<&ID2D1StrokeStyle>);
@@ -791,7 +791,7 @@ fn draw_bottom_metrics(
     input: &PaintInput<'_>,
     account: &AccountMetrics,
 ) {
-    let metrics = rounded_rect(16.5, 276.5, 359.5, 335.5, 12.0);
+    let metrics = rounded_rect(16.5, 276.5, 359.5, 335.5, 10.0);
     unsafe {
         target.FillRoundedRectangle(&metrics, &brushes.metrics_surface);
         target.DrawRoundedRectangle(&metrics, &brushes.line, 1.0, None::<&ID2D1StrokeStyle>);

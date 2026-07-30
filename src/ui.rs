@@ -277,8 +277,8 @@ pub fn apply_flyout_shape(hwnd: HWND, dpi: u32) {
             0,
             client.right.max(1) + 1,
             client.bottom.max(1) + 1,
-            scale(24, dpi).max(2),
-            scale(24, dpi).max(2),
+            scale(16, dpi).max(2),
+            scale(16, dpi).max(2),
         );
         if SetWindowRgn(hwnd, Some(region), true) == 0 {
             let _ = DeleteObject(HGDIOBJ(region.0));
@@ -385,7 +385,14 @@ unsafe fn draw_card(
         let dimensions = flyout_dimensions(state);
         let width = scale(dimensions.width, dpi);
         let height = scale(dimensions.height, dpi);
-        fill(hdc, RECT { left: 0, top: 0, right: width, bottom: height }, theme.background);
+        outlined_surface(
+            hdc,
+            RECT { left: 0, top: 0, right: width, bottom: height },
+            8,
+            theme.background,
+            theme.line,
+            dpi,
+        );
         let _ = SetBkMode(hdc, TRANSPARENT);
 
         let effective_kind = state.resolved_quota_kind(preferred);
@@ -500,7 +507,7 @@ unsafe fn draw_card(
                     right: width - scale(16, dpi),
                     bottom: height - scale(16, dpi),
                 };
-                outlined_surface(hdc, metrics, scale(12, dpi), theme.surface_alt, theme.line, dpi);
+                outlined_surface(hdc, metrics, 10, theme.surface_alt, theme.line, dpi);
                 let divider_width = scale(1, dpi).max(1);
                 let divider = scale(188, dpi);
                 fill(
@@ -542,7 +549,7 @@ unsafe fn draw_quota_panel(
         let geometry = quota_panel_geometry(panel.slot);
         let rect = quota_card_rect(panel.slot, dpi);
         let (surface, border) = quota_card_colors(theme, panel.selected, panel.pressed);
-        outlined_surface(hdc, rect, scale(15, dpi), surface, border, dpi);
+        outlined_surface(hdc, rect, 10, surface, border, dpi);
         if theme.high_contrast && (panel.selected || panel.pressed) {
             let marker_width = scale(if panel.pressed { 52 } else { 36 }, dpi);
             let marker_height = scale(if panel.pressed { 5 } else { 3 }, dpi).max(1);
@@ -740,7 +747,7 @@ unsafe fn draw_stacked_metrics(
             right: scale(320, dpi),
             bottom: scale(268, dpi),
         };
-        outlined_surface(hdc, metrics, scale(15, dpi), theme.surface, theme.line, dpi);
+        outlined_surface(hdc, metrics, 10, theme.surface, theme.line, dpi);
         let divider_top = scale(153, dpi);
         fill(
             hdc,
@@ -1034,13 +1041,14 @@ fn theoretical_color(theme: Theme) -> COLORREF {
 unsafe fn outlined_surface(
     hdc: HDC,
     rect: RECT,
-    radius: i32,
+    radius_dip: i32,
     surface: COLORREF,
     border_color: COLORREF,
     dpi: u32,
 ) {
     unsafe {
-        fill_rounded(hdc, rect, radius, border_color);
+        let diameter = scale(radius_dip.saturating_mul(2), dpi);
+        fill_rounded(hdc, rect, diameter, border_color);
         let border = scale(1, dpi).max(1);
         fill_rounded(
             hdc,
@@ -1050,7 +1058,7 @@ unsafe fn outlined_surface(
                 right: rect.right - border,
                 bottom: rect.bottom - border,
             },
-            (radius - border).max(1),
+            (diameter - border.saturating_mul(2)).max(1),
             surface,
         );
     }
@@ -1384,15 +1392,15 @@ unsafe fn fill(hdc: HDC, rect: RECT, color: COLORREF) {
     }
 }
 
-unsafe fn fill_rounded(hdc: HDC, rect: RECT, radius: i32, color: COLORREF) {
+unsafe fn fill_rounded(hdc: HDC, rect: RECT, diameter: i32, color: COLORREF) {
     unsafe {
         let region = CreateRoundRectRgn(
             rect.left,
             rect.top,
             rect.right + 1,
             rect.bottom + 1,
-            radius.max(1),
-            radius.max(1),
+            diameter.max(1),
+            diameter.max(1),
         );
         let brush = CreateSolidBrush(color);
         let _ = FillRgn(hdc, region, brush);

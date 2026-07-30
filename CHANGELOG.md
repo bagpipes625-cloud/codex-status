@@ -4,6 +4,13 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-07-30
+
+- Match the Windows 10 fallback window shape and the rendered outer border to
+  the Windows 11 8-DIP corner-radius baseline.
+- Standardize every inner quota and account card on a 10-DIP radius without
+  changing any established layout coordinates or dimensions.
+
 ## [0.5.1] - 2026-07-30
 
 - Align the title, version, and refresh metadata with the header accent while
