@@ -4,6 +4,12 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-07-30
+
+- Render the neutral time-paced quota arc with a full-width gray-blue gradient
+  while preserving the existing gauge geometry, quota colors, and high-contrast
+  fallback.
+
 ## [0.5.4] - 2026-07-30
 
 - Strengthen the right edge of the lightweight card shadow while preserving its

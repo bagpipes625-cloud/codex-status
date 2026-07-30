@@ -331,21 +331,24 @@ struct Brushes {
     healthy_gradient: ID2D1LinearGradientBrush,
     warning_gradient: ID2D1LinearGradientBrush,
     critical_gradient: ID2D1LinearGradientBrush,
+    theoretical_gradient: ID2D1LinearGradientBrush,
 }
 
 impl Brushes {
     fn new(target: &ID2D1HwndRenderTarget, palette: Palette) -> Result<Self> {
-        let (healthy, warning, critical) = if palette.dark {
+        let (healthy, warning, critical, theoretical) = if palette.dark {
             (
                 ((43, 190, 154), (10, 137, 103)),
                 ((230, 171, 61), (185, 113, 8)),
                 ((228, 102, 109), (184, 55, 65)),
+                ((174, 195, 205), (117, 147, 163)),
             )
         } else {
             (
                 ((37, 181, 147), (7, 139, 105)),
                 ((226, 161, 42), (184, 105, 0)),
                 ((226, 91, 99), (184, 45, 56)),
+                ((153, 174, 185), (105, 132, 148)),
             )
         };
         Ok(Self {
@@ -372,6 +375,7 @@ impl Brushes {
             healthy_gradient: gradient_brush(target, healthy.0, healthy.1)?,
             warning_gradient: gradient_brush(target, warning.0, warning.1)?,
             critical_gradient: gradient_brush(target, critical.0, critical.1)?,
+            theoretical_gradient: gradient_brush(target, theoretical.0, theoretical.1)?,
         })
     }
 }
@@ -721,6 +725,17 @@ fn draw_quota_panel(
     }
     draw_arc(target, factory, stroke_style, center_x, 149.0, 54.0, 8.0, 100, &brushes.inner_track)?;
     if let Some(percent) = theoretical.filter(|percent| *percent > 0) {
+        let theoretical_brush: &ID2D1Brush = if input.theme.high_contrast {
+            &brushes.theoretical
+        } else {
+            unsafe {
+                brushes
+                    .theoretical_gradient
+                    .SetStartPoint(Vector2 { X: center_x - 54.0, Y: 149.0 });
+                brushes.theoretical_gradient.SetEndPoint(Vector2 { X: center_x + 54.0, Y: 149.0 });
+            }
+            &brushes.theoretical_gradient
+        };
         draw_arc(
             target,
             factory,
@@ -730,7 +745,7 @@ fn draw_quota_panel(
             54.0,
             8.0,
             percent,
-            &brushes.theoretical,
+            theoretical_brush,
         )?;
     }
     draw_percentage(target, dwrite, formats, &brushes.text, &brushes.muted, center_x, actual)?;

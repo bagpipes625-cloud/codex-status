@@ -85,7 +85,7 @@ Normal builds do not write activity logs. If Windows rejects a notification icon
 
 ## Performance
 
-Version 0.5.4 remains an event-driven native Win32 process. It performs no
+Version 0.5.5 remains an event-driven native Win32 process. It performs no
 continuous animation or polling between configured refresh timers. Hiding the
 flyout releases its window-sized render target, drops the remaining Direct2D
 resources after a short grace period, and trims idle resident pages. Exact
