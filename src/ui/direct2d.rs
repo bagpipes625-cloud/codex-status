@@ -956,9 +956,9 @@ fn draw_card_shadow(target: &ID2D1HwndRenderTarget, card: &D2D1_ROUNDED_RECT, br
     unsafe {
         target.FillRoundedRectangle(
             &rounded_rect(
-                card.rect.left - 1.0,
+                card.rect.left - 0.75,
                 card.rect.top + 1.5,
-                card.rect.right + 1.0,
+                card.rect.right + 2.5,
                 card.rect.bottom + 3.5,
                 card.radiusX + 1.0,
             ),
@@ -966,9 +966,9 @@ fn draw_card_shadow(target: &ID2D1HwndRenderTarget, card: &D2D1_ROUNDED_RECT, br
         );
         target.FillRoundedRectangle(
             &rounded_rect(
-                card.rect.left - 0.5,
+                card.rect.left - 0.25,
                 card.rect.top + 0.75,
-                card.rect.right + 0.5,
+                card.rect.right + 1.5,
                 card.rect.bottom + 2.0,
                 card.radiusX + 0.5,
             ),

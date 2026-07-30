@@ -4,6 +4,11 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-07-30
+
+- Strengthen the right edge of the lightweight card shadow while preserving its
+  existing downward depth, opacity, layout, and cached-brush implementation.
+
 ## [0.5.3] - 2026-07-30
 
 - Add subtle cached Direct2D shadows to quota and account cards without adding
