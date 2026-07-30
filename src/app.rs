@@ -111,11 +111,14 @@ const TIMER_STARTUP: usize = 2;
 const TIMER_CARD: usize = 3;
 const TIMER_FLYOUT_ACTIVATE: usize = 4;
 const TIMER_WORKING_SET_TRIM: usize = 5;
+const TIMER_REFRESH_ANIMATION: usize = 6;
 const WORKING_SET_TRIM_DELAY_MS: u32 = 2_000;
+const REFRESH_ANIMATION_INTERVAL_MS: u32 = 16;
 
 const TRAY_ACTIVATION_DEBOUNCE: Duration = Duration::from_millis(300);
 const FLYOUT_ACTIVATION_GUARD: Duration = Duration::from_millis(220);
 const TRAY_CLOSE_COALESCE: Duration = Duration::from_millis(250);
+const REFRESH_ANIMATION_DURATION: Duration = Duration::from_millis(600);
 
 const CMD_REFRESH: u32 = 100;
 const CMD_USAGE: u32 = 101;
@@ -259,12 +262,15 @@ struct AppState {
     tray_failure_logged: bool,
     refreshing: bool,
     refresh_pending: bool,
+    refresh_feedback: bool,
+    refresh_animation_started: Option<Instant>,
     update_checking: bool,
     failures: u8,
     last_tray_activation: Option<Instant>,
     flyout_ignore_inactive_until: Option<Instant>,
     flyout_hidden_for_tray_activation: Option<Instant>,
     pressed_quota: Option<QuotaKind>,
+    refresh_button_pressed: bool,
 }
 
 pub fn run() -> Result<(), AppError> {
@@ -367,12 +373,15 @@ pub fn run() -> Result<(), AppError> {
         tray_failure_logged: false,
         refreshing: false,
         refresh_pending: false,
+        refresh_feedback: false,
+        refresh_animation_started: None,
         update_checking: false,
         failures: 0,
         last_tray_activation: None,
         flyout_ignore_inactive_until: None,
         flyout_hidden_for_tray_activation: None,
         pressed_quota: None,
+        refresh_button_pressed: false,
     });
     let raw = Box::into_raw(state);
     STATE.with(|slot| slot.set(raw));
@@ -436,6 +445,10 @@ fn pointer_coordinates(lparam: LPARAM) -> (i32, i32) {
     let x = i32::from(packed as u16 as i16);
     let y = i32::from((packed >> 16) as u16 as i16);
     (x, y)
+}
+
+fn refresh_rotation_degrees(elapsed: Duration) -> f32 {
+    (elapsed.as_secs_f32() / REFRESH_ANIMATION_DURATION.as_secs_f32()).min(1.0) * 360.0
 }
 
 fn register_classes(instance: HINSTANCE) -> windows::core::Result<()> {
@@ -530,6 +543,7 @@ unsafe extern "system" fn main_window_proc(
                             state.finish_flyout_activation();
                         }
                         TIMER_WORKING_SET_TRIM => state.trim_working_set(),
+                        TIMER_REFRESH_ANIMATION => state.advance_refresh_animation(),
                         _ => {}
                     }
                     state.finish_ready_background_work();
@@ -580,7 +594,11 @@ unsafe extern "system" fn flyout_window_proc(
                     state.settings.display_quota,
                     state.locale,
                     state.theme,
-                    state.pressed_quota,
+                    ui::CardInteraction {
+                        pressed_quota: state.pressed_quota,
+                        refresh_feedback: state.refresh_feedback,
+                        refresh_rotation_degrees: state.refresh_rotation_degrees(),
+                    },
                 );
                 return LRESULT(0);
             }
@@ -588,6 +606,14 @@ unsafe extern "system" fn flyout_window_proc(
                 let state = &mut *state_ptr;
                 let (x, y) = pointer_coordinates(lparam);
                 let dpi = GetDpiForWindow(hwnd).max(96);
+                if !state.refreshing
+                    && !state.refresh_feedback
+                    && ui::refresh_button_hit_test(&state.display, x, y, dpi)
+                {
+                    state.refresh_button_pressed = true;
+                    let _ = SetCapture(hwnd);
+                    return LRESULT(0);
+                }
                 if let Some(kind) = ui::quota_card_hit_test(&state.display, x, y, dpi) {
                     state.pressed_quota = Some(kind);
                     let _ = SetCapture(hwnd);
@@ -597,6 +623,17 @@ unsafe extern "system" fn flyout_window_proc(
             }
             WM_LBUTTONUP if !state_ptr.is_null() => {
                 let state = &mut *state_ptr;
+                if state.refresh_button_pressed {
+                    let (x, y) = pointer_coordinates(lparam);
+                    let dpi = GetDpiForWindow(hwnd).max(96);
+                    let activate = ui::refresh_button_hit_test(&state.display, x, y, dpi);
+                    state.refresh_button_pressed = false;
+                    let _ = ReleaseCapture();
+                    if activate && !state.refreshing && !state.refresh_feedback {
+                        state.start_flyout_refresh();
+                    }
+                    return LRESULT(0);
+                }
                 if let Some(pressed) = state.pressed_quota {
                     let (x, y) = pointer_coordinates(lparam);
                     let dpi = GetDpiForWindow(hwnd).max(96);
@@ -614,7 +651,10 @@ unsafe extern "system" fn flyout_window_proc(
             }
             WM_CAPTURECHANGED if !state_ptr.is_null() => {
                 let state = &mut *state_ptr;
-                if state.pressed_quota.take().is_some() {
+                let had_capture =
+                    state.pressed_quota.take().is_some() || state.refresh_button_pressed;
+                state.refresh_button_pressed = false;
+                if had_capture {
                     let _ = InvalidateRect(Some(hwnd), None, false);
                 }
                 return LRESULT(0);
@@ -668,6 +708,64 @@ unsafe extern "system" fn flyout_window_proc(
 }
 
 impl AppState {
+    fn start_flyout_refresh(&mut self) {
+        if self.refreshing {
+            return;
+        }
+        self.refresh_feedback = true;
+        self.refresh_animation_started = Some(Instant::now());
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_ANIMATION);
+            let timer = SetTimer(
+                Some(self.hwnd),
+                TIMER_REFRESH_ANIMATION,
+                REFRESH_ANIMATION_INTERVAL_MS,
+                None,
+            );
+            if timer == 0 {
+                self.refresh_animation_started = None;
+            }
+            let _ = InvalidateRect(Some(self.flyout), None, false);
+        }
+        self.start_refresh(true);
+    }
+
+    fn advance_refresh_animation(&mut self) {
+        let Some(started) = self.refresh_animation_started else {
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_ANIMATION);
+            }
+            return;
+        };
+        if started.elapsed() >= REFRESH_ANIMATION_DURATION {
+            self.refresh_animation_started = None;
+            if !self.refreshing {
+                self.refresh_feedback = false;
+            }
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_ANIMATION);
+            }
+        }
+        if unsafe { IsWindowVisible(self.flyout) }.as_bool() {
+            unsafe {
+                let _ = InvalidateRect(Some(self.flyout), None, false);
+            }
+        }
+    }
+
+    fn refresh_rotation_degrees(&self) -> f32 {
+        self.refresh_animation_started
+            .map_or(0.0, |started| refresh_rotation_degrees(started.elapsed()))
+    }
+
+    fn stop_refresh_feedback(&mut self) {
+        self.refresh_feedback = false;
+        self.refresh_animation_started = None;
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_ANIMATION);
+        }
+    }
+
     fn start_refresh(&mut self, force: bool) {
         diagnostic("refresh:start");
         if self.refreshing {
@@ -715,6 +813,9 @@ impl AppState {
 
     fn finish_refresh(&mut self, outcome: RefreshOutcome) {
         self.refreshing = false;
+        if self.refresh_animation_started.is_none() {
+            self.stop_refresh_feedback();
+        }
         match outcome.result {
             Ok(snapshot) => {
                 self.failures = 0;
@@ -1092,10 +1193,16 @@ impl AppState {
         self.flyout_ignore_inactive_until = None;
         self.flyout_hidden_for_tray_activation = None;
         self.pressed_quota = None;
+        self.refresh_button_pressed = false;
+        self.refresh_animation_started = None;
+        if !self.refreshing {
+            self.refresh_feedback = false;
+        }
         unsafe {
             let _ = ReleaseCapture();
             let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
             let _ = KillTimer(Some(self.hwnd), TIMER_WORKING_SET_TRIM);
+            let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_ANIMATION);
             let _ = ShowWindow(self.flyout, SW_HIDE);
             let _ =
                 SetTimer(Some(self.hwnd), TIMER_WORKING_SET_TRIM, WORKING_SET_TRIM_DELAY_MS, None);
@@ -1493,6 +1600,7 @@ impl Drop for AppState {
             let _ = KillTimer(Some(self.hwnd), TIMER_STARTUP);
             let _ = KillTimer(Some(self.hwnd), TIMER_CARD);
             let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
+            let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_ANIMATION);
             if self.tray_added {
                 let data = self.notify_data();
                 let _ = Shell_NotifyIconW(NIM_DELETE, &data);
@@ -1609,6 +1717,14 @@ mod tests {
     fn pointer_coordinates_sign_extend_both_axes() {
         let packed = u32::from(0xfffe_u16) | (u32::from(0xfffd_u16) << 16);
         assert_eq!(pointer_coordinates(LPARAM(packed as isize)), (-2, -3));
+    }
+
+    #[test]
+    fn refresh_rotation_completes_one_turn_and_stops() {
+        assert_eq!(refresh_rotation_degrees(Duration::ZERO), 0.0);
+        assert_eq!(refresh_rotation_degrees(Duration::from_millis(300)), 180.0);
+        assert_eq!(refresh_rotation_degrees(Duration::from_millis(600)), 360.0);
+        assert_eq!(refresh_rotation_degrees(Duration::from_secs(5)), 360.0);
     }
 
     #[test]

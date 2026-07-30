@@ -40,11 +40,22 @@ pub(super) const HEADER_TEXT_TOP: i32 = 8;
 pub(super) const HEADER_TEXT_BOTTOM: i32 = 38;
 pub(super) const HEADER_VERSION_TOP: i32 = HEADER_TEXT_TOP + 1;
 pub(super) const HEADER_VERSION_BOTTOM: i32 = HEADER_TEXT_BOTTOM + 1;
+pub(super) const REFRESH_BUTTON_RIGHT: i32 = 18;
+pub(super) const REFRESH_BUTTON_RADIUS: i32 = 12;
+pub(super) const REFRESH_BUTTON_GAP: i32 = 4;
+const REFRESH_HIT_RADIUS: i32 = 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlyoutDimensions {
     pub width: i32,
     pub height: i32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CardInteraction {
+    pub pressed_quota: Option<QuotaKind>,
+    pub refresh_feedback: bool,
+    pub refresh_rotation_degrees: f32,
 }
 
 pub fn flyout_dimensions(state: &DisplayState) -> FlyoutDimensions {
@@ -321,7 +332,7 @@ pub fn paint_card(
     preferred: QuotaKind,
     locale: Locale,
     theme: Theme,
-    pressed_quota: Option<QuotaKind>,
+    interaction: CardInteraction,
 ) {
     unsafe {
         let mut paint = PAINTSTRUCT::default();
@@ -340,18 +351,18 @@ pub fn paint_card(
             preferred,
             locale,
             theme,
-            pressed_quota,
+            interaction,
         });
         if !painted {
             let buffer = CreateCompatibleDC(Some(hdc));
             let bitmap = CreateCompatibleBitmap(hdc, width, height);
             if !buffer.is_invalid() && !bitmap.is_invalid() {
                 let old_bitmap = SelectObject(buffer, HGDIOBJ(bitmap.0));
-                draw_card(buffer, state, preferred, locale, theme, pressed_quota, dpi);
+                draw_card(buffer, state, preferred, locale, theme, interaction, dpi);
                 let _ = BitBlt(hdc, 0, 0, width, height, Some(buffer), 0, 0, SRCCOPY);
                 let _ = SelectObject(buffer, old_bitmap);
             } else {
-                draw_card(hdc, state, preferred, locale, theme, pressed_quota, dpi);
+                draw_card(hdc, state, preferred, locale, theme, interaction, dpi);
             }
             if !bitmap.is_invalid() {
                 let _ = DeleteObject(HGDIOBJ(bitmap.0));
@@ -378,7 +389,7 @@ unsafe fn draw_card(
     preferred: QuotaKind,
     locale: Locale,
     theme: Theme,
-    pressed_quota: Option<QuotaKind>,
+    interaction: CardInteraction,
     dpi: u32,
 ) {
     unsafe {
@@ -443,16 +454,28 @@ unsafe fn draw_card(
         draw_text_right_bottom(
             hdc,
             locale,
-            &updated_text(state, locale),
+            &updated_text(state, locale, interaction.refresh_feedback),
             RECT {
                 left: scale(190, dpi),
                 top: scale(HEADER_TEXT_TOP, dpi),
-                right: width - scale(18, dpi),
+                right: width
+                    - scale(
+                        REFRESH_BUTTON_RIGHT + REFRESH_BUTTON_RADIUS * 2 + REFRESH_BUTTON_GAP,
+                        dpi,
+                    ),
                 bottom: scale(HEADER_TEXT_BOTTOM, dpi),
             },
             scale(11, dpi),
             FW_NORMAL.0 as i32,
             theme.muted,
+        );
+        draw_refresh_icon(
+            hdc,
+            width - scale(REFRESH_BUTTON_RIGHT + REFRESH_BUTTON_RADIUS, dpi),
+            scale((HEADER_TEXT_TOP + HEADER_TEXT_BOTTOM) / 2, dpi),
+            interaction.refresh_rotation_degrees,
+            refresh_icon_color(theme),
+            dpi,
         );
 
         let account = account_metrics(state, locale);
@@ -481,7 +504,7 @@ unsafe fn draw_card(
                         kind: QuotaKind::FiveHour,
                         slot: QuotaPanelSlot::Left,
                         selected: preferred == QuotaKind::FiveHour,
-                        pressed: pressed_quota == Some(QuotaKind::FiveHour),
+                        pressed: interaction.pressed_quota == Some(QuotaKind::FiveHour),
                     },
                     locale,
                     theme,
@@ -494,7 +517,7 @@ unsafe fn draw_card(
                         kind: QuotaKind::Weekly,
                         slot: QuotaPanelSlot::Right,
                         selected: preferred == QuotaKind::Weekly,
-                        pressed: pressed_quota == Some(QuotaKind::Weekly),
+                        pressed: interaction.pressed_quota == Some(QuotaKind::Weekly),
                     },
                     locale,
                     theme,
@@ -990,6 +1013,66 @@ unsafe fn draw_progress_arc(
     }
 }
 
+unsafe fn draw_refresh_icon(
+    hdc: HDC,
+    center_x: i32,
+    center_y: i32,
+    rotation_degrees: f32,
+    color: COLORREF,
+    dpi: u32,
+) {
+    let radius = scale(6, dpi);
+    let rotation = f64::from(rotation_degrees);
+    let arc: [POINT; 22] = std::array::from_fn(|index| {
+        let angle = (rotation + 315.0 * index as f64 / 21.0).to_radians();
+        POINT {
+            x: center_x + (f64::from(radius) * angle.cos()).round() as i32,
+            y: center_y + (f64::from(radius) * angle.sin()).round() as i32,
+        }
+    });
+    let arrow = [
+        POINT { x: scale(5, dpi), y: -scale(7, dpi) },
+        POINT { x: scale(5, dpi), y: -scale(3, dpi) },
+        POINT { x: scale(1, dpi), y: -scale(3, dpi) },
+    ]
+    .map(|point| {
+        let radians = rotation.to_radians();
+        let cosine = radians.cos();
+        let sine = radians.sin();
+        POINT {
+            x: center_x + (f64::from(point.x) * cosine - f64::from(point.y) * sine).round() as i32,
+            y: center_y + (f64::from(point.x) * sine + f64::from(point.y) * cosine).round() as i32,
+        }
+    });
+    let brush = LOGBRUSH { lbStyle: BS_SOLID, lbColor: color, lbHatch: 0 };
+    unsafe {
+        let pen = ExtCreatePen(
+            PS_GEOMETRIC | PS_ENDCAP_ROUND | PS_JOIN_ROUND,
+            scale(2, dpi).max(1) as u32,
+            &brush,
+            None,
+        );
+        if pen.is_invalid() {
+            return;
+        }
+        let old = SelectObject(hdc, HGDIOBJ(pen.0));
+        let _ = Polyline(hdc, &arc);
+        let _ = Polyline(hdc, &arrow);
+        let _ = SelectObject(hdc, old);
+        let _ = DeleteObject(HGDIOBJ(pen.0));
+    }
+}
+
+fn refresh_icon_color(theme: Theme) -> COLORREF {
+    if theme.high_contrast {
+        theme.text
+    } else if theme.dark {
+        rgb(188, 198, 203)
+    } else {
+        rgb(102, 117, 124)
+    }
+}
+
 fn quota_card_colors(theme: Theme, selected: bool, pressed: bool) -> (COLORREF, COLORREF) {
     if theme.high_contrast {
         return (theme.surface, theme.text);
@@ -1064,8 +1147,8 @@ unsafe fn outlined_surface(
     }
 }
 
-fn updated_text(state: &DisplayState, locale: Locale) -> String {
-    if state.refresh_state == RefreshState::Loading {
+fn updated_text(state: &DisplayState, locale: Locale, refresh_feedback: bool) -> String {
+    if refresh_feedback || state.refresh_state == RefreshState::Loading {
         return locale.text("Refreshing…", "刷新中…").to_owned();
     }
     let time = state
@@ -1079,6 +1162,17 @@ fn updated_text(state: &DisplayState, locale: Locale) -> String {
         _ => locale.text("Updated", "更新"),
     };
     time.map_or_else(|| prefix.to_owned(), |time| format!("{prefix} {time}"))
+}
+
+pub fn refresh_button_hit_test(state: &DisplayState, x: i32, y: i32, dpi: u32) -> bool {
+    let dimensions = flyout_dimensions(state);
+    let center_x = scale(dimensions.width - REFRESH_BUTTON_RIGHT - REFRESH_BUTTON_RADIUS, dpi);
+    let center_y = scale((HEADER_TEXT_TOP + HEADER_TEXT_BOTTOM) / 2, dpi);
+    let radius = scale(REFRESH_HIT_RADIUS, dpi);
+    x >= center_x - radius
+        && x < center_x + radius
+        && y >= center_y - radius
+        && y < center_y + radius
 }
 
 fn version_text() -> String {
@@ -1462,6 +1556,25 @@ mod tests {
         assert_eq!(HEADER_TEXT_TOP + HEADER_TEXT_BOTTOM, HEADER_ACCENT_TOP + HEADER_ACCENT_BOTTOM);
         assert_eq!(HEADER_VERSION_TOP, HEADER_TEXT_TOP + 1);
         assert_eq!(HEADER_VERSION_BOTTOM, HEADER_TEXT_BOTTOM + 1);
+    }
+
+    #[test]
+    fn refresh_feedback_replaces_the_timestamp_without_changing_display_state() {
+        let state = display(true, true);
+        assert_eq!(updated_text(&state, Locale::Chinese, true), "刷新中…");
+        assert_eq!(state.refresh_state, RefreshState::Live);
+    }
+
+    #[test]
+    fn refresh_hit_target_tracks_compact_and_full_widths() {
+        for state in [display(true, false), display(true, true)] {
+            let width = flyout_dimensions(&state).width;
+            let center_x = width - REFRESH_BUTTON_RIGHT - REFRESH_BUTTON_RADIUS;
+            let center_y = (HEADER_TEXT_TOP + HEADER_TEXT_BOTTOM) / 2;
+            assert!(refresh_button_hit_test(&state, center_x, center_y, 96));
+            assert!(refresh_button_hit_test(&state, center_x - REFRESH_HIT_RADIUS, center_y, 96));
+            assert!(!refresh_button_hit_test(&state, center_x + REFRESH_HIT_RADIUS, center_y, 96));
+        }
     }
 
     #[test]

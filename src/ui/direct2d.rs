@@ -6,11 +6,12 @@
 //! whenever the flyout is hidden.
 
 use super::{
-    AccountMetrics, HEADER_ACCENT_BOTTOM, HEADER_ACCENT_TOP, HEADER_TEXT_BOTTOM, HEADER_TEXT_TOP,
-    HEADER_VERSION_BOTTOM, HEADER_VERSION_TOP, Locale, QuotaPanelGeometry, QuotaPanelSlot, Theme,
+    AccountMetrics, CardInteraction, HEADER_ACCENT_BOTTOM, HEADER_ACCENT_TOP, HEADER_TEXT_BOTTOM,
+    HEADER_TEXT_TOP, HEADER_VERSION_BOTTOM, HEADER_VERSION_TOP, Locale, QuotaPanelGeometry,
+    QuotaPanelSlot, REFRESH_BUTTON_GAP, REFRESH_BUTTON_RADIUS, REFRESH_BUTTON_RIGHT, Theme,
     accent_for, account_metrics, flyout_dimensions, inner_track_color, outer_track_color,
-    quota_bar_color, quota_card_colors, quota_label, quota_panel_geometry, reset_details,
-    theoretical_color, theoretical_remaining_percent, updated_text, version_text,
+    quota_bar_color, quota_card_colors, quota_label, quota_panel_geometry, refresh_icon_color,
+    reset_details, theoretical_color, theoretical_remaining_percent, updated_text, version_text,
 };
 use crate::model::{DisplayState, QuotaAvailability, QuotaKind, QuotaWindow};
 use chrono::Local;
@@ -28,7 +29,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
     D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
     D2D1CreateFactory, ID2D1Brush, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1LinearGradientBrush,
-    ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    ID2D1PathGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -41,7 +42,7 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN;
 use windows::core::{PCWSTR, Result, w};
-use windows_numerics::Vector2;
+use windows_numerics::{Matrix3x2, Vector2};
 
 thread_local! {
     static RENDERER: RefCell<Option<Renderer>> = const { RefCell::new(None) };
@@ -56,7 +57,7 @@ pub(super) struct PaintInput<'a> {
     pub preferred: QuotaKind,
     pub locale: Locale,
     pub theme: Theme,
-    pub pressed_quota: Option<QuotaKind>,
+    pub interaction: CardInteraction,
 }
 
 pub(super) fn paint(input: PaintInput<'_>) -> bool {
@@ -106,6 +107,7 @@ struct Renderer {
     factory: ID2D1Factory,
     dwrite: IDWriteFactory,
     stroke_style: ID2D1StrokeStyle,
+    refresh_geometry: RefreshGeometry,
     formats: Option<FormatSet>,
     surface: Option<Surface>,
 }
@@ -128,7 +130,15 @@ impl Renderer {
                 },
                 None,
             )?;
-            Ok(Self { factory, dwrite, stroke_style, formats: None, surface: None })
+            let refresh_geometry = RefreshGeometry::new(&factory)?;
+            Ok(Self {
+                factory,
+                dwrite,
+                stroke_style,
+                refresh_geometry,
+                formats: None,
+                surface: None,
+            })
         }
     }
 
@@ -153,6 +163,7 @@ impl Renderer {
             &self.factory,
             &self.dwrite,
             &self.stroke_style,
+            &self.refresh_geometry,
             formats,
             brushes,
             input,
@@ -212,6 +223,41 @@ impl Renderer {
     }
 }
 
+struct RefreshGeometry {
+    arc: ID2D1PathGeometry,
+    arrow: ID2D1PathGeometry,
+}
+
+impl RefreshGeometry {
+    fn new(factory: &ID2D1Factory) -> Result<Self> {
+        let arc = unsafe { factory.CreatePathGeometry()? };
+        let sink = unsafe { arc.Open()? };
+        let points: [Vector2; 22] = std::array::from_fn(|index| {
+            let angle = (315.0 * index as f32 / 21.0).to_radians();
+            Vector2 { X: 5.7 * angle.cos(), Y: 5.7 * angle.sin() }
+        });
+        unsafe {
+            sink.BeginFigure(points[0], D2D1_FIGURE_BEGIN_HOLLOW);
+            for point in &points[1..] {
+                sink.AddLine(*point);
+            }
+            sink.EndFigure(D2D1_FIGURE_END_OPEN);
+            sink.Close()?;
+        }
+
+        let arrow = unsafe { factory.CreatePathGeometry()? };
+        let sink = unsafe { arrow.Open()? };
+        unsafe {
+            sink.BeginFigure(Vector2 { X: 5.4, Y: -6.7 }, D2D1_FIGURE_BEGIN_HOLLOW);
+            sink.AddLine(Vector2 { X: 5.4, Y: -2.55 });
+            sink.AddLine(Vector2 { X: 1.3, Y: -2.55 });
+            sink.EndFigure(D2D1_FIGURE_END_OPEN);
+            sink.Close()?;
+        }
+        Ok(Self { arc, arrow })
+    }
+}
+
 struct Surface {
     hwnd: HWND,
     target: ID2D1HwndRenderTarget,
@@ -238,6 +284,7 @@ struct Palette {
     background: COLORREF,
     text: COLORREF,
     muted: COLORREF,
+    refresh_icon: COLORREF,
     line: COLORREF,
     metrics_surface: COLORREF,
     five_surface: COLORREF,
@@ -265,8 +312,8 @@ impl Palette {
         let compact = matches!(input.state.quota_availability(), QuotaAvailability::Single(_));
         let five_selected = !compact && input.preferred == QuotaKind::FiveHour;
         let weekly_selected = !compact && input.preferred == QuotaKind::Weekly;
-        let five_pressed = !compact && input.pressed_quota == Some(QuotaKind::FiveHour);
-        let weekly_pressed = !compact && input.pressed_quota == Some(QuotaKind::Weekly);
+        let five_pressed = !compact && input.interaction.pressed_quota == Some(QuotaKind::FiveHour);
+        let weekly_pressed = !compact && input.interaction.pressed_quota == Some(QuotaKind::Weekly);
         let five_actual = input.state.quota_percent(QuotaKind::FiveHour);
         let weekly_actual = input.state.quota_percent(QuotaKind::Weekly);
         let (five_surface, five_border) =
@@ -279,6 +326,7 @@ impl Palette {
             background: input.theme.background,
             text: input.theme.text,
             muted: input.theme.muted,
+            refresh_icon: refresh_icon_color(input.theme),
             line: input.theme.line,
             metrics_surface: input.theme.surface_alt,
             five_surface,
@@ -312,6 +360,7 @@ struct Brushes {
     background: ID2D1SolidColorBrush,
     text: ID2D1SolidColorBrush,
     muted: ID2D1SolidColorBrush,
+    refresh_icon: ID2D1SolidColorBrush,
     line: ID2D1SolidColorBrush,
     metrics_surface: ID2D1SolidColorBrush,
     five_surface: ID2D1SolidColorBrush,
@@ -356,6 +405,7 @@ impl Brushes {
             background: brush(target, palette.background)?,
             text: brush(target, palette.text)?,
             muted: brush(target, palette.muted)?,
+            refresh_icon: brush(target, palette.refresh_icon)?,
             line: brush(target, palette.line)?,
             metrics_surface: brush(target, palette.metrics_surface)?,
             five_surface: brush(target, palette.five_surface)?,
@@ -548,6 +598,7 @@ fn draw_frame(
     factory: &ID2D1Factory,
     dwrite: &IDWriteFactory,
     stroke_style: &ID2D1StrokeStyle,
+    refresh_geometry: &RefreshGeometry,
     formats: &FormatSet,
     brushes: &Brushes,
     input: &PaintInput<'_>,
@@ -586,10 +637,24 @@ fn draw_frame(
     );
     draw_text(
         target,
-        &updated_text(input.state, input.locale),
-        rect(190.0, HEADER_TEXT_TOP as f32, width - 18.0, HEADER_TEXT_BOTTOM as f32),
+        &updated_text(input.state, input.locale, input.interaction.refresh_feedback),
+        rect(
+            190.0,
+            HEADER_TEXT_TOP as f32,
+            width - (REFRESH_BUTTON_RIGHT + REFRESH_BUTTON_RADIUS * 2 + REFRESH_BUTTON_GAP) as f32,
+            HEADER_TEXT_BOTTOM as f32,
+        ),
         &formats.update,
         &brushes.muted,
+    );
+    draw_refresh_icon(
+        target,
+        refresh_geometry,
+        width - (REFRESH_BUTTON_RIGHT + REFRESH_BUTTON_RADIUS) as f32,
+        (HEADER_TEXT_TOP + HEADER_TEXT_BOTTOM) as f32 / 2.0,
+        input.interaction.refresh_rotation_degrees,
+        &brushes.refresh_icon,
+        stroke_style,
     );
 
     let account = account_metrics(input.state, input.locale);
@@ -637,6 +702,29 @@ fn draw_frame(
     Ok(())
 }
 
+fn draw_refresh_icon(
+    target: &ID2D1HwndRenderTarget,
+    geometry: &RefreshGeometry,
+    center_x: f32,
+    center_y: f32,
+    rotation_degrees: f32,
+    brush: &ID2D1SolidColorBrush,
+    stroke_style: &ID2D1StrokeStyle,
+) {
+    let radians = rotation_degrees.to_radians();
+    let cosine = radians.cos();
+    let sine = radians.sin();
+    let transform =
+        Matrix3x2 { M11: cosine, M12: sine, M21: -sine, M22: cosine, M31: center_x, M32: center_y };
+    let identity = Matrix3x2 { M11: 1.0, M22: 1.0, ..Default::default() };
+    unsafe {
+        target.SetTransform(&transform);
+        target.DrawGeometry(&geometry.arc, brush, 1.5, stroke_style);
+        target.DrawGeometry(&geometry.arrow, brush, 1.5, stroke_style);
+        target.SetTransform(&identity);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_quota_panel(
     target: &ID2D1HwndRenderTarget,
@@ -651,7 +739,7 @@ fn draw_quota_panel(
 ) -> Result<()> {
     let compact = matches!(input.state.quota_availability(), QuotaAvailability::Single(_));
     let selected = !compact && input.preferred == kind;
-    let pressed = !compact && input.pressed_quota == Some(kind);
+    let pressed = !compact && input.interaction.pressed_quota == Some(kind);
     let geometry = quota_panel_geometry(slot);
     let QuotaPanelGeometry { left, right, center_x } = geometry;
     let (surface, border, title, track, actual_brush) = match kind {

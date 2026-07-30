@@ -4,6 +4,15 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-07-31
+
+- Add a borderless header refresh control shared by compact and dual-quota
+  layouts, with a 28-DIP hit target, one cached 600ms rotation, and the existing
+  localized refresh and error status.
+- Keep tray values from 0 through 99 on the established renderer and give 100 a
+  dedicated 10-pixel-high three-digit layout at the base icon size, scaled for
+  the supported DPI sizes.
+
 ## [0.5.5] - 2026-07-30
 
 - Render the neutral time-paced quota arc with a full-width gray-blue gradient

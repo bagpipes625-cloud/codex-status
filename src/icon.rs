@@ -137,7 +137,13 @@ fn render_rgba(
     let label = display_percent.map_or_else(|| "--".to_owned(), |value| value.min(100).to_string());
     let text = foreground(dark_taskbar, tone.is_muted() && !high_contrast);
 
-    if let Some(mask) = rasterize_label(&label, size) {
+    if label == "100" {
+        if let (Some(one), Some(zero)) = (rasterize_label("1", size), rasterize_label("0", size)) {
+            composite_hundred(&mut pixels, size, &one, &zero, text);
+        } else {
+            draw_fallback_label(&mut pixels, size, &label, text);
+        }
+    } else if let Some(mask) = rasterize_label(&label, size) {
         let two_digit_scale =
             (label.chars().count() == 1).then(|| rasterize_label("65", size)).flatten();
         composite_mask(&mut pixels, size, &mask, two_digit_scale.as_ref(), text);
@@ -191,6 +197,48 @@ struct GrayMask {
     pixels: Vec<u8>,
     width: usize,
     height: usize,
+}
+
+struct MaskPlacement {
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+}
+
+fn composite_hundred(
+    pixels: &mut [[u8; 4]],
+    size: u32,
+    one: &GrayMask,
+    zero: &GrayMask,
+    color: [u8; 4],
+) {
+    let target_height = scaled_icon_unit(10, size);
+    let glyph_widths =
+        [scaled_icon_unit(3, size), scaled_icon_unit(4, size), scaled_icon_unit(4, size)];
+    let gap = scaled_icon_unit(1, size);
+    let total_width = glyph_widths.iter().sum::<usize>() + gap * 2;
+    let mut origin_x = (size as usize - total_width) / 2;
+    let origin_y = (size as usize - 3 - target_height) / 2;
+
+    for (index, (mask, target_width)) in [one, zero, zero].into_iter().zip(glyph_widths).enumerate()
+    {
+        composite_resized_mask(
+            pixels,
+            size,
+            mask,
+            MaskPlacement { width: target_width, height: target_height, x: origin_x, y: origin_y },
+            color,
+        );
+        origin_x += target_width;
+        if index < 2 {
+            origin_x += gap;
+        }
+    }
+}
+
+fn scaled_icon_unit(value_at_16: usize, size: u32) -> usize {
+    ((value_at_16 * size as usize + 8) / 16).max(1)
 }
 
 fn rasterize_label(label: &str, target_size: u32) -> Option<GrayMask> {
@@ -335,12 +383,28 @@ fn composite_mask(
     let origin_x = (size as usize - target_width) / 2;
     let origin_y = (max_height.saturating_sub(target_height)) / 2;
 
-    for y in 0..target_height {
-        for x in 0..target_width {
-            let source_x0 = x * mask.width / target_width;
-            let source_x1 = ((x + 1) * mask.width / target_width).max(source_x0 + 1);
-            let source_y0 = y * mask.height / target_height;
-            let source_y1 = ((y + 1) * mask.height / target_height).max(source_y0 + 1);
+    composite_resized_mask(
+        pixels,
+        size,
+        mask,
+        MaskPlacement { width: target_width, height: target_height, x: origin_x, y: origin_y },
+        color,
+    );
+}
+
+fn composite_resized_mask(
+    pixels: &mut [[u8; 4]],
+    size: u32,
+    mask: &GrayMask,
+    placement: MaskPlacement,
+    color: [u8; 4],
+) {
+    for y in 0..placement.height {
+        for x in 0..placement.width {
+            let source_x0 = x * mask.width / placement.width;
+            let source_x1 = ((x + 1) * mask.width / placement.width).max(source_x0 + 1);
+            let source_y0 = y * mask.height / placement.height;
+            let source_y1 = ((y + 1) * mask.height / placement.height).max(source_y0 + 1);
             let mut coverage = 0_u32;
             let mut samples = 0_u32;
             for source_y in source_y0..source_y1.min(mask.height) {
@@ -356,8 +420,8 @@ fn composite_mask(
             set_pixel(
                 pixels,
                 size,
-                (origin_x + x) as i32,
-                (origin_y + y) as i32,
+                (placement.x + x) as i32,
+                (placement.y + y) as i32,
                 premultiply(color, alpha),
             );
         }
@@ -491,6 +555,21 @@ mod tests {
             assert!(single_height.abs_diff(double_height) <= 1, "size={size}");
             assert!(single_left.abs_diff(size - 1 - single_right) <= 1, "size={size}");
         }
+    }
+
+    #[test]
+    fn hundred_uses_the_dedicated_ten_pixel_layout_at_base_size() {
+        let pixels = render_rgba(Some(100), Some(100), IconTone::Healthy, 16, false, false);
+        let visible: Vec<_> =
+            pixels[..14 * 16].iter().enumerate().filter(|(_, pixel)| pixel[3] > 20).collect();
+        let left = visible.iter().map(|(index, _)| index % 16).min().unwrap();
+        let right = visible.iter().map(|(index, _)| index % 16).max().unwrap();
+        let top = visible.iter().map(|(index, _)| index / 16).min().unwrap();
+        let bottom = visible.iter().map(|(index, _)| index / 16).max().unwrap();
+
+        assert_eq!(bottom - top + 1, 10);
+        assert!(right - left < 14);
+        assert!(left.abs_diff(15 - right) <= 1);
     }
 
     #[test]
