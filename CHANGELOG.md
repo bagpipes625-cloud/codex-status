@@ -4,6 +4,31 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-30
+
+- Align the title, version, and refresh metadata with the header accent while
+  preserving a shared visible text baseline.
+- Keep draining app-server stderr after retaining the bounded diagnostic prefix,
+  preventing a full diagnostic pipe from disrupting quota RPC.
+- Bound app-server stdout lines, discard notifications while continuously
+  draining the pipe, and forward at most one valid response for each expected
+  RPC identifier.
+- Isolate non-stable state by release channel and use process-unique atomic
+  temporary files so parallel development, beta, portable, and stable instances
+  cannot race while saving settings or snapshots.
+- Remove validated stale update staging directories before each user-initiated
+  update check, including the legacy pre-channel directory layout, without
+  blocking updates when a file is locked. Hold non-reparse directory handles
+  without delete sharing throughout cleanup so junction swaps cannot redirect it.
+- Abort update replacement when the helper cannot verify that the previous
+  process exited; only a confirmed nonexistent PID may bypass the wait.
+- Deliver refresh and update results through bounded in-process channels so
+  window messages never carry owned pointers.
+- Exclusively create both update staging and final replacement files, clean
+  failed atomic-save temporaries, report every settings persistence failure,
+  bound each HTTP request, and retain a bounded diagnostic when an update
+  helper must recover or cannot restart the app.
+
 ## [0.5.0] - 2026-07-30
 
 - Replace the single primary quota panel with selectable five-hour and weekly

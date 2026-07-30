@@ -8,6 +8,7 @@ use std::cell::Cell;
 use std::mem::size_of;
 use std::path::PathBuf;
 use std::ptr;
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{
@@ -158,6 +159,24 @@ impl Drop for InstanceHandle {
     }
 }
 
+struct MenuHandle(HMENU);
+
+impl MenuHandle {
+    fn into_raw(self) -> HMENU {
+        let handle = self.0;
+        std::mem::forget(self);
+        handle
+    }
+}
+
+impl Drop for MenuHandle {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DestroyMenu(self.0);
+        }
+    }
+}
+
 struct RefreshOutcome {
     result: Result<QuotaSnapshot, String>,
 }
@@ -230,6 +249,10 @@ struct AppState {
     theme: ui::Theme,
     display: DisplayState,
     client: AppServerClient,
+    refresh_results: Receiver<RefreshOutcome>,
+    refresh_results_tx: SyncSender<RefreshOutcome>,
+    update_results: Receiver<UpdateOutcome>,
+    update_results_tx: SyncSender<UpdateOutcome>,
     tray_icon: Option<OwnedIcon>,
     tray_quota_state: Option<TrayQuotaState>,
     tray_added: bool,
@@ -322,6 +345,8 @@ pub fn run() -> Result<(), AppError> {
     let cached = store.load_snapshot().filter(|snapshot| snapshot.is_cache_valid(now));
     let display = DisplayState::loading(cached);
     let taskbar_created = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
+    let (refresh_results_tx, refresh_results) = sync_channel(1);
+    let (update_results_tx, update_results) = sync_channel(1);
     let state = Box::new(AppState {
         hwnd,
         flyout,
@@ -332,6 +357,10 @@ pub fn run() -> Result<(), AppError> {
         theme,
         display,
         client: AppServerClient::new(),
+        refresh_results,
+        refresh_results_tx,
+        update_results,
+        update_results_tx,
         tray_icon: None,
         tray_quota_state: None,
         tray_added: false,
@@ -450,7 +479,7 @@ unsafe extern "system" fn main_window_proc(
         let state_ptr = STATE.with(Cell::get);
         if !state_ptr.is_null() {
             let state = &mut *state_ptr;
-            if message == state.taskbar_created {
+            if state.taskbar_created != 0 && message == state.taskbar_created {
                 state.tray_added = false;
                 let _ = state.update_tray(true);
                 return LRESULT(0);
@@ -472,17 +501,11 @@ unsafe extern "system" fn main_window_proc(
                     return LRESULT(0);
                 }
                 WM_REFRESH_COMPLETE => {
-                    if lparam.0 != 0 {
-                        let outcome = *Box::from_raw(lparam.0 as *mut RefreshOutcome);
-                        state.finish_refresh(outcome);
-                    }
+                    state.finish_ready_background_work();
                     return LRESULT(0);
                 }
                 WM_UPDATE_COMPLETE => {
-                    if lparam.0 != 0 {
-                        let outcome = *Box::from_raw(lparam.0 as *mut UpdateOutcome);
-                        state.finish_update_check(outcome);
-                    }
+                    state.finish_ready_background_work();
                     return LRESULT(0);
                 }
                 WM_SHOW_EXISTING => {
@@ -509,6 +532,7 @@ unsafe extern "system" fn main_window_proc(
                         TIMER_WORKING_SET_TRIM => state.trim_working_set(),
                         _ => {}
                     }
+                    state.finish_ready_background_work();
                     return LRESULT(0);
                 }
                 WM_SETTINGCHANGE | WM_DISPLAYCHANGE => {
@@ -662,6 +686,7 @@ impl AppState {
 
         let hwnd_value = self.hwnd.0 as isize;
         let client = self.client.clone();
+        let results = self.refresh_results_tx.clone();
         let spawn_result = thread::Builder::new()
             .name("codex-status-refresh".to_owned())
             .stack_size(512 * 1024)
@@ -675,13 +700,9 @@ impl AppState {
                 } else {
                     "refresh:error"
                 });
-                let raw = Box::into_raw(Box::new(outcome));
-                let posted = unsafe {
-                    PostMessageW(Some(hwnd), WM_REFRESH_COMPLETE, WPARAM(0), LPARAM(raw as isize))
-                };
-                if posted.is_err() {
+                if results.send(outcome).is_ok() {
                     unsafe {
-                        drop(Box::from_raw(raw));
+                        let _ = PostMessageW(Some(hwnd), WM_REFRESH_COMPLETE, WPARAM(0), LPARAM(0));
                     }
                 }
             });
@@ -727,6 +748,15 @@ impl AppState {
         }
     }
 
+    fn finish_ready_background_work(&mut self) {
+        if let Ok(outcome) = self.refresh_results.try_recv() {
+            self.finish_refresh(outcome);
+        }
+        if let Ok(outcome) = self.update_results.try_recv() {
+            self.finish_update_check(outcome);
+        }
+    }
+
     fn refresh_time_sensitive_state(&mut self) {
         let now = Utc::now().timestamp();
         if self.display.refresh_state != RefreshState::Live
@@ -768,6 +798,7 @@ impl AppState {
 
         let hwnd_value = self.hwnd.0 as isize;
         let updates_directory = self.store.updates_directory();
+        let results = self.update_results_tx.clone();
         let spawn_result = thread::Builder::new()
             .name("codex-status-update".to_owned())
             .stack_size(512 * 1024)
@@ -775,13 +806,9 @@ impl AppState {
                 let hwnd = HWND(hwnd_value as *mut std::ffi::c_void);
                 let outcome =
                     UpdateOutcome { result: updater::check_and_stage(&updates_directory) };
-                let raw = Box::into_raw(Box::new(outcome));
-                let posted = unsafe {
-                    PostMessageW(Some(hwnd), WM_UPDATE_COMPLETE, WPARAM(0), LPARAM(raw as isize))
-                };
-                if posted.is_err() {
+                if results.send(outcome).is_ok() {
                     unsafe {
-                        drop(Box::from_raw(raw));
+                        let _ = PostMessageW(Some(hwnd), WM_UPDATE_COMPLETE, WPARAM(0), LPARAM(0));
                     }
                 }
             });
@@ -914,7 +941,7 @@ impl AppState {
                     ),
                 );
                 self.settings.onboarding_shown = true;
-                let _ = self.store.save_settings(&self.settings);
+                self.persist_internal_settings();
             }
         }
         true
@@ -1004,7 +1031,7 @@ impl AppState {
             // again instead of being suppressed forever.
             if alert.reset.is_none() && self.settings.last_alert_reset == Some(alert_key) {
                 self.settings.last_alert_reset = None;
-                let _ = self.store.save_settings(&self.settings);
+                self.persist_internal_settings();
             }
             return;
         }
@@ -1022,7 +1049,7 @@ impl AppState {
             &format!("{quota_label} {}%", alert.percent),
         );
         self.settings.last_alert_reset = Some(alert_key);
-        let _ = self.store.save_settings(&self.settings);
+        self.persist_internal_settings();
     }
 
     fn request_toggle_flyout(&mut self) {
@@ -1247,7 +1274,8 @@ impl AppState {
     }
 
     fn build_menu(&self) -> windows::core::Result<HMENU> {
-        let menu = unsafe { CreatePopupMenu()? };
+        let owned_menu = MenuHandle(unsafe { CreatePopupMenu()? });
+        let menu = owned_menu.0;
         let startup_enabled = startup::is_enabled();
         unsafe {
             append(menu, CMD_REFRESH, self.locale.text("Refresh now", "立即刷新"), false)?;
@@ -1341,7 +1369,7 @@ impl AppState {
                 false,
             )?;
         }
-        Ok(menu)
+        Ok(owned_menu.into_raw())
     }
 
     unsafe fn handle_command(&mut self, command: u32) {
@@ -1414,7 +1442,26 @@ impl AppState {
     }
 
     fn persist_settings(&self) {
-        let _ = self.store.save_settings(&self.settings);
+        self.save_settings(true);
+    }
+
+    fn persist_internal_settings(&self) {
+        self.save_settings(false);
+    }
+
+    fn save_settings(&self, notify: bool) {
+        if let Err(error) = self.store.save_settings(&self.settings) {
+            let _ = self.store.write_settings_error(&format!(
+                "{} settings:save error={error:?}\n",
+                Utc::now().to_rfc3339()
+            ));
+            if notify {
+                self.show_balloon(
+                    self.locale.text("Setting was not saved", "设置未保存"),
+                    &error.to_string(),
+                );
+            }
+        }
     }
 
     fn open_url(&self, url: &str) {

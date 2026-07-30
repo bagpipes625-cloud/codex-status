@@ -38,6 +38,8 @@ line and product decisions.
   set is trimmed.
 - Five-minute default refresh, manual refresh, bounded failure backoff, safe cache expiry, and optional low-quota alerts.
 - User-initiated updates from this repository's GitHub Releases, with channel-specific assets and SHA-256 verification.
+- Stale verified update staging files are removed on the next user-initiated
+  update check; cleanup is restricted to validated version directories.
 - Single instance, Explorer-restart recovery, multi-monitor placement, and optional start with Windows.
 - English and Simplified Chinese UI, selected from Windows automatically.
 
@@ -75,11 +77,15 @@ Two normal state files are stored under `%LOCALAPPDATA%\CodexStatus`:
 - `snapshot.json`: the latest non-sensitive parsed quota snapshot. Expired windows
   are ignored immediately and the file is replaced by the next successful refresh.
 
-Normal builds do not write activity logs. If Windows rejects a notification icon operation, CodexStatus additionally writes one failure-only `tray-errors.log` containing the operation, release channel, executable path, tray identity, PID, and Win32 error code. The optional `diagnostics` Cargo feature records lifecycle stages and filtered error summaries.
+The stable channel keeps this existing location. Development, beta, and portable
+channels use isolated subdirectories under `%LOCALAPPDATA%\CodexStatus\channels`
+so simultaneously running channels cannot race while saving state.
+
+Normal builds do not write activity logs. If Windows rejects a notification icon operation, CodexStatus writes one failure-only `tray-errors.log` containing the operation, release channel, executable path, tray identity, PID, and Win32 error code. Failed settings persistence and failed self-updates overwrite the single bounded diagnostic files `settings-error.log` and `update-error.log`. The optional `diagnostics` Cargo feature records lifecycle stages and filtered error summaries.
 
 ## Performance
 
-Version 0.5.0 remains an event-driven native Win32 process. It performs no
+Version 0.5.1 remains an event-driven native Win32 process. It performs no
 continuous animation or polling between configured refresh timers. Hiding the
 flyout releases its window-sized render target, drops the remaining Direct2D
 resources after a short grace period, and trims idle resident pages. Exact

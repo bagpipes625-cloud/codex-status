@@ -32,6 +32,7 @@ CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标显示�
   Direct2D 资源并压缩空闲工作集。
 - 默认 5 分钟刷新，支持手动刷新、失败退避、安全缓存过期和可选低额度提醒。
 - 仅由用户主动触发的 GitHub Release 更新，区分安装版与便携版产物并校验 SHA-256。
+- 下次由用户主动检查更新时自动清理旧版更新暂存文件，且只处理经过严格校验的版本目录。
 - 单实例、Explorer 重启恢复、多屏定位和开机启动。
 - 根据 Windows 自动选择英文或简体中文。
 
@@ -65,11 +66,15 @@ CodexStatus 不读取或保存 OAuth Token、邮箱、项目内容、提示词�
 - `settings.json`：刷新间隔、界面语言、主题、提醒阈值、首次引导和提醒去重状态。
 - `snapshot.json`：最近一次经过解析的非敏感额度快照；跨过重置时间后立即停止使用，并在下一次成功刷新时替换文件。
 
-普通版本不写运行日志。只有 Windows 拒绝托盘图标操作时，CodexStatus 才会额外写入一份 `tray-errors.log`，其中仅包含操作名、发布通道、EXE 路径、托盘标识、PID 和 Win32 错误码。显式启用 Cargo `diagnostics` 特性时，还会记录生命周期阶段和过滤后的错误摘要。
+stable 通道继续使用上述兼容位置；development、beta 和 portable 通道分别
+使用 `%LOCALAPPDATA%\CodexStatus\channels` 下的独立子目录，避免多个通道
+同时运行时竞争写入状态。
+
+普通版本不写活动日志。只有 Windows 拒绝托盘图标操作时，CodexStatus 才会写入一份失败专用的 `tray-errors.log`，其中仅包含操作名、发布通道、EXE 路径、托盘标识、PID 和 Win32 错误码。设置保存或自更新失败时，会分别覆盖单一且有界的 `settings-error.log` 和 `update-error.log`。显式启用 Cargo `diagnostics` 特性时，还会记录生命周期阶段和过滤后的错误摘要。
 
 ## 性能
 
-0.5.0 仍是事件驱动的原生 Win32 程序，在设定的刷新定时器之间不做持续
+0.5.1 仍是事件驱动的原生 Win32 程序，在设定的刷新定时器之间不做持续
 动画或轮询。面板隐藏后会释放与窗口尺寸相关的渲染目标，经过短暂宽限后
 继续释放 Direct2D 资源并压缩空闲驻留页。具体工作集会随 Windows 版本、
 DPI、显卡驱动以及近期是否打开过面板而变化。

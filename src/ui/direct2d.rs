@@ -6,10 +6,11 @@
 //! whenever the flyout is hidden.
 
 use super::{
-    AccountMetrics, Locale, QuotaPanelGeometry, QuotaPanelSlot, Theme, accent_for, account_metrics,
-    flyout_dimensions, inner_track_color, outer_track_color, quota_bar_color, quota_card_colors,
-    quota_label, quota_panel_geometry, reset_details, theoretical_color,
-    theoretical_remaining_percent, updated_text, version_text,
+    AccountMetrics, HEADER_ACCENT_BOTTOM, HEADER_ACCENT_TOP, HEADER_TEXT_BOTTOM, HEADER_TEXT_TOP,
+    HEADER_VERSION_BOTTOM, HEADER_VERSION_TOP, Locale, QuotaPanelGeometry, QuotaPanelSlot, Theme,
+    accent_for, account_metrics, flyout_dimensions, inner_track_color, outer_track_color,
+    quota_bar_color, quota_card_colors, quota_label, quota_panel_geometry, reset_details,
+    theoretical_color, theoretical_remaining_percent, updated_text, version_text,
 };
 use crate::model::{DisplayState, QuotaAvailability, QuotaKind, QuotaWindow};
 use chrono::Local;
@@ -531,22 +532,31 @@ fn draw_frame(
             1.0,
             None::<&ID2D1StrokeStyle>,
         );
-        target.FillRoundedRectangle(&rounded_rect(18.0, 15.0, 20.0, 31.0, 1.0), &brushes.status);
+        target.FillRoundedRectangle(
+            &rounded_rect(18.0, HEADER_ACCENT_TOP as f32, 20.0, HEADER_ACCENT_BOTTOM as f32, 1.0),
+            &brushes.status,
+        );
     }
-    draw_text(target, "CodexStatus", rect(29.0, 4.0, 180.0, 34.0), &formats.header, &brushes.text);
+    draw_text(
+        target,
+        "CodexStatus",
+        rect(29.0, HEADER_TEXT_TOP as f32, 180.0, HEADER_TEXT_BOTTOM as f32),
+        &formats.header,
+        &brushes.text,
+    );
     let title_width =
         measure_text(dwrite, "CodexStatus", &formats.header)?.widthIncludingTrailingWhitespace;
     draw_text(
         target,
         &version_text(),
-        rect(29.0 + title_width, 4.0, 190.0, 34.0),
+        rect(29.0 + title_width, HEADER_VERSION_TOP as f32, 190.0, HEADER_VERSION_BOTTOM as f32),
         &formats.metric_label,
         &brushes.muted,
     );
     draw_text(
         target,
         &updated_text(input.state, input.locale),
-        rect(190.0, 4.0, width - 18.0, 34.0),
+        rect(190.0, HEADER_TEXT_TOP as f32, width - 18.0, HEADER_TEXT_BOTTOM as f32),
         &formats.update,
         &brushes.muted,
     );

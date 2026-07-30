@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
@@ -28,6 +28,7 @@ use windows::Win32::System::Threading::{
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const READER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 const ERROR_LIMIT: usize = 240;
+const STDOUT_LINE_LIMIT: usize = 256 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppServerError {
@@ -120,17 +121,21 @@ fn fetch_with_command(command: &CommandSpec) -> Result<QuotaSnapshot, AppServerE
     let stderr = child.stderr.take().ok_or(AppServerError::Closed)?;
     let mut stdin = child.stdin.take().ok_or(AppServerError::Closed)?;
     let (sender, receiver) = mpsc::channel::<String>();
-    let reader = thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if sender.send(line).is_err() {
-                break;
-            }
-        }
-    });
+    let reader = thread::Builder::new()
+        .name("codex-status-stdout".to_owned())
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            forward_bounded_lines(stdout, sender);
+        })
+        .map_err(AppServerError::Io)?;
     let (error_sender, error_receiver) = mpsc::channel();
-    let error_reader = thread::spawn(move || {
-        let _ = error_sender.send(read_capped(stderr, 4096));
-    });
+    let error_reader = thread::Builder::new()
+        .name("codex-status-stderr".to_owned())
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            let _ = error_sender.send(read_capped(stderr, 4096));
+        })
+        .map_err(AppServerError::Io)?;
 
     let result = (|| {
         write_json(
@@ -175,6 +180,7 @@ fn fetch_with_command(command: &CommandSpec) -> Result<QuotaSnapshot, AppServerE
     // Dropping a JoinHandle detaches it. The job close normally makes both
     // readers finish immediately; the bounded receive also protects the rare
     // case where assigning the process to a job was rejected by Windows.
+    drop(receiver);
     drop(reader);
     drop(error_reader);
 
@@ -285,10 +291,74 @@ fn sanitize(value: &str) -> String {
         .collect()
 }
 
-fn read_capped(reader: impl Read, limit: usize) -> String {
+fn read_capped(mut reader: impl Read, limit: usize) -> String {
     let mut bytes = Vec::with_capacity(limit);
-    let _ = reader.take(limit as u64).read_to_end(&mut bytes);
+    let mut buffer = [0_u8; 1024];
+    while let Ok(read) = reader.read(&mut buffer) {
+        if read == 0 {
+            break;
+        }
+        let retained = limit.saturating_sub(bytes.len()).min(read);
+        bytes.extend_from_slice(&buffer[..retained]);
+    }
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn forward_bounded_lines(mut reader: impl Read, sender: mpsc::Sender<String>) {
+    let mut chunk = [0_u8; 4096];
+    let mut line = Vec::with_capacity(4096);
+    let mut overflow = false;
+    let mut forwarded = [false; 3];
+    while let Ok(read) = reader.read(&mut chunk) {
+        if read == 0 {
+            break;
+        }
+        for &byte in &chunk[..read] {
+            if byte == b'\n' {
+                if !overflow {
+                    if line.last() == Some(&b'\r') {
+                        line.pop();
+                    }
+                    let value = String::from_utf8_lossy(&line).into_owned();
+                    if let Some(id) = expected_response_id(&value)
+                        && !forwarded[id]
+                    {
+                        forwarded[id] = true;
+                        if sender.send(value).is_err() {
+                            return;
+                        }
+                    }
+                }
+                line.clear();
+                overflow = false;
+            } else if !overflow {
+                if line.len() < STDOUT_LINE_LIMIT {
+                    line.push(byte);
+                } else {
+                    line.clear();
+                    overflow = true;
+                }
+            }
+        }
+    }
+    if !overflow && !line.is_empty() {
+        let value = String::from_utf8_lossy(&line).into_owned();
+        if let Some(id) = expected_response_id(&value)
+            && !forwarded[id]
+        {
+            let _ = sender.send(value);
+        }
+    }
+}
+
+fn expected_response_id(line: &str) -> Option<usize> {
+    let value = serde_json::from_str::<Value>(line).ok()?;
+    let object = value.as_object()?;
+    if !object.contains_key("result") && !object.contains_key("error") {
+        return None;
+    }
+    let id = object.get("id")?.as_u64()?;
+    usize::try_from(id).ok().filter(|id| *id < 3)
 }
 
 #[derive(Debug, Deserialize)]
@@ -578,5 +648,36 @@ mod tests {
         let (_sender, receiver) = mpsc::channel();
         let error = receive_response(&receiver, 1, "test", Duration::from_millis(1)).unwrap_err();
         assert!(matches!(error, AppServerError::Timeout));
+    }
+
+    #[test]
+    fn capped_error_capture_keeps_draining_the_reader() {
+        let source = b"0123456789";
+        let mut reader = std::io::Cursor::new(source);
+        assert_eq!(read_capped(&mut reader, 4), "0123");
+        assert_eq!(reader.position(), source.len() as u64);
+    }
+
+    #[test]
+    fn stdout_forwarder_discards_oversized_lines_and_preserves_following_messages() {
+        let mut source = Vec::new();
+        for index in 0..100 {
+            source
+                .extend_from_slice(format!(r#"{{"method":"notice","index":{index}}}"#).as_bytes());
+            source.push(b'\n');
+        }
+        source.extend(std::iter::repeat_n(b'x', STDOUT_LINE_LIMIT + 1));
+        source.extend_from_slice(
+            b"\n{\"id\":1,\"method\":\"server/request\"}\n\
+              {\"id\":1,\"result\":{\"first\":true}}\r\n\
+              {\"id\":1,\"result\":{\"duplicate\":true}}\n\
+              {\"id\":2,\"result\":{}}\n",
+        );
+        let (sender, receiver) = mpsc::channel();
+        forward_bounded_lines(std::io::Cursor::new(source), sender);
+        assert_eq!(
+            receiver.into_iter().collect::<Vec<_>>(),
+            vec![r#"{"id":1,"result":{"first":true}}"#, r#"{"id":2,"result":{}}"#]
+        );
     }
 }

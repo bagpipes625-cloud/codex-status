@@ -1,13 +1,15 @@
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, c_void};
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::ptr;
-use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+use std::time::{Duration, Instant};
+use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Networking::WinHttp::{
     INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
     WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE, WinHttpCloseHandle, WinHttpConnect,
@@ -15,12 +17,17 @@ use windows::Win32::Networking::WinHttp::{
     WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts,
 };
 use windows::Win32::Storage::FileSystem::{
-    FILE_FLAG_DELETE_ON_CLOSE, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    GetFileInformationByHandle, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    OPEN_EXISTING,
 };
 use windows::Win32::System::Threading::{
     CREATE_NO_WINDOW, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
 };
-use windows::core::{PCWSTR, w};
+use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+use windows::core::{HRESULT, PCWSTR, w};
 
 const RELEASE_API: &str =
     "https://api.github.com/repos/bagpipes625-cloud/codex-status/releases/latest";
@@ -29,6 +36,7 @@ const RELEASE_ASSET_PREFIX: &str =
 const MAX_METADATA_BYTES: usize = 512 * 1024;
 const MAX_EXECUTABLE_BYTES: usize = 32 * 1024 * 1024;
 const UPDATE_WAIT_MS: u32 = 30_000;
+const HTTP_REQUEST_DEADLINE: Duration = Duration::from_secs(60);
 
 #[derive(Debug, thiserror::Error)]
 pub enum UpdateError {
@@ -50,6 +58,8 @@ pub enum UpdateError {
     UnsupportedChannel,
     #[error("The running CodexStatus process did not exit in time")]
     ParentStillRunning,
+    #[error("The update request exceeded its time limit")]
+    RequestTimedOut,
 }
 
 #[derive(Debug, Clone)]
@@ -121,6 +131,7 @@ impl HttpClient {
     }
 
     fn get(&self, url: &str, accept: &str, limit: usize) -> Result<Vec<u8>, UpdateError> {
+        let deadline = Instant::now() + HTTP_REQUEST_DEADLINE;
         let (host, path) = split_https_url(url).ok_or(UpdateError::InvalidResponse)?;
         let host = wide0(host);
         let path = wide0(path);
@@ -170,6 +181,9 @@ impl HttpClient {
 
         let mut body = Vec::new();
         loop {
+            if Instant::now() >= deadline {
+                return Err(UpdateError::RequestTimedOut);
+            }
             let mut available = 0_u32;
             unsafe {
                 WinHttpQueryDataAvailable(request.0, &mut available)?;
@@ -193,6 +207,9 @@ impl HttpClient {
                 )?;
             }
             body.truncate(start + read as usize);
+            if Instant::now() >= deadline {
+                return Err(UpdateError::RequestTimedOut);
+            }
             if read == 0 {
                 break;
             }
@@ -204,20 +221,16 @@ impl HttpClient {
 pub fn check_and_stage(updates_directory: &Path) -> Result<Option<StagedUpdate>, UpdateError> {
     let channel = update_asset_channel().ok_or(UpdateError::UnsupportedChannel)?;
     validate_target_for_update(&std::env::current_exe()?)?;
+    let staging = StagingTree::open(updates_directory)?;
+    staging.cleanup();
 
     let client = HttpClient::new()?;
     let metadata = client.get(RELEASE_API, "application/vnd.github+json", MAX_METADATA_BYTES)?;
-    let Some((version, asset, digest)) =
-        select_asset(&metadata, env!("CARGO_PKG_VERSION"), channel)?
-    else {
+    let selection = select_asset(&metadata, env!("CARGO_PKG_VERSION"), channel)?;
+    let Some((version, asset, digest)) = selection else {
         return Ok(None);
     };
 
-    let version_directory = updates_directory.join(format!("v{version}"));
-    fs::create_dir_all(&version_directory)?;
-    probe_directory_writable(&version_directory)?;
-    let executable = version_directory.join("CodexStatus.exe");
-    let temporary = version_directory.join("CodexStatus.download");
     let bytes = client.get(
         &asset.browser_download_url,
         "application/octet-stream",
@@ -230,12 +243,200 @@ pub fn check_and_stage(updates_directory: &Path) -> Result<Option<StagedUpdate>,
         return Err(UpdateError::DigestMismatch);
     }
 
-    fs::write(&temporary, bytes)?;
+    let (version_directory, _version_lock) = staging.prepare_version(&version)?;
+    probe_directory_writable(&version_directory)?;
+    let executable = version_directory.join("CodexStatus.exe");
+    let temporary = version_directory.join("CodexStatus.download");
+    create_staged_file(&temporary, &bytes)?;
     if executable.exists() {
         fs::remove_file(&executable)?;
     }
     fs::rename(temporary, &executable)?;
     Ok(Some(StagedUpdate { executable }))
+}
+
+fn create_staged_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+struct StagingTree {
+    _app_lock: DirectoryLock,
+    _updates_lock: DirectoryLock,
+    _channel_lock: DirectoryLock,
+    updates_root: PathBuf,
+    channel_directory: PathBuf,
+}
+
+impl StagingTree {
+    fn open(updates_directory: &Path) -> Result<Self, UpdateError> {
+        let updates_root = updates_directory.parent().ok_or(UpdateError::UnsafeTarget)?;
+        let app_directory = updates_root.parent().ok_or(UpdateError::UnsafeTarget)?;
+        if updates_root.file_name() != Some(OsStr::new("updates"))
+            || app_directory.file_name() != Some(OsStr::new("CodexStatus"))
+        {
+            return Err(UpdateError::UnsafeTarget);
+        }
+        Self::open_at(app_directory, updates_directory, env!("CODEX_STATUS_CHANNEL"))
+    }
+
+    fn open_at(
+        app_directory: &Path,
+        updates_directory: &Path,
+        channel: &str,
+    ) -> Result<Self, UpdateError> {
+        let updates_root = app_directory.join("updates");
+        if updates_directory != updates_root.join(channel) {
+            return Err(UpdateError::UnsafeTarget);
+        }
+        ensure_directory(app_directory)?;
+        let app_lock = DirectoryLock::open(app_directory)?;
+        ensure_directory(&updates_root)?;
+        let updates_lock = DirectoryLock::open(&updates_root)?;
+        ensure_directory(updates_directory)?;
+        let channel_lock = DirectoryLock::open(updates_directory)?;
+        Ok(Self {
+            _app_lock: app_lock,
+            _updates_lock: updates_lock,
+            _channel_lock: channel_lock,
+            updates_root,
+            channel_directory: updates_directory.to_owned(),
+        })
+    }
+
+    fn cleanup(&self) {
+        cleanup_version_directories(&self.updates_root);
+        cleanup_version_directories(&self.channel_directory);
+    }
+
+    fn prepare_version(&self, version: &str) -> Result<(PathBuf, DirectoryLock), UpdateError> {
+        let directory = self.channel_directory.join(format!("v{version}"));
+        if directory.parent() != Some(self.channel_directory.as_path()) {
+            return Err(UpdateError::UnsafeTarget);
+        }
+        ensure_directory(&directory)?;
+        let lock = DirectoryLock::open(&directory)?;
+        Ok((directory, lock))
+    }
+}
+
+fn ensure_directory(path: &Path) -> Result<(), UpdateError> {
+    match fs::create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+fn cleanup_staged_updates_under(
+    app_directory: &Path,
+    updates_directory: &Path,
+    channel: &str,
+) -> Result<(), UpdateError> {
+    let staging = StagingTree::open_at(app_directory, updates_directory, channel)?;
+    staging.cleanup();
+    Ok(())
+}
+
+fn cleanup_version_directories(root: &Path) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !is_staged_version_name(name) {
+            continue;
+        }
+        let path = entry.path();
+        if path.parent() != Some(root) {
+            continue;
+        }
+        let Ok(_version_lock) = DirectoryLock::open(&path) else {
+            continue;
+        };
+        cleanup_version_directory(&path);
+    }
+}
+
+struct DirectoryLock(HANDLE);
+
+impl DirectoryLock {
+    fn open(path: &Path) -> Result<Self, UpdateError> {
+        let path = wide0(path.as_os_str());
+        let handle = unsafe {
+            CreateFileW(
+                PCWSTR(path.as_ptr()),
+                FILE_READ_ATTRIBUTES.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                None,
+            )?
+        };
+        let locked = Self(handle);
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        unsafe {
+            GetFileInformationByHandle(handle, &mut information)?;
+        }
+        if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0
+            || information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+        {
+            return Err(UpdateError::UnsafeTarget);
+        }
+        Ok(locked)
+    }
+}
+
+impl Drop for DirectoryLock {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+fn cleanup_version_directory(directory: &Path) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return;
+        };
+        let Ok(file_type) = entry.file_type() else {
+            return;
+        };
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return;
+        };
+        if !file_type.is_file() || !matches!(name, "CodexStatus.exe" | "CodexStatus.download") {
+            return;
+        }
+        files.push(entry.path());
+    }
+    for file in files {
+        if fs::remove_file(file).is_err() {
+            return;
+        }
+    }
+    let _ = fs::remove_dir(directory);
+}
+
+fn is_staged_version_name(name: &str) -> bool {
+    let Some(version) = name.strip_prefix('v') else {
+        return false;
+    };
+    !version.is_empty()
+        && version.bytes().all(|byte| byte.is_ascii_digit() || byte == b'.')
+        && parse_version(version).is_some()
 }
 
 fn select_asset(
@@ -319,41 +520,116 @@ pub fn launch_staged_update(update: &StagedUpdate) -> Result<(), UpdateError> {
 }
 
 pub fn apply_update_silently(parent_pid: u32, target: &Path) {
-    let result = apply_update(parent_pid, target);
-    if result.is_err() && target.is_file() {
-        let _ = launch_target(target);
+    let recovery_allowed = validate_target(target).is_ok() && target.is_file();
+    if let Err(error) = apply_update(parent_pid, target) {
+        let restart_error = if recovery_allowed {
+            launch_target(target).err()
+        } else {
+            Some(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "the update target is not a supported executable",
+            ))
+        };
+        record_update_failure(target, &error, restart_error.as_ref());
+        if let Some(restart_error) = restart_error {
+            show_update_recovery_error(target, &error, &restart_error);
+        }
+    }
+}
+
+fn record_update_failure(
+    target: &Path,
+    update_error: &UpdateError,
+    restart_error: Option<&std::io::Error>,
+) {
+    let base =
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let root = base.join("CodexStatus");
+    let directory = if env!("CODEX_STATUS_CHANNEL") == "stable" {
+        root
+    } else {
+        root.join("channels").join(env!("CODEX_STATUS_CHANNEL"))
+    };
+    let _ = fs::create_dir_all(&directory);
+    let restart = restart_error
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "restarted successfully".to_owned());
+    let report =
+        format!("target={}\nupdate_error={update_error}\nrestart={restart}\n", target.display());
+    let _ = fs::write(directory.join("update-error.log"), report);
+}
+
+fn show_update_recovery_error(
+    target: &Path,
+    update_error: &UpdateError,
+    restart_error: &std::io::Error,
+) {
+    let message = format!(
+        "CodexStatus could not finish the update or restart.\n\nUpdate: {update_error}\nRestart: \
+         {restart_error}\n\nPlease start CodexStatus manually from:\n{}",
+        target.display()
+    );
+    let message = wide0(message);
+    unsafe {
+        let _ = MessageBoxW(
+            None,
+            PCWSTR(message.as_ptr()),
+            w!("CodexStatus update failed"),
+            MB_OK | MB_ICONERROR,
+        );
     }
 }
 
 fn apply_update(parent_pid: u32, target: &Path) -> Result<(), UpdateError> {
     validate_target(target)?;
-    if let Ok(process) = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, parent_pid) } {
-        let waited = unsafe { WaitForSingleObject(process, UPDATE_WAIT_MS) };
-        unsafe {
-            let _ = CloseHandle(process);
+    match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, parent_pid) } {
+        Ok(process) => {
+            let waited = unsafe { WaitForSingleObject(process, UPDATE_WAIT_MS) };
+            unsafe {
+                let _ = CloseHandle(process);
+            }
+            if waited != WAIT_OBJECT_0 {
+                return Err(UpdateError::ParentStillRunning);
+            }
         }
-        if waited != WAIT_OBJECT_0 {
-            return Err(UpdateError::ParentStillRunning);
-        }
+        Err(error) if error.code() == HRESULT::from_win32(ERROR_INVALID_PARAMETER.0) => {}
+        Err(error) => return Err(error.into()),
     }
 
     let staged = std::env::current_exe()?;
     if staged == target {
         return Err(UpdateError::UnsafeTarget);
     }
-    let pending = target.with_extension("update");
-    fs::copy(staged, &pending)?;
+    let pending = target.with_extension(format!("update-{}", std::process::id()));
+    copy_to_new_file(&staged, &pending)?;
     let pending_wide = wide0(pending.as_os_str());
     let target_wide = wide0(target.as_os_str());
-    unsafe {
+    let replacement = unsafe {
         MoveFileExW(
             PCWSTR(pending_wide.as_ptr()),
             PCWSTR(target_wide.as_ptr()),
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )?;
+        )
+    };
+    if let Err(error) = replacement {
+        let _ = fs::remove_file(&pending);
+        return Err(error.into());
     }
     launch_target(target)?;
     Ok(())
+}
+
+fn copy_to_new_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let result = (|| {
+        let mut source = File::open(source)?;
+        let mut destination = OpenOptions::new().write(true).create_new(true).open(destination)?;
+        std::io::copy(&mut source, &mut destination)?;
+        destination.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(destination);
+    }
+    result.map(|_| ())
 }
 
 fn launch_target(target: &Path) -> Result<(), std::io::Error> {
@@ -428,6 +704,12 @@ fn wide0(value: impl AsRef<OsStr>) -> Vec<u16> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temporary_directory(name: &str) -> PathBuf {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        std::env::temp_dir().join(format!("codex-status-{name}-{suffix}"))
+    }
 
     fn metadata(tag: &str, digest: &str, channel: UpdateAssetChannel) -> Vec<u8> {
         let version = tag.strip_prefix('v').unwrap_or(tag);
@@ -527,5 +809,107 @@ mod tests {
             sha256_hex(b"CodexStatus"),
             "1348bd7daee4282c641059f8cdd9fe96ae24f501c0cd32fbdabb8c1e60eea85c"
         );
+    }
+
+    #[test]
+    fn update_cleanup_handles_channel_and_legacy_layouts_without_touching_unknown_content() {
+        let root = temporary_directory("update-cleanup");
+        let app_directory = root.join("CodexStatus");
+        let updates = app_directory.join("updates");
+        let stable = updates.join("stable");
+        let legacy_version = updates.join("v0.4.4");
+        let channel_version = stable.join("v0.5.0");
+        let protected_version = updates.join("v1.0.0");
+        let unrelated = updates.join("downloads");
+        fs::create_dir_all(&legacy_version).unwrap();
+        fs::create_dir_all(&channel_version).unwrap();
+        fs::create_dir_all(&protected_version).unwrap();
+        fs::create_dir_all(&unrelated).unwrap();
+        fs::write(legacy_version.join("CodexStatus.exe"), b"old").unwrap();
+        fs::write(channel_version.join("CodexStatus.download"), b"partial").unwrap();
+        fs::write(protected_version.join("notes.txt"), b"keep").unwrap();
+        fs::write(unrelated.join("CodexStatus.exe"), b"keep").unwrap();
+
+        cleanup_staged_updates_under(&app_directory, &stable, "stable").unwrap();
+
+        assert!(!legacy_version.exists());
+        assert!(!channel_version.exists());
+        assert!(protected_version.join("notes.txt").is_file());
+        assert!(unrelated.join("CodexStatus.exe").is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn staged_version_directory_names_are_strict() {
+        assert!(is_staged_version_name("v0.5.0"));
+        assert!(is_staged_version_name("v12.34.56"));
+        assert!(!is_staged_version_name("0.5.0"));
+        assert!(!is_staged_version_name("v0.5"));
+        assert!(!is_staged_version_name("v0.5.0-beta"));
+        assert!(!is_staged_version_name("v../0.5.0"));
+    }
+
+    #[test]
+    fn update_cleanup_refuses_a_reparse_point_app_root() {
+        let root = temporary_directory("update-cleanup-reparse");
+        let outside = root.join("outside");
+        let app_link = root.join("CodexStatus");
+        let legacy_version = outside.join("updates").join("v0.4.4");
+        fs::create_dir_all(&legacy_version).unwrap();
+        fs::write(legacy_version.join("CodexStatus.exe"), b"keep").unwrap();
+        let junction = Command::new("cmd")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&app_link)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(
+            junction.status.success(),
+            "could not create junction: {}",
+            String::from_utf8_lossy(&junction.stderr)
+        );
+
+        let stable = app_link.join("updates").join("stable");
+        assert!(matches!(
+            cleanup_staged_updates_under(&app_link, &stable, "stable"),
+            Err(UpdateError::UnsafeTarget)
+        ));
+
+        assert!(legacy_version.join("CodexStatus.exe").is_file());
+        fs::remove_dir(&app_link).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn staged_download_refuses_an_existing_hardlink() {
+        let root = temporary_directory("update-hardlink");
+        let version = root.join("v0.5.1");
+        let outside = root.join("outside.exe");
+        let temporary = version.join("CodexStatus.download");
+        fs::create_dir_all(&version).unwrap();
+        fs::write(&outside, b"keep").unwrap();
+        fs::hard_link(&outside, &temporary).unwrap();
+
+        assert!(create_staged_file(&temporary, b"replacement").is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"keep");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn final_update_copy_refuses_an_existing_hardlink() {
+        let root = temporary_directory("update-final-hardlink");
+        let source = root.join("staged.exe");
+        let outside = root.join("outside.exe");
+        let pending = root.join("CodexStatus.update-1");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&source, b"replacement").unwrap();
+        fs::write(&outside, b"keep").unwrap();
+        fs::hard_link(&outside, &pending).unwrap();
+
+        assert!(copy_to_new_file(&source, &pending).is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"keep");
+
+        fs::remove_dir_all(root).unwrap();
     }
 }

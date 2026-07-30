@@ -34,7 +34,12 @@ pub const CARD_WIDTH: i32 = 376;
 pub const CARD_HEIGHT: i32 = 352;
 pub const COMPACT_CARD_WIDTH: i32 = 336;
 pub const COMPACT_CARD_HEIGHT: i32 = 284;
-const HEADER_TEXT_BOTTOM: i32 = 34;
+pub(super) const HEADER_ACCENT_TOP: i32 = 15;
+pub(super) const HEADER_ACCENT_BOTTOM: i32 = 31;
+pub(super) const HEADER_TEXT_TOP: i32 = 8;
+pub(super) const HEADER_TEXT_BOTTOM: i32 = 38;
+pub(super) const HEADER_VERSION_TOP: i32 = HEADER_TEXT_TOP + 1;
+pub(super) const HEADER_VERSION_BOTTOM: i32 = HEADER_TEXT_BOTTOM + 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlyoutDimensions {
@@ -390,9 +395,9 @@ unsafe fn draw_card(
             hdc,
             RECT {
                 left: scale(18, dpi),
-                top: scale(15, dpi),
+                top: scale(HEADER_ACCENT_TOP, dpi),
                 right: scale(20, dpi),
-                bottom: scale(31, dpi),
+                bottom: scale(HEADER_ACCENT_BOTTOM, dpi),
             },
             scale(2, dpi),
             status_color,
@@ -403,7 +408,7 @@ unsafe fn draw_card(
             "CodexStatus",
             RECT {
                 left: scale(29, dpi),
-                top: 0,
+                top: scale(HEADER_TEXT_TOP, dpi),
                 right: scale(180, dpi),
                 bottom: scale(HEADER_TEXT_BOTTOM, dpi),
             },
@@ -419,9 +424,9 @@ unsafe fn draw_card(
             &version_text(),
             RECT {
                 left: title_right,
-                top: 0,
+                top: scale(HEADER_VERSION_TOP, dpi),
                 right: scale(188, dpi),
-                bottom: scale(HEADER_TEXT_BOTTOM, dpi),
+                bottom: scale(HEADER_VERSION_BOTTOM, dpi),
             },
             scale(11, dpi),
             FW_NORMAL.0 as i32,
@@ -434,7 +439,7 @@ unsafe fn draw_card(
             &updated_text(state, locale),
             RECT {
                 left: scale(190, dpi),
-                top: 0,
+                top: scale(HEADER_TEXT_TOP, dpi),
                 right: width - scale(18, dpi),
                 bottom: scale(HEADER_TEXT_BOTTOM, dpi),
             },
@@ -1442,7 +1447,13 @@ mod tests {
     #[test]
     fn version_label_uses_the_running_package_version() {
         assert_eq!(version_text(), format!(" - v{}", env!("CARGO_PKG_VERSION")));
-        assert_eq!(version_text(), " - v0.5.0");
+    }
+
+    #[test]
+    fn header_text_row_is_centered_on_the_status_accent() {
+        assert_eq!(HEADER_TEXT_TOP + HEADER_TEXT_BOTTOM, HEADER_ACCENT_TOP + HEADER_ACCENT_BOTTOM);
+        assert_eq!(HEADER_VERSION_TOP, HEADER_TEXT_TOP + 1);
+        assert_eq!(HEADER_VERSION_BOTTOM, HEADER_TEXT_BOTTOM + 1);
     }
 
     #[test]

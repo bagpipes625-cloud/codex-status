@@ -4,6 +4,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use windows::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, REPLACEFILE_WRITE_THROUGH,
     ReplaceFileW,
@@ -11,6 +12,7 @@ use windows::Win32::Storage::FileSystem::{
 use windows::core::PCWSTR;
 
 const APP_DIR: &str = "CodexStatus";
+static TEMPORARY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
@@ -58,18 +60,24 @@ impl Settings {
 #[derive(Debug, Clone)]
 pub struct AppStore {
     directory: PathBuf,
+    updates_directory: PathBuf,
 }
 
 impl AppStore {
     pub fn discover() -> Self {
         let base =
             std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-        Self { directory: base.join(APP_DIR) }
+        let channel = env!("CODEX_STATUS_CHANNEL");
+        Self {
+            directory: channel_directory(&base, channel),
+            updates_directory: base.join(APP_DIR).join("updates").join(channel),
+        }
     }
 
     #[cfg(test)]
     pub fn at(directory: PathBuf) -> Self {
-        Self { directory }
+        let updates_directory = directory.join("updates").join(env!("CODEX_STATUS_CHANNEL"));
+        Self { directory, updates_directory }
     }
 
     pub fn load_settings(&self) -> Settings {
@@ -92,7 +100,7 @@ impl AppStore {
     }
 
     pub fn updates_directory(&self) -> PathBuf {
-        self.directory.join("updates").join(env!("CODEX_STATUS_CHANNEL"))
+        self.updates_directory.clone()
     }
 
     pub fn append_tray_error(&self, entry: &str) -> io::Result<()> {
@@ -102,6 +110,11 @@ impl AppStore {
             .append(true)
             .open(self.directory.join("tray-errors.log"))?;
         writeln!(file, "{entry}")
+    }
+
+    pub fn write_settings_error(&self, entry: &str) -> io::Result<()> {
+        fs::create_dir_all(&self.directory)?;
+        fs::write(self.directory.join("settings-error.log"), entry)
     }
 }
 
@@ -114,10 +127,25 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let temporary = path.with_extension("tmp");
+    let sequence = TEMPORARY_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = path.with_extension(format!("tmp-{}-{sequence}", std::process::id()));
     let bytes = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
-    fs::write(&temporary, bytes)?;
-    replace_file(&temporary, path)
+    let result = (|| {
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        drop(file);
+        replace_file(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn channel_directory(base: &Path, channel: &str) -> PathBuf {
+    let root = base.join(APP_DIR);
+    if channel == "stable" { root } else { root.join("channels").join(channel) }
 }
 
 fn replace_file(temporary: &Path, destination: &Path) -> io::Result<()> {
@@ -187,6 +215,38 @@ mod tests {
             Settings { refresh_minutes: 15, alert_threshold: Some(20), ..Settings::default() };
         store.save_settings(&settings).unwrap();
         assert_eq!(store.load_settings(), settings);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn stable_keeps_its_existing_state_directory_and_other_channels_are_isolated() {
+        let base = Path::new(r"C:\Users\Example\AppData\Local");
+        assert_eq!(channel_directory(base, "stable"), base.join(APP_DIR));
+        assert_eq!(
+            channel_directory(base, "development"),
+            base.join(APP_DIR).join("channels").join("development")
+        );
+        assert_eq!(
+            channel_directory(base, "portable"),
+            base.join(APP_DIR).join("channels").join("portable")
+        );
+    }
+
+    #[test]
+    fn failed_atomic_replace_removes_its_temporary_file() {
+        let directory =
+            std::env::temp_dir().join(format!("codex-status-settings-{}", std::process::id()));
+        let destination = directory.join("settings.json");
+        fs::create_dir_all(&destination).unwrap();
+
+        assert!(write_json_atomic(&destination, &Settings::default()).is_err());
+        let leftovers = fs::read_dir(&directory)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("settings.tmp-"))
+            .count();
+        assert_eq!(leftovers, 0);
+
         fs::remove_dir_all(directory).unwrap();
     }
 }
