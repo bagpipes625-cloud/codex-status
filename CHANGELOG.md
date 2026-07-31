@@ -4,6 +4,14 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-07-31
+
+- Keep the header refresh icon rotating for the full lifetime of a manual
+  refresh, including tray-menu and queued refreshes, while suspending animation
+  and releasing the drawing surface whenever the flyout is hidden.
+- Open the refresh glyph's trailing edge with a shared 305-degree arc in both
+  the Direct2D and GDI renderers.
+
 ## [0.5.6] - 2026-07-31
 
 - Add a borderless header refresh control shared by compact and dual-quota

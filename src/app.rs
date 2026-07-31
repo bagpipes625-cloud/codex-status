@@ -448,7 +448,9 @@ fn pointer_coordinates(lparam: LPARAM) -> (i32, i32) {
 }
 
 fn refresh_rotation_degrees(elapsed: Duration) -> f32 {
-    (elapsed.as_secs_f32() / REFRESH_ANIMATION_DURATION.as_secs_f32()).min(1.0) * 360.0
+    (elapsed.as_secs_f32() % REFRESH_ANIMATION_DURATION.as_secs_f32())
+        / REFRESH_ANIMATION_DURATION.as_secs_f32()
+        * 360.0
 }
 
 fn register_classes(instance: HINSTANCE) -> windows::core::Result<()> {
@@ -630,7 +632,7 @@ unsafe extern "system" fn flyout_window_proc(
                     state.refresh_button_pressed = false;
                     let _ = ReleaseCapture();
                     if activate && !state.refreshing && !state.refresh_feedback {
-                        state.start_flyout_refresh();
+                        state.start_refresh(true);
                     }
                     return LRESULT(0);
                 }
@@ -708,11 +710,7 @@ unsafe extern "system" fn flyout_window_proc(
 }
 
 impl AppState {
-    fn start_flyout_refresh(&mut self) {
-        if self.refreshing {
-            return;
-        }
-        self.refresh_feedback = true;
+    fn start_refresh_animation(&mut self) {
         self.refresh_animation_started = Some(Instant::now());
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_ANIMATION);
@@ -725,26 +723,19 @@ impl AppState {
             if timer == 0 {
                 self.refresh_animation_started = None;
             }
-            let _ = InvalidateRect(Some(self.flyout), None, false);
         }
-        self.start_refresh(true);
     }
 
     fn advance_refresh_animation(&mut self) {
-        let Some(started) = self.refresh_animation_started else {
+        if self.refresh_animation_started.is_none() {
             unsafe {
                 let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_ANIMATION);
             }
             return;
-        };
-        if started.elapsed() >= REFRESH_ANIMATION_DURATION {
-            self.refresh_animation_started = None;
-            if !self.refreshing {
-                self.refresh_feedback = false;
-            }
-            unsafe {
-                let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_ANIMATION);
-            }
+        }
+        if !self.refreshing {
+            self.stop_refresh_feedback();
+            return;
         }
         if unsafe { IsWindowVisible(self.flyout) }.as_bool() {
             unsafe {
@@ -768,8 +759,21 @@ impl AppState {
 
     fn start_refresh(&mut self, force: bool) {
         diagnostic("refresh:start");
+        if force {
+            self.refresh_feedback = true;
+            if self.refresh_animation_started.is_none()
+                && unsafe { IsWindowVisible(self.flyout) }.as_bool()
+            {
+                self.start_refresh_animation();
+            }
+        }
         if self.refreshing {
             self.refresh_pending |= force;
+            if force {
+                unsafe {
+                    let _ = InvalidateRect(Some(self.flyout), None, false);
+                }
+            }
             return;
         }
         self.refreshing = true;
@@ -813,9 +817,7 @@ impl AppState {
 
     fn finish_refresh(&mut self, outcome: RefreshOutcome) {
         self.refreshing = false;
-        if self.refresh_animation_started.is_none() {
-            self.stop_refresh_feedback();
-        }
+        self.stop_refresh_feedback();
         match outcome.result {
             Ok(snapshot) => {
                 self.failures = 0;
@@ -1272,6 +1274,9 @@ impl AppState {
         self.theme = ui::detect_theme(&self.settings.theme);
         ui::configure_flyout(self.flyout, self.theme);
         self.position_flyout(true);
+        if self.refresh_feedback && self.refreshing && self.refresh_animation_started.is_none() {
+            self.start_refresh_animation();
+        }
     }
 
     fn sync_visible_flyout_layout(&mut self) {
@@ -1720,11 +1725,15 @@ mod tests {
     }
 
     #[test]
-    fn refresh_rotation_completes_one_turn_and_stops() {
-        assert_eq!(refresh_rotation_degrees(Duration::ZERO), 0.0);
-        assert_eq!(refresh_rotation_degrees(Duration::from_millis(300)), 180.0);
-        assert_eq!(refresh_rotation_degrees(Duration::from_millis(600)), 360.0);
-        assert_eq!(refresh_rotation_degrees(Duration::from_secs(5)), 360.0);
+    fn refresh_rotation_repeats_every_animation_cycle() {
+        for (elapsed, expected) in [
+            (Duration::ZERO, 0.0),
+            (Duration::from_millis(300), 180.0),
+            (Duration::from_millis(600), 0.0),
+            (Duration::from_millis(900), 180.0),
+        ] {
+            assert!((refresh_rotation_degrees(elapsed) - expected).abs() < 0.001);
+        }
     }
 
     #[test]

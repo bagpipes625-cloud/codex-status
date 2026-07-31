@@ -8,10 +8,11 @@
 use super::{
     AccountMetrics, CardInteraction, HEADER_ACCENT_BOTTOM, HEADER_ACCENT_TOP, HEADER_TEXT_BOTTOM,
     HEADER_TEXT_TOP, HEADER_VERSION_BOTTOM, HEADER_VERSION_TOP, Locale, QuotaPanelGeometry,
-    QuotaPanelSlot, REFRESH_BUTTON_GAP, REFRESH_BUTTON_RADIUS, REFRESH_BUTTON_RIGHT, Theme,
-    accent_for, account_metrics, flyout_dimensions, inner_track_color, outer_track_color,
-    quota_bar_color, quota_card_colors, quota_label, quota_panel_geometry, refresh_icon_color,
-    reset_details, theoretical_color, theoretical_remaining_percent, updated_text, version_text,
+    QuotaPanelSlot, REFRESH_ARC_START_DEGREES, REFRESH_ARC_SWEEP_DEGREES, REFRESH_BUTTON_GAP,
+    REFRESH_BUTTON_RADIUS, REFRESH_BUTTON_RIGHT, Theme, accent_for, account_metrics,
+    flyout_dimensions, inner_track_color, outer_track_color, quota_bar_color, quota_card_colors,
+    quota_label, quota_panel_geometry, refresh_icon_color, reset_details, theoretical_color,
+    theoretical_remaining_percent, updated_text, version_text,
 };
 use crate::model::{DisplayState, QuotaAvailability, QuotaKind, QuotaWindow};
 use chrono::Local;
@@ -233,7 +234,9 @@ impl RefreshGeometry {
         let arc = unsafe { factory.CreatePathGeometry()? };
         let sink = unsafe { arc.Open()? };
         let points: [Vector2; 22] = std::array::from_fn(|index| {
-            let angle = (315.0 * index as f32 / 21.0).to_radians();
+            let angle = (REFRESH_ARC_START_DEGREES
+                + REFRESH_ARC_SWEEP_DEGREES * index as f32 / 21.0)
+                .to_radians();
             Vector2 { X: 5.7 * angle.cos(), Y: 5.7 * angle.sin() }
         });
         unsafe {

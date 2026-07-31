@@ -43,6 +43,8 @@ pub(super) const HEADER_VERSION_BOTTOM: i32 = HEADER_TEXT_BOTTOM + 1;
 pub(super) const REFRESH_BUTTON_RIGHT: i32 = 18;
 pub(super) const REFRESH_BUTTON_RADIUS: i32 = 12;
 pub(super) const REFRESH_BUTTON_GAP: i32 = 4;
+pub(super) const REFRESH_ARC_START_DEGREES: f32 = 10.0;
+pub(super) const REFRESH_ARC_SWEEP_DEGREES: f32 = 305.0;
 const REFRESH_HIT_RADIUS: i32 = 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1024,7 +1026,10 @@ unsafe fn draw_refresh_icon(
     let radius = scale(6, dpi);
     let rotation = f64::from(rotation_degrees);
     let arc: [POINT; 22] = std::array::from_fn(|index| {
-        let angle = (rotation + 315.0 * index as f64 / 21.0).to_radians();
+        let angle = (rotation
+            + f64::from(REFRESH_ARC_START_DEGREES)
+            + f64::from(REFRESH_ARC_SWEEP_DEGREES) * index as f64 / 21.0)
+            .to_radians();
         POINT {
             x: center_x + (f64::from(radius) * angle.cos()).round() as i32,
             y: center_y + (f64::from(radius) * angle.sin()).round() as i32,
