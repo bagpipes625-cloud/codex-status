@@ -33,9 +33,9 @@ line and product decisions.
 - System, light, and dark flyout themes selectable from the tray menu.
 - Official Codex app-server RPC: `account/rateLimits/read`; no token scraping and no private endpoints.
 - Event-driven Win32 process with no Electron, WebView, WPF, WinUI, local HTTP server, or resident async runtime.
-- The HWND-sized renderer is released when the flyout closes; after a short
-  grace period the remaining Direct2D resources are dropped and the idle working
-  set is trimmed.
+- After its first use, the HWND-sized renderer stays cached while the flyout is
+  hidden, avoiding repeated Direct2D and text-resource initialization. Hidden
+  flyouts do not repaint, and resources are still released on shutdown or device loss.
 - Five-minute default refresh, manual refresh, bounded failure backoff, safe cache expiry, and optional low-quota alerts.
 - User-initiated updates from this repository's GitHub Releases, with channel-specific assets and SHA-256 verification.
 - Stale verified update staging files are removed on the next user-initiated
@@ -85,12 +85,12 @@ Normal builds do not write activity logs. If Windows rejects a notification icon
 
 ## Performance
 
-Version 0.5.7 remains an event-driven native Win32 process. It performs no
-continuous animation or polling between configured refresh timers. Hiding the
-flyout releases its window-sized render target, drops the remaining Direct2D
-resources after a short grace period, and trims idle resident pages. Exact
-working-set figures vary by Windows version, DPI, graphics driver, and whether
-the flyout was opened recently.
+Version 0.5.8 remains an event-driven native Win32 process. It performs no
+continuous animation or polling between configured refresh timers. After the
+first flyout render, Direct2D and text resources remain cached while the hidden
+window stays inactive, reducing repeat-open latency without background drawing.
+Windows can still reclaim shared or resident pages as needed; exact memory
+figures vary by Windows version, DPI, graphics driver, and recent use.
 
 Refreshing briefly starts one local `codex app-server` process tree. That tree
 has Codex's own transient footprint and is closed as a unit when the RPC

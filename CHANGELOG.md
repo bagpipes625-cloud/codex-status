@@ -4,6 +4,13 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-08-02
+
+- Keep the Direct2D renderer, text resources, and HWND surface cached while the
+  flyout is hidden to reduce repeat-open latency without background drawing.
+- Remove the delayed renderer teardown and explicit working-set trim; resources
+  remain bounded and are still released on shutdown or graphics-device loss.
+
 ## [0.5.7] - 2026-07-31
 
 - Keep the header refresh icon rotating for the full lifetime of a manual
