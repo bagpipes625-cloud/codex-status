@@ -1,9 +1,8 @@
 //! Low-overhead Direct2D/DirectWrite renderer for the opaque flyout.
 //!
 //! An HWND render target avoids the D3D11/DXGI/DirectComposition device tree
-//! used by transparent composition UIs. Device-independent factories and text
-//! formats stay warm, while the HWND-sized target and its brushes are released
-//! whenever the flyout is hidden.
+//! used by transparent composition UIs. The renderer and HWND-sized surface stay
+//! warm while the flyout is hidden, then release on shutdown or device loss.
 
 use super::{
     AccountMetrics, CardInteraction, HEADER_ACCENT_BOTTOM, HEADER_ACCENT_TOP, HEADER_TEXT_BOTTOM,
@@ -88,15 +87,6 @@ pub(super) fn paint(input: PaintInput<'_>) -> bool {
             }
         }
     })
-}
-
-pub(super) fn release_surface() {
-    RENDERER.with(|slot| {
-        if let Some(renderer) = slot.borrow_mut().as_mut() {
-            renderer.surface = None;
-        }
-    });
-    PERMANENT_FALLBACK.with(|fallback| fallback.set(false));
 }
 
 pub(super) fn release_all() {

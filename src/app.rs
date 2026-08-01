@@ -20,8 +20,7 @@ use windows::Win32::Graphics::Gdi::{
     MonitorFromPoint,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::ProcessStatus::EmptyWorkingSet;
-use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess};
+use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, GetDpiForSystem, GetDpiForWindow,
     GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI, SetProcessDpiAwarenessContext,
@@ -110,9 +109,7 @@ const TIMER_REFRESH: usize = 1;
 const TIMER_STARTUP: usize = 2;
 const TIMER_CARD: usize = 3;
 const TIMER_FLYOUT_ACTIVATE: usize = 4;
-const TIMER_WORKING_SET_TRIM: usize = 5;
-const TIMER_REFRESH_ANIMATION: usize = 6;
-const WORKING_SET_TRIM_DELAY_MS: u32 = 2_000;
+const TIMER_REFRESH_ANIMATION: usize = 5;
 const REFRESH_ANIMATION_INTERVAL_MS: u32 = 16;
 
 const TRAY_ACTIVATION_DEBOUNCE: Duration = Duration::from_millis(300);
@@ -544,7 +541,6 @@ unsafe extern "system" fn main_window_proc(
                             let _ = KillTimer(Some(hwnd), TIMER_FLYOUT_ACTIVATE);
                             state.finish_flyout_activation();
                         }
-                        TIMER_WORKING_SET_TRIM => state.trim_working_set(),
                         TIMER_REFRESH_ANIMATION => state.advance_refresh_animation(),
                         _ => {}
                     }
@@ -1203,27 +1199,8 @@ impl AppState {
         unsafe {
             let _ = ReleaseCapture();
             let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
-            let _ = KillTimer(Some(self.hwnd), TIMER_WORKING_SET_TRIM);
             let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_ANIMATION);
             let _ = ShowWindow(self.flyout, SW_HIDE);
-            let _ =
-                SetTimer(Some(self.hwnd), TIMER_WORKING_SET_TRIM, WORKING_SET_TRIM_DELAY_MS, None);
-        }
-        ui::release_card_surface();
-    }
-
-    fn trim_working_set(&self) {
-        unsafe {
-            let _ = KillTimer(Some(self.hwnd), TIMER_WORKING_SET_TRIM);
-            if IsWindowVisible(self.flyout).as_bool() {
-                return;
-            }
-            if self.refreshing || self.update_checking {
-                let _ = SetTimer(Some(self.hwnd), TIMER_WORKING_SET_TRIM, 1_000, None);
-                return;
-            }
-            ui::release_card_renderer();
-            let _ = EmptyWorkingSet(GetCurrentProcess());
         }
     }
 
@@ -1268,9 +1245,6 @@ impl AppState {
 
     fn show_flyout(&mut self) {
         self.flyout_hidden_for_tray_activation = None;
-        unsafe {
-            let _ = KillTimer(Some(self.hwnd), TIMER_WORKING_SET_TRIM);
-        }
         self.theme = ui::detect_theme(&self.settings.theme);
         ui::configure_flyout(self.flyout, self.theme);
         self.position_flyout(true);

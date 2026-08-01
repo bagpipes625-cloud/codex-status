@@ -377,10 +377,6 @@ pub fn paint_card(
     }
 }
 
-pub fn release_card_surface() {
-    direct2d::release_surface();
-}
-
 pub fn release_card_renderer() {
     direct2d::release_all();
 }
