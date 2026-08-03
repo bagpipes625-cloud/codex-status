@@ -377,6 +377,33 @@ pub fn paint_card(
     }
 }
 
+pub fn prewarm_card_renderer(
+    hwnd: HWND,
+    state: &DisplayState,
+    preferred: QuotaKind,
+    locale: Locale,
+    theme: Theme,
+) {
+    unsafe {
+        let mut client = RECT::default();
+        let _ = GetClientRect(hwnd, &mut client);
+        direct2d::prewarm(direct2d::PaintInput {
+            hwnd,
+            pixel_size: ((client.right - client.left).max(1), (client.bottom - client.top).max(1)),
+            dpi: windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96),
+            state,
+            preferred,
+            locale,
+            theme,
+            interaction: CardInteraction {
+                pressed_quota: None,
+                refresh_feedback: false,
+                refresh_rotation_degrees: 0.0,
+            },
+        });
+    }
+}
+
 pub fn release_card_renderer() {
     direct2d::release_all();
 }

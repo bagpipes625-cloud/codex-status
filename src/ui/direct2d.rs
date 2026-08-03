@@ -1,8 +1,9 @@
 //! Low-overhead Direct2D/DirectWrite renderer for the opaque flyout.
 //!
 //! An HWND render target avoids the D3D11/DXGI/DirectComposition device tree
-//! used by transparent composition UIs. The renderer and HWND-sized surface stay
-//! warm while the flyout is hidden, then release on shutdown or device loss.
+//! used by transparent composition UIs. The renderer and HWND-sized surface are
+//! prewarmed once at startup, stay warm while hidden, then release on shutdown
+//! or device loss.
 
 use super::{
     AccountMetrics, CardInteraction, HEADER_ACCENT_BOTTOM, HEADER_ACCENT_TOP, HEADER_TEXT_BOTTOM,
@@ -66,16 +67,13 @@ pub(super) fn paint(input: PaintInput<'_>) -> bool {
     }
     RENDERER.with(|slot| {
         let mut slot = slot.borrow_mut();
-        if slot.is_none() {
-            match Renderer::new() {
-                Ok(renderer) => *slot = Some(renderer),
-                Err(_) => {
-                    PERMANENT_FALLBACK.with(|fallback| fallback.set(true));
-                    return false;
-                }
+        let renderer = match ensure_renderer(&mut slot) {
+            Ok(renderer) => renderer,
+            Err(_) => {
+                PERMANENT_FALLBACK.with(|fallback| fallback.set(true));
+                return false;
             }
-        }
-        let renderer = slot.as_mut().expect("renderer initialized");
+        };
         match renderer.paint(&input) {
             Ok(()) => true,
             Err(error) => {
@@ -87,6 +85,17 @@ pub(super) fn paint(input: PaintInput<'_>) -> bool {
             }
         }
     })
+}
+
+pub(super) fn prewarm(input: PaintInput<'_>) {
+    let _ = paint(input);
+}
+
+fn ensure_renderer(slot: &mut Option<Renderer>) -> Result<&mut Renderer> {
+    if slot.is_none() {
+        *slot = Some(Renderer::new()?);
+    }
+    Ok(slot.as_mut().expect("renderer initialized"))
 }
 
 pub(super) fn release_all() {

@@ -104,6 +104,7 @@ const WM_REFRESH_COMPLETE: u32 = WM_APP + 2;
 const WM_SHOW_EXISTING: u32 = WM_APP + 3;
 const WM_TOGGLE_FLYOUT: u32 = WM_APP + 4;
 const WM_UPDATE_COMPLETE: u32 = WM_APP + 5;
+const WM_PREWARM_FLYOUT: u32 = WM_APP + 6;
 
 const TIMER_REFRESH: usize = 1;
 const TIMER_STARTUP: usize = 2;
@@ -388,7 +389,9 @@ pub fn run() -> Result<(), AppError> {
         let state = &mut *raw;
         ui::configure_flyout(state.flyout, state.theme);
         diagnostic("run:dwm");
-        state.update_tray(true)
+        let tray_ready = state.update_tray(true);
+        state.position_flyout(false);
+        tray_ready
     };
     diagnostic("run:tray-returned");
 
@@ -404,6 +407,9 @@ pub fn run() -> Result<(), AppError> {
                 state.show_flyout();
             }
         }
+    }
+    unsafe {
+        let _ = PostMessageW(Some(hwnd), WM_PREWARM_FLYOUT, WPARAM(0), LPARAM(0));
     }
     diagnostic("run:message-loop");
 
@@ -510,6 +516,16 @@ unsafe extern "system" fn main_window_proc(
                 }
                 WM_TOGGLE_FLYOUT => {
                     state.toggle_flyout();
+                    return LRESULT(0);
+                }
+                WM_PREWARM_FLYOUT => {
+                    ui::prewarm_card_renderer(
+                        state.flyout,
+                        &state.display,
+                        state.settings.display_quota,
+                        state.locale,
+                        state.theme,
+                    );
                     return LRESULT(0);
                 }
                 WM_REFRESH_COMPLETE => {
