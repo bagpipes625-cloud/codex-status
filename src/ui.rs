@@ -45,6 +45,7 @@ pub(super) const REFRESH_BUTTON_RADIUS: i32 = 12;
 pub(super) const REFRESH_BUTTON_GAP: i32 = 4;
 pub(super) const REFRESH_ARC_START_DEGREES: f32 = 10.0;
 pub(super) const REFRESH_ARC_SWEEP_DEGREES: f32 = 305.0;
+pub(super) const FLYOUT_CORNER_RADIUS: i32 = 10;
 const REFRESH_HIT_RADIUS: i32 = 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -290,8 +291,8 @@ pub fn apply_flyout_shape(hwnd: HWND, dpi: u32) {
             0,
             client.right.max(1) + 1,
             client.bottom.max(1) + 1,
-            scale(16, dpi).max(2),
-            scale(16, dpi).max(2),
+            scale(FLYOUT_CORNER_RADIUS.saturating_mul(2), dpi).max(2),
+            scale(FLYOUT_CORNER_RADIUS.saturating_mul(2), dpi).max(2),
         );
         if SetWindowRgn(hwnd, Some(region), true) == 0 {
             let _ = DeleteObject(HGDIOBJ(region.0));
@@ -424,7 +425,7 @@ unsafe fn draw_card(
         outlined_surface(
             hdc,
             RECT { left: 0, top: 0, right: width, bottom: height },
-            8,
+            FLYOUT_CORNER_RADIUS,
             theme.background,
             theme.line,
             dpi,
