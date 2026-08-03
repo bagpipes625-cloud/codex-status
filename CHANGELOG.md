@@ -4,6 +4,11 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.5.11] - 2026-08-03
+
+- Restore the shared flyout outer radius to 8 DIP so the Direct2D border, GDI
+  fallback, and Windows 10 clipping stay aligned with Windows 11 native corners.
+
 ## [0.5.10] - 2026-08-03
 
 - Align the flyout's drawn outer border and Windows 10 clipping radius to the
