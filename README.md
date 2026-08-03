@@ -33,9 +33,10 @@ line and product decisions.
 - System, light, and dark flyout themes selectable from the tray menu.
 - Official Codex app-server RPC: `account/rateLimits/read`; no token scraping and no private endpoints.
 - Event-driven Win32 process with no Electron, WebView, WPF, WinUI, local HTTP server, or resident async runtime.
-- After its first use, the HWND-sized renderer stays cached while the flyout is
-  hidden, avoiding repeated Direct2D and text-resource initialization. Hidden
-  flyouts do not repaint, and resources are still released on shutdown or device loss.
+- At startup, one hidden frame prewarms the HWND-sized renderer; it then stays
+  cached while the flyout is hidden, avoiding visible first-open and repeat-open
+  initialization. After that one prewarm, the hidden flyout stays inactive and
+  resources are still released on shutdown or device loss.
 - Five-minute default refresh, manual refresh, bounded failure backoff, safe cache expiry, and optional low-quota alerts.
 - User-initiated updates from this repository's GitHub Releases, with channel-specific assets and SHA-256 verification.
 - Stale verified update staging files are removed on the next user-initiated
@@ -85,12 +86,14 @@ Normal builds do not write activity logs. If Windows rejects a notification icon
 
 ## Performance
 
-Version 0.5.8 remains an event-driven native Win32 process. It performs no
-continuous animation or polling between configured refresh timers. After the
-first flyout render, Direct2D and text resources remain cached while the hidden
-window stays inactive, reducing repeat-open latency without background drawing.
-Windows can still reclaim shared or resident pages as needed; exact memory
-figures vary by Windows version, DPI, graphics driver, and recent use.
+Version 0.5.9 remains an event-driven native Win32 process. It performs no
+continuous animation or polling between configured refresh timers. One queued
+UI message draws a hidden startup frame to prewarm Direct2D, text resources, and
+the HWND surface before normal flyout use. Those bounded resources remain cached
+while the hidden window stays inactive, so first and later opens share the same
+stable footprint without continuous background drawing. Windows can still
+reclaim shared or resident pages as needed; exact memory figures vary by Windows
+version, DPI, graphics driver, and recent use.
 
 Refreshing briefly starts one local `codex app-server` process tree. That tree
 has Codex's own transient footprint and is closed as a unit when the RPC

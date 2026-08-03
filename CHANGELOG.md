@@ -4,6 +4,13 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.5.9] - 2026-08-03
+
+- Prewarm the hidden Direct2D flyout once during startup so the first visible
+  open uses the same cached renderer and HWND surface as later opens.
+- Queue startup prewarming through the Win32 message loop and reuse the normal
+  Direct2D failure policy, preserving responsive startup and the GDI fallback.
+
 ## [0.5.8] - 2026-08-02
 
 - Keep the Direct2D renderer, text resources, and HWND surface cached while the
