@@ -45,7 +45,7 @@ pub(super) const REFRESH_BUTTON_RADIUS: i32 = 12;
 pub(super) const REFRESH_BUTTON_GAP: i32 = 4;
 pub(super) const REFRESH_ARC_START_DEGREES: f32 = 10.0;
 pub(super) const REFRESH_ARC_SWEEP_DEGREES: f32 = 305.0;
-pub(super) const FLYOUT_CORNER_RADIUS: i32 = 10;
+pub(super) const FLYOUT_CORNER_RADIUS: i32 = 8;
 const REFRESH_HIT_RADIUS: i32 = 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
