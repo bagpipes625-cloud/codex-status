@@ -4,6 +4,13 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.5.10] - 2026-08-03
+
+- Align the flyout's drawn outer border and Windows 10 clipping radius to the
+  existing 10-DIP card radius in both compact and dual-quota layouts.
+- Keep Windows 11 on its native DWM corner path while sharing one outer-radius
+  constant across the Direct2D renderer and GDI fallback.
+
 ## [0.5.9] - 2026-08-03
 
 - Prewarm the hidden Direct2D flyout once during startup so the first visible
