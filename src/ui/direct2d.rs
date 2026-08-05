@@ -11,10 +11,10 @@ use super::{
     HistoryNavigation, HistoryPage, HoveredCycle, Locale, QuotaPanelGeometry, QuotaPanelSlot,
     REFRESH_ARC_START_DEGREES, REFRESH_ARC_SWEEP_DEGREES, REFRESH_BUTTON_GAP,
     REFRESH_BUTTON_RADIUS, REFRESH_BUTTON_RIGHT, Theme, UsageSummaryDay, accent_for,
-    account_metrics, daily_usage_metrics, estimated_text, flyout_dimensions, format_percent,
-    format_tokens, inner_track_color, interactive_text_color, outer_track_color, quota_bar_color,
-    quota_card_colors, quota_label, quota_panel_geometry, refresh_icon_color, reset_details,
-    theoretical_color, theoretical_remaining_percent, updated_text, version_text,
+    account_metrics, cycle_quota_text, daily_quota_text, daily_usage_metrics, flyout_dimensions,
+    historical_token_text, inner_track_color, interactive_text_color, outer_track_color,
+    quota_bar_color, quota_card_colors, quota_label, quota_panel_geometry, refresh_icon_color,
+    reset_details, theoretical_color, theoretical_remaining_percent, updated_text, version_text,
 };
 use crate::history::UsageHistoryView;
 use crate::model::{DisplayState, QuotaAvailability, QuotaKind, QuotaWindow};
@@ -1002,10 +1002,9 @@ fn draw_history_month(
         }
         let tokens = cycle
             .token_activity
-            .map(|value| format_tokens(value, input.locale))
-            .map(|value| estimated_text(value, cycle.token_estimated))
+            .map(|value| historical_token_text(value, cycle.token_estimated, input.locale))
             .unwrap_or_else(|| "--".to_owned());
-        let percent = estimated_text(format_percent(cycle.consumed_percent), !cycle.quota_complete);
+        let percent = cycle_quota_text(cycle.consumed_percent, cycle.active, cycle.quota_complete);
         let tooltip = match input.locale {
             Locale::Chinese => format!("消耗周额度 {percent}  ·  消耗 Token {tokens}"),
             Locale::English => format!("Weekly {percent}  ·  Tokens {tokens}"),
@@ -1235,10 +1234,7 @@ fn draw_history_cycle(
             }
             draw_text(
                 target,
-                &estimated_text(
-                    format_percent(percent),
-                    day.is_some_and(|value| !value.quota_complete),
-                ),
+                &daily_quota_text(percent, day.is_some_and(|value| value.quota_complete)),
                 rect(
                     left,
                     baseline - bar_height - 21.0,
@@ -1258,9 +1254,12 @@ fn draw_history_cycle(
         );
         let tokens = if observed {
             day.and_then(|day| day.tokens)
-                .map(|value| format_tokens(value, input.locale))
                 .map(|value| {
-                    estimated_text(value, day.is_some_and(|record| !record.token_complete))
+                    historical_token_text(
+                        value,
+                        day.is_some_and(|record| !record.token_complete),
+                        input.locale,
+                    )
                 })
                 .unwrap_or_else(|| "--".to_owned())
         } else {

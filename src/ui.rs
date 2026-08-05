@@ -140,11 +140,10 @@ fn daily_usage_metrics(
         return DailyUsageMetrics { percent: "--".to_owned(), tokens: "--".to_owned(), selection };
     };
     DailyUsageMetrics {
-        percent: estimated_text(format_percent(day.weekly_consumed_percent), !day.quota_complete),
+        percent: daily_quota_text(day.weekly_consumed_percent, day.quota_complete),
         tokens: day
             .tokens
-            .map(|value| format_tokens(value, locale))
-            .map(|value| estimated_text(value, !day.token_complete))
+            .map(|value| historical_token_text(value, !day.token_complete, locale))
             .unwrap_or_else(|| "--".to_owned()),
         selection,
     }
@@ -152,6 +151,22 @@ fn daily_usage_metrics(
 
 fn estimated_text(value: String, estimated: bool) -> String {
     if estimated { format!("≈{value}") } else { value }
+}
+
+fn daily_quota_text(value: f64, complete: bool) -> String {
+    if !complete && value.abs() < 0.05 { "--".to_owned() } else { format_percent(value) }
+}
+
+fn cycle_quota_text(value: f64, active: bool, complete: bool) -> String {
+    estimated_text(format_percent(value), !active && !complete)
+}
+
+fn historical_token_text(value: u64, estimated: bool, locale: Locale) -> String {
+    if estimated && value == 0 {
+        "--".to_owned()
+    } else {
+        estimated_text(format_tokens(value, locale), estimated)
+    }
 }
 
 fn format_percent(value: f64) -> String {
@@ -2110,10 +2125,21 @@ mod tests {
         view.days[0].quota_complete = false;
         view.days[0].token_complete = false;
         let estimated = daily_usage_metrics(Some(&view), UsageSummaryDay::Today, Locale::Chinese);
-        assert_eq!(estimated.percent, "≈0%");
-        assert_eq!(estimated.tokens, "≈0");
+        assert_eq!(estimated.percent, "--");
+        assert_eq!(estimated.tokens, "--");
         let unavailable = daily_usage_metrics(None, UsageSummaryDay::Yesterday, Locale::Chinese);
         assert_eq!(unavailable.percent, "--");
         assert_eq!(unavailable.tokens, "--");
+    }
+
+    #[test]
+    fn data_quality_markers_distinguish_values_from_sampling_coverage() {
+        assert_eq!(daily_quota_text(31.0, false), "31%");
+        assert_eq!(daily_quota_text(0.0, false), "--");
+        assert_eq!(cycle_quota_text(31.0, true, false), "31%");
+        assert_eq!(cycle_quota_text(31.0, false, false), "≈31%");
+        assert_eq!(historical_token_text(0, true, Locale::Chinese), "--");
+        assert_eq!(historical_token_text(12_000_000, true, Locale::Chinese), "≈1200万");
+        assert_eq!(historical_token_text(12_000_000, false, Locale::Chinese), "1200万");
     }
 }
