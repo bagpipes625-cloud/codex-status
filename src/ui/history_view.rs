@@ -84,6 +84,13 @@ pub enum HistoryHit {
     Cycle(usize),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HoveredCycle {
+    pub index: usize,
+    pub row: usize,
+    pub column: usize,
+}
+
 pub fn hit_test(
     navigation: &HistoryNavigation,
     history: Option<&UsageHistoryView>,
@@ -145,7 +152,8 @@ pub fn hit_test(
             }
             if navigation.page == HistoryPage::Month {
                 return history
-                    .and_then(|view| month_cycle_hit(navigation.month, view, compact, x, y));
+                    .and_then(|view| month_cycle_at(navigation.month, view, compact, x, y))
+                    .map(|hovered| HistoryHit::Cycle(hovered.index));
             }
             None
         }
@@ -160,20 +168,21 @@ pub fn hovered_cycle(
     y: i32,
     dpi: u32,
     full_history: bool,
-) -> Option<usize> {
-    match hit_test(navigation, history, compact, x, y, dpi, full_history) {
-        Some(HistoryHit::Cycle(index)) => Some(index),
-        _ => None,
+) -> Option<HoveredCycle> {
+    if navigation.page != HistoryPage::Month || !full_history {
+        return None;
     }
+    let history = history?;
+    month_cycle_at(navigation.month, history, compact, logical(x, dpi), logical(y, dpi))
 }
 
-fn month_cycle_hit(
+fn month_cycle_at(
     month: NaiveDate,
     history: &UsageHistoryView,
     compact: bool,
     x: i32,
     y: i32,
-) -> Option<HistoryHit> {
+) -> Option<HoveredCycle> {
     let grid_left = 24;
     let grid_right = if compact { 312 } else { 352 };
     let grid_top = if compact { 96 } else { 101 };
@@ -193,7 +202,7 @@ fn month_cycle_hit(
         .rfind(|(_, cycle)| {
             date >= cycle.start_date && date <= cycle.observed_end_date.min(cycle.display_end_date)
         })
-        .map(|(index, _)| HistoryHit::Cycle(index))
+        .map(|(index, _)| HoveredCycle { index, row: row as usize, column: column as usize })
 }
 
 fn logical(value: i32, dpi: u32) -> i32 {

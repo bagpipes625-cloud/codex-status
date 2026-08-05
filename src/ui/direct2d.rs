@@ -8,7 +8,7 @@
 use super::{
     AccountMetrics, CardInteraction, FLYOUT_CORNER_RADIUS, HEADER_ACCENT_BOTTOM, HEADER_ACCENT_TOP,
     HEADER_TEXT_BOTTOM, HEADER_TEXT_TOP, HEADER_VERSION_BOTTOM, HEADER_VERSION_TOP,
-    HistoryNavigation, HistoryPage, Locale, QuotaPanelGeometry, QuotaPanelSlot,
+    HistoryNavigation, HistoryPage, HoveredCycle, Locale, QuotaPanelGeometry, QuotaPanelSlot,
     REFRESH_ARC_START_DEGREES, REFRESH_ARC_SWEEP_DEGREES, REFRESH_BUTTON_GAP,
     REFRESH_BUTTON_RADIUS, REFRESH_BUTTON_RIGHT, Theme, UsageSummaryDay, accent_for,
     account_metrics, daily_usage_metrics, estimated_text, flyout_dimensions, format_percent,
@@ -872,7 +872,11 @@ fn draw_history_month(
         if input.theme.dark { super::rgb(125, 125, 125) } else { super::rgb(150, 150, 150) },
     )?;
     let history = input.history;
-    let selected_cycle = input.interaction.hovered_cycle.or(input.navigation.selected_cycle);
+    let selected_cycle = input
+        .interaction
+        .hovered_cycle
+        .map(|hovered| hovered.index)
+        .or(input.navigation.selected_cycle);
     let offset = month.weekday().num_days_from_monday() as i64;
     let first = month - Duration::days(offset);
     let dates: Vec<_> = (0..42).map(|day| first + Duration::days(day)).collect();
@@ -972,12 +976,13 @@ fn draw_history_month(
         );
     }
 
-    if let (Some(history), Some(index)) = (history, input.interaction.hovered_cycle)
-        && let Some(cycle) = history.cycles.get(index)
+    if let (Some(history), Some(hovered)) = (history, input.interaction.hovered_cycle)
+        && let Some(cycle) = history.cycles.get(hovered.index)
     {
         let tooltip_width = if compact { 250.0 } else { 264.0 };
-        let tooltip_left = (width - tooltip_width) / 2.0;
-        let tooltip_top = if compact { 143.0 } else { 176.0 };
+        let geometry = MonthGridGeometry { width, panel_bottom, grid_top, row_height, cell_width };
+        let (tooltip_left, tooltip_top) =
+            month_tooltip_position(geometry, &groups, hovered, tooltip_width);
         let tooltip_brush = brush(
             target,
             if input.theme.dark { super::rgb(18, 18, 18) } else { super::rgb(45, 45, 45) },
@@ -1020,6 +1025,51 @@ fn draw_history_month(
     }
     draw_history_tabs(target, formats, brushes, input, width, true);
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MonthGridGeometry {
+    width: f32,
+    panel_bottom: f32,
+    grid_top: f32,
+    row_height: f32,
+    cell_width: f32,
+}
+
+fn month_tooltip_position(
+    geometry: MonthGridGeometry,
+    groups: &[i32],
+    hovered: HoveredCycle,
+    tooltip_width: f32,
+) -> (f32, f32) {
+    const GRID_LEFT: f32 = 24.0;
+    const TOOLTIP_HEIGHT: f32 = 30.0;
+    const GAP: f32 = 6.0;
+    const PANEL_MARGIN: f32 = 20.0;
+
+    let row_start = hovered.row.saturating_mul(7);
+    let row_end = (row_start + 7).min(groups.len());
+    let target = hovered.index as i32;
+    let mut start_column = hovered.column.min(6);
+    while start_column > 0 && groups.get(row_start + start_column - 1) == Some(&target) {
+        start_column -= 1;
+    }
+    let mut end_column = (hovered.column + 1).min(7);
+    while row_start + end_column < row_end && groups.get(row_start + end_column) == Some(&target) {
+        end_column += 1;
+    }
+
+    let anchor_center = GRID_LEFT + (start_column + end_column) as f32 * geometry.cell_width / 2.0;
+    let tooltip_left = (anchor_center - tooltip_width / 2.0)
+        .clamp(PANEL_MARGIN, geometry.width - PANEL_MARGIN - tooltip_width);
+
+    let band_top = geometry.grid_top + hovered.row as f32 * geometry.row_height + 1.5;
+    let band_bottom = geometry.grid_top + (hovered.row + 1) as f32 * geometry.row_height - 1.5;
+    let above = band_top - GAP - TOOLTIP_HEIGHT;
+    let tooltip_top = if above >= geometry.grid_top { above } else { band_bottom + GAP }
+        .clamp(78.0, geometry.panel_bottom - TOOLTIP_HEIGHT - 7.0);
+
+    (tooltip_left, tooltip_top)
 }
 
 fn draw_history_cycle(
@@ -1985,5 +2035,37 @@ mod tests {
         assert!((converted.r - 16.0 / 255.0).abs() < f32::EPSILON);
         assert!((converted.g - 163.0 / 255.0).abs() < f32::EPSILON);
         assert!((converted.b - 127.0 / 255.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn month_tooltip_tracks_the_hovered_segment_and_stays_inside_the_panel() {
+        let geometry = MonthGridGeometry {
+            width: 336.0,
+            panel_bottom: 242.5,
+            grid_top: 96.0,
+            row_height: (235.5 - 96.0) / 6.0,
+            cell_width: (312.0 - 24.0) / 7.0,
+        };
+        let mut groups = vec![-1; 42];
+        groups[0..2].fill(3);
+        groups[40..42].fill(3);
+
+        let top_left = month_tooltip_position(
+            geometry,
+            &groups,
+            HoveredCycle { index: 3, row: 0, column: 0 },
+            250.0,
+        );
+        let bottom_right = month_tooltip_position(
+            geometry,
+            &groups,
+            HoveredCycle { index: 3, row: 5, column: 6 },
+            250.0,
+        );
+
+        assert_eq!(top_left.0, 20.0);
+        assert_eq!(bottom_right.0, 66.0);
+        assert!(top_left.1 > geometry.grid_top);
+        assert!(bottom_right.1 < geometry.grid_top + 5.0 * geometry.row_height);
     }
 }

@@ -33,8 +33,8 @@ mod direct2d;
 mod history_view;
 
 pub use history_view::{
-    HistoryHit, HistoryNavigation, HistoryPage, UsageSummaryDay, hit_test as history_hit_test,
-    hovered_cycle,
+    HistoryHit, HistoryNavigation, HistoryPage, HoveredCycle, UsageSummaryDay,
+    hit_test as history_hit_test, hovered_cycle,
 };
 
 pub const CARD_WIDTH: i32 = 376;
@@ -66,7 +66,7 @@ pub struct CardInteraction {
     pub pressed_quota: Option<QuotaKind>,
     pub refresh_feedback: bool,
     pub refresh_rotation_degrees: f32,
-    pub hovered_cycle: Option<usize>,
+    pub hovered_cycle: Option<HoveredCycle>,
     pub hovered_history_values: bool,
 }
 

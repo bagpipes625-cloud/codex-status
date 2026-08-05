@@ -278,7 +278,7 @@ struct AppState {
     flyout_hidden_for_tray_activation: Option<Instant>,
     pressed_quota: Option<QuotaKind>,
     pressed_history: Option<ui::HistoryHit>,
-    hovered_history_cycle: Option<usize>,
+    hovered_history_cycle: Option<ui::HoveredCycle>,
     hovered_history_values: bool,
     refresh_button_pressed: bool,
 }
