@@ -243,8 +243,9 @@ pub fn parse_snapshot(
 }
 
 pub fn parse_token_usage(value: &Value) -> TokenUsageSnapshot {
+    const MAX_DAILY_BUCKETS: usize = 730;
     let lifetime_tokens = value.pointer("/summary/lifetimeTokens").and_then(Value::as_u64);
-    let daily_buckets = value
+    let mut daily_buckets: Vec<_> = value
         .get("dailyUsageBuckets")
         .and_then(Value::as_array)
         .into_iter()
@@ -256,6 +257,10 @@ pub fn parse_token_usage(value: &Value) -> TokenUsageSnapshot {
                 .then(|| DailyTokenUsage { start_date: start_date.to_owned(), tokens })
         })
         .collect();
+    daily_buckets.sort_by(|left, right| left.start_date.cmp(&right.start_date));
+    if daily_buckets.len() > MAX_DAILY_BUCKETS {
+        daily_buckets.drain(..daily_buckets.len() - MAX_DAILY_BUCKETS);
+    }
     TokenUsageSnapshot { lifetime_tokens, daily_buckets }
 }
 
@@ -317,6 +322,22 @@ mod tests {
             usage.daily_buckets,
             vec![DailyTokenUsage { start_date: "2026-08-05".to_owned(), tokens: 12_345 }]
         );
+    }
+
+    #[test]
+    fn token_usage_keeps_only_the_most_recent_bounded_daily_buckets() {
+        let start = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let buckets: Vec<_> = (0..735)
+            .map(|offset| {
+                json!({
+                    "startDate": (start + chrono::Duration::days(offset)).format("%Y-%m-%d").to_string(),
+                    "tokens": offset
+                })
+            })
+            .collect();
+        let usage = parse_token_usage(&json!({"dailyUsageBuckets": buckets}));
+        assert_eq!(usage.daily_buckets.len(), 730);
+        assert_eq!(usage.daily_buckets.first().unwrap().start_date, "2024-01-06");
     }
 
     #[test]

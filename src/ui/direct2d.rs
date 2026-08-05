@@ -7,30 +7,35 @@
 
 use super::{
     AccountMetrics, CardInteraction, FLYOUT_CORNER_RADIUS, HEADER_ACCENT_BOTTOM, HEADER_ACCENT_TOP,
-    HEADER_TEXT_BOTTOM, HEADER_TEXT_TOP, HEADER_VERSION_BOTTOM, HEADER_VERSION_TOP, Locale,
-    QuotaPanelGeometry, QuotaPanelSlot, REFRESH_ARC_START_DEGREES, REFRESH_ARC_SWEEP_DEGREES,
-    REFRESH_BUTTON_GAP, REFRESH_BUTTON_RADIUS, REFRESH_BUTTON_RIGHT, Theme, accent_for,
-    account_metrics, flyout_dimensions, inner_track_color, outer_track_color, quota_bar_color,
-    quota_card_colors, quota_label, quota_panel_geometry, refresh_icon_color, reset_details,
-    theoretical_color, theoretical_remaining_percent, updated_text, version_text,
+    HEADER_TEXT_BOTTOM, HEADER_TEXT_TOP, HEADER_VERSION_BOTTOM, HEADER_VERSION_TOP,
+    HistoryNavigation, HistoryPage, Locale, QuotaPanelGeometry, QuotaPanelSlot,
+    REFRESH_ARC_START_DEGREES, REFRESH_ARC_SWEEP_DEGREES, REFRESH_BUTTON_GAP,
+    REFRESH_BUTTON_RADIUS, REFRESH_BUTTON_RIGHT, Theme, UsageSummaryDay, accent_for,
+    account_metrics, daily_usage_metrics, estimated_text, flyout_dimensions, format_percent,
+    format_tokens, inner_track_color, outer_track_color, quota_bar_color, quota_card_colors,
+    quota_label, quota_panel_geometry, refresh_icon_color, reset_details, theoretical_color,
+    theoretical_remaining_percent, updated_text, version_text,
 };
+use crate::history::UsageHistoryView;
 use crate::model::{DisplayState, QuotaAvailability, QuotaKind, QuotaWindow};
-use chrono::Local;
+use chrono::{Datelike, Duration, Local, NaiveDate};
 use std::cell::{Cell, RefCell};
 use windows::Win32::Foundation::{COLORREF, D2DERR_RECREATE_TARGET, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_HOLLOW,
-    D2D1_FIGURE_END_OPEN, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
+    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_GRADIENT_STOP,
+    D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID,
     D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
     D2D1_GAMMA_2_2, D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LINE_JOIN_ROUND,
     D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE,
-    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
-    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
-    D2D1CreateFactory, ID2D1Brush, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1LinearGradientBrush,
-    ID2D1PathGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    D2D1_QUADRATIC_BEZIER_SEGMENT, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
+    D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES,
+    D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1CreateFactory, ID2D1Brush, ID2D1Factory,
+    ID2D1HwndRenderTarget, ID2D1LinearGradientBrush, ID2D1PathGeometry, ID2D1SolidColorBrush,
+    ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -58,6 +63,8 @@ pub(super) struct PaintInput<'a> {
     pub preferred: QuotaKind,
     pub locale: Locale,
     pub theme: Theme,
+    pub history: Option<&'a UsageHistoryView>,
+    pub navigation: &'a HistoryNavigation,
     pub interaction: CardInteraction,
 }
 
@@ -544,7 +551,7 @@ impl FormatSet {
             stacked_detail: make_format(
                 factory,
                 locale,
-                10.0,
+                11.0,
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_TEXT_ALIGNMENT_CENTER,
                 true,
@@ -616,10 +623,69 @@ fn draw_frame(
             1.0,
             None::<&ID2D1StrokeStyle>,
         );
-        target.FillRoundedRectangle(
-            &rounded_rect(18.0, HEADER_ACCENT_TOP as f32, 20.0, HEADER_ACCENT_BOTTOM as f32, 1.0),
-            &brushes.status,
+        if input.navigation.page == HistoryPage::Main {
+            target.FillRoundedRectangle(
+                &rounded_rect(
+                    18.0,
+                    HEADER_ACCENT_TOP as f32,
+                    20.0,
+                    HEADER_ACCENT_BOTTOM as f32,
+                    1.0,
+                ),
+                &brushes.status,
+            );
+        }
+    }
+    if input.navigation.page != HistoryPage::Main {
+        let _ = draw_solid_triangle(
+            target,
+            factory,
+            24.0,
+            (HEADER_TEXT_TOP + HEADER_TEXT_BOTTOM) as f32 / 2.0,
+            false,
+            12.0,
+            &brushes.muted,
         );
+        draw_text(
+            target,
+            input.locale.text("Back", "返回"),
+            rect(29.0, HEADER_TEXT_TOP as f32, 57.0, HEADER_TEXT_BOTTOM as f32),
+            &formats.stacked_detail,
+            &brushes.text,
+        );
+        draw_text(
+            target,
+            &updated_text(input.state, input.locale, input.interaction.refresh_feedback),
+            rect(
+                190.0,
+                HEADER_TEXT_TOP as f32,
+                width
+                    - (REFRESH_BUTTON_RIGHT + REFRESH_BUTTON_RADIUS * 2 + REFRESH_BUTTON_GAP)
+                        as f32,
+                HEADER_TEXT_BOTTOM as f32,
+            ),
+            &formats.update,
+            &brushes.muted,
+        );
+        draw_refresh_icon(
+            target,
+            refresh_geometry,
+            width - (REFRESH_BUTTON_RIGHT + REFRESH_BUTTON_RADIUS) as f32,
+            (HEADER_TEXT_TOP + HEADER_TEXT_BOTTOM) as f32 / 2.0,
+            input.interaction.refresh_rotation_degrees,
+            &brushes.refresh_icon,
+            stroke_style,
+        );
+        match input.navigation.page {
+            HistoryPage::Month => {
+                draw_history_month(target, factory, formats, brushes, input, width)?;
+            }
+            HistoryPage::Cycle => {
+                draw_history_cycle(target, factory, formats, brushes, input, width)?;
+            }
+            HistoryPage::Main => unreachable!(),
+        }
+        return Ok(());
     }
     draw_text(
         target,
@@ -673,7 +739,7 @@ fn draw_frame(
                 kind,
                 QuotaPanelSlot::Left,
             )?;
-            draw_stacked_metrics(target, formats, brushes, input, &account);
+            draw_stacked_metrics(target, factory, formats, brushes, input, &account);
         }
         QuotaAvailability::None | QuotaAvailability::Both => {
             draw_quota_panel(
@@ -698,7 +764,7 @@ fn draw_frame(
                 QuotaKind::Weekly,
                 QuotaPanelSlot::Right,
             )?;
-            draw_bottom_metrics(target, dwrite, formats, brushes, input, &account);
+            draw_bottom_metrics(target, factory, dwrite, formats, brushes, input, &account);
         }
     }
     Ok(())
@@ -724,6 +790,568 @@ fn draw_refresh_icon(
         target.DrawGeometry(&geometry.arc, brush, 1.5, stroke_style);
         target.DrawGeometry(&geometry.arrow, brush, 1.5, stroke_style);
         target.SetTransform(&identity);
+    }
+}
+
+fn draw_history_month(
+    target: &ID2D1HwndRenderTarget,
+    factory: &ID2D1Factory,
+    formats: &FormatSet,
+    brushes: &Brushes,
+    input: &PaintInput<'_>,
+    width: f32,
+) -> Result<()> {
+    let compact = width < 360.0;
+    let panel_bottom = if compact { 242.5 } else { 309.5 };
+    let panel = rounded_rect(16.5, 40.5, width - 16.5, panel_bottom, 10.0);
+    if !input.theme.high_contrast {
+        draw_card_shadow(target, &panel, brushes);
+    }
+    unsafe {
+        target.FillRoundedRectangle(&panel, &brushes.metrics_surface);
+        target.DrawRoundedRectangle(&panel, &brushes.line, 1.0, None::<&ID2D1StrokeStyle>);
+    }
+
+    let month = input.navigation.month;
+    let month_title = match input.locale {
+        Locale::Chinese => format!("{}年{}月", month.year(), month.month()),
+        Locale::English => month.format("%B %Y").to_string(),
+    };
+    draw_text(
+        target,
+        &month_title,
+        rect(76.0, 47.0, width - 76.0, 75.0),
+        &formats.title,
+        &brushes.text,
+    );
+    let title_center_y = 61.0;
+    let _ = draw_solid_triangle(target, factory, 58.0, title_center_y, false, 12.0, &brushes.muted);
+    let _ = draw_solid_triangle(
+        target,
+        factory,
+        width - 58.0,
+        title_center_y,
+        true,
+        12.0,
+        &brushes.muted,
+    );
+
+    let weekdays = if input.locale == Locale::Chinese {
+        ["一", "二", "三", "四", "五", "六", "日"]
+    } else {
+        ["M", "T", "W", "T", "F", "S", "S"]
+    };
+    let grid_left = 24.0;
+    let grid_right = width - 24.0;
+    let cell_width = (grid_right - grid_left) / 7.0;
+    let weekday_top = 75.0;
+    let grid_top = if compact { 96.0 } else { 101.0 };
+    let grid_bottom = panel_bottom - 7.0;
+    let row_height = (grid_bottom - grid_top) / 6.0;
+    for (column, label) in weekdays.iter().enumerate() {
+        let left = grid_left + column as f32 * cell_width;
+        draw_text(
+            target,
+            label,
+            rect(left, weekday_top, left + cell_width, grid_top),
+            &formats.stacked_detail,
+            &brushes.muted,
+        );
+    }
+
+    let outside_surface = brush(
+        target,
+        if input.theme.dark { super::rgb(52, 52, 52) } else { super::rgb(232, 232, 232) },
+    )?;
+    let outside_text = brush(
+        target,
+        if input.theme.dark { super::rgb(125, 125, 125) } else { super::rgb(150, 150, 150) },
+    )?;
+    let history = input.history;
+    let selected_cycle = input.interaction.hovered_cycle.or(input.navigation.selected_cycle);
+    let offset = month.weekday().num_days_from_monday() as i64;
+    let first = month - Duration::days(offset);
+    let dates: Vec<_> = (0..42).map(|day| first + Duration::days(day)).collect();
+    let groups: Vec<i32> = dates
+        .iter()
+        .map(|date| {
+            if date.month() != month.month() {
+                -2
+            } else {
+                history
+                    .and_then(|history| history_cycle_for_date(history, *date))
+                    .map(|index| index as i32)
+                    .unwrap_or(-1)
+            }
+        })
+        .collect();
+    let mut visible_cycle_indices: Vec<usize> =
+        groups.iter().filter_map(|group| (*group >= 0).then_some(*group as usize)).collect();
+    visible_cycle_indices.sort_unstable();
+    visible_cycle_indices.dedup();
+    let cycle_brushes = visible_cycle_indices
+        .into_iter()
+        .filter_map(|index| {
+            history.and_then(|value| value.cycles.get(index)).map(|cycle| (index, cycle))
+        })
+        .map(|(index, cycle)| {
+            let (surface, selected_surface, edge) =
+                history_cycle_colors(index, cycle.active, cycle.reset_kind, input.theme.dark);
+            Ok((
+                index,
+                (brush(target, surface)?, brush(target, selected_surface)?, brush(target, edge)?),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    for row in 0..6 {
+        let mut start_column = 0;
+        while start_column < 7 {
+            let group = groups[row * 7 + start_column];
+            let mut end_column = start_column + 1;
+            while end_column < 7 && groups[row * 7 + end_column] == group {
+                end_column += 1;
+            }
+            if group != -1 {
+                let left = grid_left + start_column as f32 * cell_width + 0.75;
+                let right = grid_left + end_column as f32 * cell_width - 0.75;
+                let top = grid_top + row as f32 * row_height + 1.5;
+                let bottom = grid_top + (row + 1) as f32 * row_height - 1.5;
+                let band = rounded_rect(left, top, right, bottom, 4.0);
+                let selected = group >= 0 && selected_cycle == Some(group as usize);
+                let cycle_brush = (group >= 0).then(|| {
+                    cycle_brushes
+                        .iter()
+                        .find(|(index, _)| *index == group as usize)
+                        .map(|(_, brushes)| brushes)
+                        .expect("visible cycle brush")
+                });
+                if selected && !input.theme.high_contrast {
+                    draw_card_shadow(target, &band, brushes);
+                }
+                unsafe {
+                    let fill = if group == -2 {
+                        &outside_surface
+                    } else if selected {
+                        &cycle_brush.expect("cycle brush").1
+                    } else {
+                        &cycle_brush.expect("cycle brush").0
+                    };
+                    target.FillRoundedRectangle(&band, fill);
+                    if selected {
+                        target.DrawRoundedRectangle(
+                            &band,
+                            &cycle_brush.expect("cycle brush").2,
+                            1.0,
+                            None::<&ID2D1StrokeStyle>,
+                        );
+                    }
+                }
+            }
+            start_column = end_column;
+        }
+    }
+
+    for (index, date) in dates.iter().enumerate() {
+        let row = index / 7;
+        let column = index % 7;
+        let left = grid_left + column as f32 * cell_width;
+        let top = grid_top + row as f32 * row_height;
+        let muted = date.month() != month.month()
+            || (history.is_some_and(|history| *date > history.today) && groups[index] < 0);
+        draw_text(
+            target,
+            &date.day().to_string(),
+            rect(left + 2.0, top, left + cell_width - 2.0, top + row_height),
+            &formats.date,
+            if muted { &outside_text } else { &brushes.text },
+        );
+    }
+
+    if let (Some(history), Some(index)) = (history, input.interaction.hovered_cycle)
+        && let Some(cycle) = history.cycles.get(index)
+    {
+        let tooltip_width = if compact { 250.0 } else { 264.0 };
+        let tooltip_left = (width - tooltip_width) / 2.0;
+        let tooltip_top = if compact { 143.0 } else { 176.0 };
+        let tooltip_brush = brush(
+            target,
+            if input.theme.dark { super::rgb(18, 18, 18) } else { super::rgb(45, 45, 45) },
+        )?;
+        let tooltip_text = brush(target, super::rgb(250, 250, 250))?;
+        unsafe {
+            target.FillRoundedRectangle(
+                &rounded_rect(
+                    tooltip_left,
+                    tooltip_top,
+                    tooltip_left + tooltip_width,
+                    tooltip_top + 30.0,
+                    6.0,
+                ),
+                &tooltip_brush,
+            );
+        }
+        let tokens = cycle
+            .token_activity
+            .map(|value| format_tokens(value, input.locale))
+            .map(|value| estimated_text(value, cycle.token_estimated))
+            .unwrap_or_else(|| "--".to_owned());
+        let percent = estimated_text(format_percent(cycle.consumed_percent), !cycle.quota_complete);
+        let tooltip = match input.locale {
+            Locale::Chinese => format!("消耗周额度 {percent}  ·  消耗 Token {tokens}"),
+            Locale::English => format!("Weekly {percent}  ·  Tokens {tokens}"),
+        };
+        draw_text(
+            target,
+            &tooltip,
+            rect(
+                tooltip_left + 10.0,
+                tooltip_top,
+                tooltip_left + tooltip_width - 10.0,
+                tooltip_top + 30.0,
+            ),
+            &formats.metric_label,
+            &tooltip_text,
+        );
+    }
+    draw_history_tabs(target, formats, brushes, input, width, true);
+    Ok(())
+}
+
+fn draw_history_cycle(
+    target: &ID2D1HwndRenderTarget,
+    factory: &ID2D1Factory,
+    formats: &FormatSet,
+    brushes: &Brushes,
+    input: &PaintInput<'_>,
+    width: f32,
+) -> Result<()> {
+    let compact = width < 360.0;
+    let panel_bottom = if compact { 242.5 } else { 309.5 };
+    let panel = rounded_rect(16.5, 40.5, width - 16.5, panel_bottom, 10.0);
+    if !input.theme.high_contrast {
+        draw_card_shadow(target, &panel, brushes);
+    }
+    unsafe {
+        target.FillRoundedRectangle(&panel, &brushes.metrics_surface);
+        target.DrawRoundedRectangle(&panel, &brushes.line, 1.0, None::<&ID2D1StrokeStyle>);
+    }
+    let Some(history) = input.history else {
+        draw_text(
+            target,
+            input.locale.text("No history yet", "暂无历史数据"),
+            rect(24.0, 90.0, width - 24.0, panel_bottom - 20.0),
+            &formats.title,
+            &brushes.muted,
+        );
+        draw_history_tabs(target, formats, brushes, input, width, false);
+        return Ok(());
+    };
+    let Some(index) = input.navigation.selected_cycle.or_else(|| history.current_cycle_index())
+    else {
+        draw_text(
+            target,
+            input.locale.text("No history yet", "暂无历史数据"),
+            rect(24.0, 90.0, width - 24.0, panel_bottom - 20.0),
+            &formats.title,
+            &brushes.muted,
+        );
+        draw_history_tabs(target, formats, brushes, input, width, false);
+        return Ok(());
+    };
+    let Some(cycle) = history.cycles.get(index) else {
+        return Ok(());
+    };
+    let dates: Vec<NaiveDate> = if cycle.active {
+        (0..7).map(|day| cycle.start_date + Duration::days(day)).collect()
+    } else {
+        let count = (cycle.display_end_date - cycle.start_date).num_days().clamp(0, 6) + 1;
+        (0..count).map(|day| cycle.start_date + Duration::days(day)).collect()
+    };
+    let range_text = history_date_range(
+        cycle.start_date,
+        *dates.last().unwrap_or(&cycle.start_date),
+        input.locale,
+    );
+    draw_text(
+        target,
+        &range_text,
+        rect(76.0, 47.0, width - 76.0, 75.0),
+        &formats.title,
+        &brushes.text,
+    );
+    let previous_brush = if index > 0 { &brushes.muted } else { &brushes.line };
+    let next_brush = if index + 1 < history.cycles.len() { &brushes.muted } else { &brushes.line };
+    let _ = draw_solid_triangle(target, factory, 58.0, 61.0, false, 12.0, previous_brush);
+    let _ = draw_solid_triangle(target, factory, width - 58.0, 61.0, true, 12.0, next_brush);
+    let (surface_color, _, strong_color) =
+        history_cycle_colors(index, cycle.active, cycle.reset_kind, input.theme.dark);
+    let cycle_surface = brush(target, surface_color)?;
+    let cycle_strong = brush(target, strong_color)?;
+    let inactive_text = brush(
+        target,
+        if input.theme.dark { super::rgb(125, 125, 125) } else { super::rgb(150, 150, 150) },
+    )?;
+    let badge = if cycle.stale {
+        input.locale.text("Awaiting refresh", "待刷新校准").to_owned()
+    } else if cycle.active {
+        input.locale.text("In progress", "进行中").to_owned()
+    } else {
+        let days = dates.len();
+        match (input.locale, cycle.reset_kind) {
+            (Locale::Chinese, Some(crate::history::ResetKind::Natural)) => {
+                format!("自然周期 · {days}天")
+            }
+            (Locale::Chinese, _) => format!("非自然周期 · {days}天"),
+            (Locale::English, Some(crate::history::ResetKind::Natural)) => {
+                format!("Natural · {days} days")
+            }
+            (Locale::English, _) => format!("Non-natural · {days} days"),
+        }
+    };
+    let badge_width = if input.locale == Locale::Chinese { 128.0 } else { 142.0 };
+    let badge_left = (width - badge_width) / 2.0;
+    unsafe {
+        target.FillRoundedRectangle(
+            &rounded_rect(badge_left, 77.0, badge_left + badge_width, 96.0, 5.0),
+            &cycle_surface,
+        );
+    }
+    draw_text(
+        target,
+        &badge,
+        rect(badge_left, 77.0, badge_left + badge_width, 96.0),
+        &formats.stacked_detail,
+        &cycle_strong,
+    );
+
+    let grid_left = 24.0;
+    let grid_right = width - 24.0;
+    let column_width = (grid_right - grid_left) / dates.len().max(1) as f32;
+    let baseline = panel_bottom - 51.0;
+    let plot_top = 103.0;
+    let values: Vec<_> = dates
+        .iter()
+        .map(|date| history.day(*date).map(|day| day.weekly_consumed_percent))
+        .collect();
+    let maximum = values.iter().flatten().copied().fold(10.0_f64, f64::max).max(1.0);
+    let plot_height = baseline - plot_top - 15.0;
+    for step in 0..3 {
+        let y = plot_top + step as f32 * (baseline - plot_top) / 3.0;
+        unsafe {
+            target.DrawLine(
+                Vector2 { X: grid_left, Y: y },
+                Vector2 { X: grid_right, Y: y },
+                &brushes.line,
+                0.75,
+                None::<&ID2D1StrokeStyle>,
+            );
+        }
+    }
+    let observed_count = dates.iter().take_while(|date| **date <= cycle.observed_end_date).count();
+    if observed_count > 0 {
+        let right = grid_left + observed_count as f32 * column_width - 0.75;
+        unsafe {
+            target.FillRoundedRectangle(
+                &rounded_rect(grid_left + 0.75, baseline, right, baseline + 19.0, 4.0),
+                &cycle_surface,
+            );
+        }
+    }
+    for (column, date) in dates.iter().enumerate() {
+        let left = grid_left + column as f32 * column_width;
+        let center_x = left + column_width / 2.0;
+        let day = history.day(*date);
+        let observed = *date <= cycle.observed_end_date && day.is_some();
+        if observed {
+            let percent = values[column].unwrap_or_default();
+            let bar_height = plot_height * (percent / maximum) as f32;
+            let half_width = if dates.len() < 7 { 11.0 } else { 9.0 };
+            unsafe {
+                target.FillRoundedRectangle(
+                    &rounded_rect(
+                        center_x - half_width,
+                        baseline - bar_height,
+                        center_x + half_width,
+                        baseline + 2.0,
+                        5.0,
+                    ),
+                    &cycle_strong,
+                );
+            }
+            draw_text(
+                target,
+                &estimated_text(
+                    format_percent(percent),
+                    day.is_some_and(|value| !value.quota_complete),
+                ),
+                rect(
+                    left,
+                    baseline - bar_height - 21.0,
+                    left + column_width,
+                    baseline - bar_height,
+                ),
+                &formats.stacked_detail,
+                &brushes.text,
+            );
+        }
+        draw_text(
+            target,
+            &history_day_label(*date, input.locale),
+            rect(left, baseline, left + column_width, baseline + 19.0),
+            &formats.stacked_detail,
+            if observed { &brushes.text } else { &inactive_text },
+        );
+        let tokens = if observed {
+            day.and_then(|day| day.tokens)
+                .map(|value| format_tokens(value, input.locale))
+                .map(|value| {
+                    estimated_text(value, day.is_some_and(|record| !record.token_complete))
+                })
+                .unwrap_or_else(|| "--".to_owned())
+        } else {
+            "—".to_owned()
+        };
+        draw_text(
+            target,
+            &tokens,
+            rect(left, baseline + 19.0, left + column_width, baseline + 40.0),
+            &formats.stacked_detail,
+            if observed { &brushes.muted } else { &inactive_text },
+        );
+    }
+    draw_history_tabs(target, formats, brushes, input, width, false);
+    Ok(())
+}
+
+fn draw_history_tabs(
+    target: &ID2D1HwndRenderTarget,
+    formats: &FormatSet,
+    brushes: &Brushes,
+    input: &PaintInput<'_>,
+    width: f32,
+    month_selected: bool,
+) {
+    let compact = width < 360.0;
+    let top = if compact { 249.5 } else { 316.5 };
+    let bottom = top + 27.0;
+    let left = (width - 160.0) / 2.0;
+    unsafe {
+        target.FillRoundedRectangle(
+            &rounded_rect(left, top, left + 160.0, bottom, 7.0),
+            &brushes.metrics_surface,
+        );
+        target.DrawRoundedRectangle(
+            &rounded_rect(left, top, left + 160.0, bottom, 7.0),
+            &brushes.line,
+            1.0,
+            None::<&ID2D1StrokeStyle>,
+        );
+        let selected_left = if month_selected { left + 2.0 } else { left + 80.0 };
+        let selected_right = if month_selected { left + 80.0 } else { left + 158.0 };
+        target.FillRoundedRectangle(
+            &rounded_rect(selected_left, top + 2.0, selected_right, bottom - 2.0, 5.0),
+            &brushes.five_surface,
+        );
+        target.DrawLine(
+            Vector2 { X: left + 80.0, Y: top + 5.0 },
+            Vector2 { X: left + 80.0, Y: bottom - 5.0 },
+            &brushes.line,
+            1.0,
+            None::<&ID2D1StrokeStyle>,
+        );
+    }
+    draw_text(
+        target,
+        input.locale.text("Month", "月历"),
+        rect(left, top, left + 80.0, bottom),
+        &formats.stacked_detail,
+        if month_selected { &brushes.status } else { &brushes.muted },
+    );
+    draw_text(
+        target,
+        input.locale.text("Day", "单日"),
+        rect(left + 80.0, top, left + 160.0, bottom),
+        &formats.stacked_detail,
+        if month_selected { &brushes.muted } else { &brushes.status },
+    );
+}
+
+fn history_cycle_for_date(history: &UsageHistoryView, date: NaiveDate) -> Option<usize> {
+    history
+        .cycles
+        .iter()
+        .enumerate()
+        .rfind(|(_, cycle)| {
+            date >= cycle.start_date
+                && date
+                    <= if cycle.active { cycle.observed_end_date } else { cycle.display_end_date }
+        })
+        .map(|(index, _)| index)
+}
+
+fn history_cycle_colors(
+    index: usize,
+    active: bool,
+    reset_kind: Option<crate::history::ResetKind>,
+    dark: bool,
+) -> (COLORREF, COLORREF, COLORREF) {
+    if active {
+        return if dark {
+            (super::rgb(46, 65, 84), super::rgb(53, 79, 105), super::rgb(72, 119, 166))
+        } else {
+            (super::rgb(211, 228, 247), super::rgb(183, 208, 235), super::rgb(71, 126, 184))
+        };
+    }
+    if reset_kind == Some(crate::history::ResetKind::NonNatural) {
+        return if dark {
+            (super::rgb(43, 72, 61), super::rgb(51, 90, 74), super::rgb(74, 143, 113))
+        } else {
+            (super::rgb(207, 238, 225), super::rgb(179, 222, 203), super::rgb(69, 157, 116))
+        };
+    }
+    type Rgb = (u8, u8, u8);
+    type HistoryColorPair = (Rgb, Rgb);
+    const LIGHT: [HistoryColorPair; 5] = [
+        ((228, 218, 246), (142, 101, 204)),
+        ((211, 228, 247), (71, 126, 184)),
+        ((247, 229, 190), (184, 126, 30)),
+        ((242, 215, 227), (181, 91, 132)),
+        ((207, 233, 236), (57, 135, 143)),
+    ];
+    const DARK: [HistoryColorPair; 5] = [
+        ((67, 55, 82), (132, 102, 174)),
+        ((46, 65, 84), (72, 119, 166)),
+        ((82, 67, 42), (177, 128, 54)),
+        ((79, 51, 63), (171, 91, 126)),
+        ((42, 72, 75), (65, 139, 145)),
+    ];
+    let (surface, edge) = if dark { DARK[index % DARK.len()] } else { LIGHT[index % LIGHT.len()] };
+    let selected = (
+        ((surface.0 as u16 * 4 + edge.0 as u16) / 5) as u8,
+        ((surface.1 as u16 * 4 + edge.1 as u16) / 5) as u8,
+        ((surface.2 as u16 * 4 + edge.2 as u16) / 5) as u8,
+    );
+    (
+        super::rgb(surface.0, surface.1, surface.2),
+        super::rgb(selected.0, selected.1, selected.2),
+        super::rgb(edge.0, edge.1, edge.2),
+    )
+}
+
+fn history_date_range(start: NaiveDate, end: NaiveDate, locale: Locale) -> String {
+    match locale {
+        Locale::Chinese => {
+            format!("{}月{}日 - {}月{}日", start.month(), start.day(), end.month(), end.day())
+        }
+        Locale::English => format!("{} - {}", start.format("%b %-d"), end.format("%b %-d")),
+    }
+}
+
+fn history_day_label(date: NaiveDate, locale: Locale) -> String {
+    match locale {
+        Locale::Chinese => format!("{}日", date.day()),
+        Locale::English => date.format("%-d").to_string(),
     }
 }
 
@@ -862,6 +1490,7 @@ fn draw_quota_panel(
 
 fn draw_stacked_metrics(
     target: &ID2D1HwndRenderTarget,
+    factory: &ID2D1Factory,
     formats: &FormatSet,
     brushes: &Brushes,
     input: &PaintInput<'_>,
@@ -882,19 +1511,29 @@ fn draw_stacked_metrics(
             None::<&ID2D1StrokeStyle>,
         );
     }
-    draw_text(
+    let daily = daily_usage_metrics(input.history, input.navigation.summary_day, input.locale);
+    draw_usage_heading(
         target,
-        input.locale.text("Plan", "套餐"),
-        rect(200.0, 59.0, 312.0, 83.0),
-        &formats.stacked_label,
-        &brushes.muted,
+        factory,
+        formats,
+        brushes,
+        input.locale,
+        input.navigation.summary_day,
+        true,
     );
     draw_text(
         target,
-        &account.plan,
-        rect(200.0, 87.0, 312.0, 130.0),
+        &daily.percent,
+        rect(197.0, 86.0, 315.0, 124.0),
         &formats.stacked_value,
         &brushes.text,
+    );
+    draw_text(
+        target,
+        &daily.tokens,
+        rect(197.0, 120.0, 315.0, 145.0),
+        &formats.stacked_detail,
+        &brushes.muted,
     );
     draw_text(
         target,
@@ -923,6 +1562,7 @@ fn draw_stacked_metrics(
 
 fn draw_bottom_metrics(
     target: &ID2D1HwndRenderTarget,
+    factory: &ID2D1Factory,
     dwrite: &IDWriteFactory,
     formats: &FormatSet,
     brushes: &Brushes,
@@ -944,19 +1584,32 @@ fn draw_bottom_metrics(
             None::<&ID2D1StrokeStyle>,
         );
     }
-    draw_text(
+    let daily = daily_usage_metrics(input.history, input.navigation.summary_day, input.locale);
+    draw_usage_heading(
         target,
-        input.locale.text("Plan", "套餐"),
-        rect(30.0, 278.0, 178.0, 303.0),
-        &formats.metric_label,
-        &brushes.muted,
+        factory,
+        formats,
+        brushes,
+        input.locale,
+        input.navigation.summary_day,
+        false,
     );
     draw_text(
         target,
-        &account.plan,
+        &daily.percent,
         rect(30.0, 298.0, 178.0, 334.0),
         &formats.metric_value,
         &brushes.text,
+    );
+    let percent_width = measure_text(dwrite, &daily.percent, &formats.metric_value)
+        .map(|metrics| metrics.widthIncludingTrailingWhitespace)
+        .unwrap_or(35.0);
+    draw_text(
+        target,
+        &daily.tokens,
+        rect((30.0 + percent_width + 10.0).min(128.0), 303.0, 178.0, 335.0),
+        &formats.detail,
+        &brushes.muted,
     );
     draw_text(
         target,
@@ -984,6 +1637,108 @@ fn draw_bottom_metrics(
             &brushes.muted,
         );
     }
+}
+
+fn draw_usage_heading(
+    target: &ID2D1HwndRenderTarget,
+    factory: &ID2D1Factory,
+    formats: &FormatSet,
+    brushes: &Brushes,
+    locale: Locale,
+    selection: UsageSummaryDay,
+    compact: bool,
+) {
+    let (top, bottom, center_y) = if compact { (64.0, 88.0, 76.0) } else { (278.0, 303.0, 290.5) };
+    match (compact, selection) {
+        (true, UsageSummaryDay::Yesterday) => {
+            draw_text(
+                target,
+                locale.text("Yesterday", "昨日消耗"),
+                rect(218.0, top, 282.0, bottom),
+                &formats.stacked_label,
+                &brushes.muted,
+            );
+            let _ =
+                draw_solid_triangle(target, factory, 282.0, center_y, true, 12.0, &brushes.muted);
+        }
+        (true, UsageSummaryDay::Today) => {
+            let _ =
+                draw_solid_triangle(target, factory, 230.0, center_y, false, 12.0, &brushes.muted);
+            draw_text(
+                target,
+                locale.text("Today", "今日消耗"),
+                rect(230.0, top, 294.0, bottom),
+                &formats.stacked_label,
+                &brushes.muted,
+            );
+        }
+        (false, UsageSummaryDay::Yesterday) => {
+            draw_text(
+                target,
+                locale.text("Yesterday", "昨日消耗"),
+                rect(30.0, top, 100.0, bottom),
+                &formats.metric_label,
+                &brushes.muted,
+            );
+            let _ =
+                draw_solid_triangle(target, factory, 84.0, center_y, true, 12.0, &brushes.muted);
+        }
+        (false, UsageSummaryDay::Today) => {
+            let _ =
+                draw_solid_triangle(target, factory, 36.0, center_y, false, 12.0, &brushes.muted);
+            draw_text(
+                target,
+                locale.text("Today", "今日消耗"),
+                rect(42.0, top, 112.0, bottom),
+                &formats.metric_label,
+                &brushes.muted,
+            );
+        }
+    }
+}
+
+fn draw_solid_triangle(
+    target: &ID2D1HwndRenderTarget,
+    factory: &ID2D1Factory,
+    base_x: f32,
+    center_y: f32,
+    points_right: bool,
+    height: f32,
+    brush: &ID2D1SolidColorBrush,
+) -> Result<()> {
+    let half = height / 2.0;
+    let width = half;
+    let direction = if points_right { 1.0 } else { -1.0 };
+    let tip_x = base_x + direction * width;
+    let rounding = 2.0;
+    let diagonal = rounding * std::f32::consts::FRAC_1_SQRT_2;
+    let top = center_y - half;
+    let bottom = center_y + half;
+    let start = Vector2 { X: base_x, Y: top + rounding };
+    let geometry = unsafe { factory.CreatePathGeometry()? };
+    let sink = unsafe { geometry.Open()? };
+    unsafe {
+        sink.BeginFigure(start, D2D1_FIGURE_BEGIN_FILLED);
+        sink.AddLine(Vector2 { X: base_x, Y: bottom - rounding });
+        sink.AddQuadraticBezier(&D2D1_QUADRATIC_BEZIER_SEGMENT {
+            point1: Vector2 { X: base_x, Y: bottom },
+            point2: Vector2 { X: base_x + direction * diagonal, Y: bottom - diagonal },
+        });
+        sink.AddLine(Vector2 { X: tip_x - direction * diagonal, Y: center_y + diagonal });
+        sink.AddQuadraticBezier(&D2D1_QUADRATIC_BEZIER_SEGMENT {
+            point1: Vector2 { X: tip_x, Y: center_y },
+            point2: Vector2 { X: tip_x - direction * diagonal, Y: center_y - diagonal },
+        });
+        sink.AddLine(Vector2 { X: base_x + direction * diagonal, Y: top + diagonal });
+        sink.AddQuadraticBezier(&D2D1_QUADRATIC_BEZIER_SEGMENT {
+            point1: Vector2 { X: base_x, Y: top },
+            point2: start,
+        });
+        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+        sink.Close()?;
+        target.FillGeometry(&geometry, brush, None::<&ID2D1Brush>);
+    }
+    Ok(())
 }
 
 fn draw_percentage(

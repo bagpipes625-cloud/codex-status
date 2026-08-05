@@ -6,7 +6,7 @@ use crate::model::QuotaSnapshot;
 use crate::model::{DisplayState, QuotaAvailability, QuotaKind, RefreshState};
 use crate::settings::{AppStore, Settings};
 use crate::{startup, ui, updater};
-use chrono::Utc;
+use chrono::{Datelike, Utc};
 use std::cell::Cell;
 use std::mem::size_of;
 use std::path::PathBuf;
@@ -48,9 +48,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WA_INACTIVE,
     WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY,
     WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_NULL, WM_PAINT, WM_QUERYENDSESSION, WM_RBUTTONUP,
-    WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED,
-    WS_POPUP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NULL, WM_PAINT, WM_QUERYENDSESSION,
+    WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_OVERLAPPED, WS_POPUP,
 };
 #[cfg(not(codex_status_channel = "portable"))]
 use windows::core::GUID;
@@ -120,6 +120,7 @@ const TRAY_ACTIVATION_DEBOUNCE: Duration = Duration::from_millis(300);
 const FLYOUT_ACTIVATION_GUARD: Duration = Duration::from_millis(220);
 const TRAY_CLOSE_COALESCE: Duration = Duration::from_millis(250);
 const REFRESH_ANIMATION_DURATION: Duration = Duration::from_millis(600);
+const HISTORY_SAVE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 const CMD_REFRESH: u32 = 100;
 const CMD_USAGE: u32 = 101;
@@ -249,6 +250,12 @@ struct AppState {
     taskbar_created: u32,
     store: AppStore,
     usage_history: UsageLedger,
+    active_account_key: Option<String>,
+    history_view_cache: Option<crate::history::UsageHistoryView>,
+    history_dirty: bool,
+    last_history_save: Option<Instant>,
+    history_navigation: ui::HistoryNavigation,
+    full_history_render: bool,
     settings: Settings,
     locale: ui::Locale,
     theme: ui::Theme,
@@ -272,6 +279,8 @@ struct AppState {
     flyout_ignore_inactive_until: Option<Instant>,
     flyout_hidden_for_tray_activation: Option<Instant>,
     pressed_quota: Option<QuotaKind>,
+    pressed_history: Option<ui::HistoryHit>,
+    hovered_history_cycle: Option<usize>,
     refresh_button_pressed: bool,
 }
 
@@ -348,9 +357,12 @@ pub fn run() -> Result<(), AppError> {
     let store = AppStore::discover();
     let settings = store.load_settings();
     let usage_history = store.load_usage_history();
+    let active_account_key = usage_history.last_account_key.clone();
     let locale = ui::Locale::detect(&settings.locale);
     let theme = ui::detect_theme(&settings.theme);
     let now = Utc::now().timestamp();
+    let history_view_cache =
+        usage_history.history_for(active_account_key.as_deref()).map(|history| history.view(now));
     let cached = store.load_snapshot().filter(|snapshot| snapshot.is_cache_valid(now));
     let display = DisplayState::loading(cached);
     let taskbar_created = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
@@ -362,6 +374,12 @@ pub fn run() -> Result<(), AppError> {
         taskbar_created,
         store,
         usage_history,
+        active_account_key,
+        history_view_cache,
+        history_dirty: false,
+        last_history_save: None,
+        history_navigation: ui::HistoryNavigation::default(),
+        full_history_render: true,
         settings,
         locale,
         theme,
@@ -385,6 +403,8 @@ pub fn run() -> Result<(), AppError> {
         flyout_ignore_inactive_until: None,
         flyout_hidden_for_tray_activation: None,
         pressed_quota: None,
+        pressed_history: None,
+        hovered_history_cycle: None,
         refresh_button_pressed: false,
     });
     let raw = Box::into_raw(state);
@@ -429,6 +449,7 @@ pub fn run() -> Result<(), AppError> {
 
     STATE.with(|slot| slot.set(ptr::null_mut()));
     unsafe {
+        (&mut *raw).persist_usage_history(true);
         drop(Box::from_raw(raw));
     }
     drop(mutex);
@@ -525,12 +546,23 @@ unsafe extern "system" fn main_window_proc(
                     return LRESULT(0);
                 }
                 WM_PREWARM_FLYOUT => {
+                    let history = state.history_view();
                     ui::prewarm_card_renderer(
                         state.flyout,
                         &state.display,
                         state.settings.display_quota,
                         state.locale,
                         state.theme,
+                        ui::CardView {
+                            history,
+                            navigation: &state.history_navigation,
+                            interaction: ui::CardInteraction {
+                                pressed_quota: None,
+                                refresh_feedback: false,
+                                refresh_rotation_degrees: 0.0,
+                                hovered_cycle: None,
+                            },
+                        },
                     );
                     return LRESULT(0);
                 }
@@ -607,26 +639,35 @@ unsafe extern "system" fn flyout_window_proc(
         let state_ptr = STATE.with(Cell::get);
         match message {
             WM_PAINT if !state_ptr.is_null() => {
-                let state = &*state_ptr;
-                ui::paint_card(
+                let state = &mut *state_ptr;
+                let history = state.history_view();
+                let full_history_render = ui::paint_card(
                     hwnd,
                     &state.display,
                     state.settings.display_quota,
                     state.locale,
                     state.theme,
-                    ui::CardInteraction {
-                        pressed_quota: state.pressed_quota,
-                        refresh_feedback: state.refresh_feedback,
-                        refresh_rotation_degrees: state.refresh_rotation_degrees(),
+                    ui::CardView {
+                        history,
+                        navigation: &state.history_navigation,
+                        interaction: ui::CardInteraction {
+                            pressed_quota: state.pressed_quota,
+                            refresh_feedback: state.refresh_feedback,
+                            refresh_rotation_degrees: state.refresh_rotation_degrees(),
+                            hovered_cycle: state.hovered_history_cycle,
+                        },
                     },
                 );
+                state.full_history_render = full_history_render;
                 return LRESULT(0);
             }
             WM_LBUTTONDOWN if !state_ptr.is_null() => {
                 let state = &mut *state_ptr;
                 let (x, y) = pointer_coordinates(lparam);
                 let dpi = GetDpiForWindow(hwnd).max(96);
-                if !state.refreshing
+                if (state.history_navigation.page == ui::HistoryPage::Main
+                    || state.full_history_render)
+                    && !state.refreshing
                     && !state.refresh_feedback
                     && ui::refresh_button_hit_test(&state.display, x, y, dpi)
                 {
@@ -635,9 +676,27 @@ unsafe extern "system" fn flyout_window_proc(
                     return LRESULT(0);
                 }
                 if let Some(kind) = ui::quota_card_hit_test(&state.display, x, y, dpi) {
-                    state.pressed_quota = Some(kind);
+                    if state.history_navigation.page == ui::HistoryPage::Main {
+                        state.pressed_quota = Some(kind);
+                        let _ = SetCapture(hwnd);
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                        return LRESULT(0);
+                    }
+                }
+                let history = state.history_view();
+                let compact =
+                    matches!(state.display.quota_availability(), QuotaAvailability::Single(_));
+                if let Some(hit) = ui::history_hit_test(
+                    &state.history_navigation,
+                    history,
+                    compact,
+                    x,
+                    y,
+                    dpi,
+                    state.full_history_render,
+                ) {
+                    state.pressed_history = Some(hit);
                     let _ = SetCapture(hwnd);
-                    let _ = InvalidateRect(Some(hwnd), None, false);
                     return LRESULT(0);
                 }
             }
@@ -668,11 +727,56 @@ unsafe extern "system" fn flyout_window_proc(
                     }
                     return LRESULT(0);
                 }
+                if let Some(pressed) = state.pressed_history.take() {
+                    let (x, y) = pointer_coordinates(lparam);
+                    let dpi = GetDpiForWindow(hwnd).max(96);
+                    let history = state.history_view();
+                    let compact =
+                        matches!(state.display.quota_availability(), QuotaAvailability::Single(_));
+                    let activate = ui::history_hit_test(
+                        &state.history_navigation,
+                        history,
+                        compact,
+                        x,
+                        y,
+                        dpi,
+                        state.full_history_render,
+                    ) == Some(pressed);
+                    let _ = ReleaseCapture();
+                    if activate {
+                        state.activate_history_hit(pressed);
+                    }
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                    return LRESULT(0);
+                }
+            }
+            WM_MOUSEMOVE if !state_ptr.is_null() => {
+                let state = &mut *state_ptr;
+                let (x, y) = pointer_coordinates(lparam);
+                let dpi = GetDpiForWindow(hwnd).max(96);
+                let history = state.history_view();
+                let compact =
+                    matches!(state.display.quota_availability(), QuotaAvailability::Single(_));
+                let hovered = ui::hovered_cycle(
+                    &state.history_navigation,
+                    history,
+                    compact,
+                    x,
+                    y,
+                    dpi,
+                    state.full_history_render,
+                );
+                if hovered != state.hovered_history_cycle {
+                    state.hovered_history_cycle = hovered;
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+                return LRESULT(0);
             }
             WM_CAPTURECHANGED if !state_ptr.is_null() => {
                 let state = &mut *state_ptr;
-                let had_capture =
-                    state.pressed_quota.take().is_some() || state.refresh_button_pressed;
+                let had_capture = state.pressed_quota.take().is_some()
+                    || state.pressed_history.take().is_some()
+                    || state.refresh_button_pressed;
                 state.refresh_button_pressed = false;
                 if had_capture {
                     let _ = InvalidateRect(Some(hwnd), None, false);
@@ -728,6 +832,65 @@ unsafe extern "system" fn flyout_window_proc(
 }
 
 impl AppState {
+    fn history_view(&self) -> Option<&crate::history::UsageHistoryView> {
+        self.history_view_cache.as_ref()
+    }
+
+    fn activate_history_hit(&mut self, hit: ui::HistoryHit) {
+        match hit {
+            ui::HistoryHit::Back => {
+                self.history_navigation.page = ui::HistoryPage::Main;
+                self.hovered_history_cycle = None;
+            }
+            ui::HistoryHit::ToggleSummaryDay => {
+                self.history_navigation.summary_day = self.history_navigation.summary_day.toggle();
+            }
+            ui::HistoryHit::OpenHistory => {
+                self.history_navigation.open_month(self.history_view_cache.as_ref());
+                self.hovered_history_cycle = None;
+            }
+            ui::HistoryHit::PreviousMonth => self.history_navigation.shift_month(-1),
+            ui::HistoryHit::NextMonth => self.history_navigation.shift_month(1),
+            ui::HistoryHit::MonthTab => {
+                if let (Some(view), Some(index)) =
+                    (self.history_view_cache.as_ref(), self.history_navigation.selected_cycle)
+                    && let Some(cycle) = view.cycles.get(index)
+                {
+                    self.history_navigation.month =
+                        cycle.start_date.with_day(1).expect("cycle month start");
+                }
+                self.history_navigation.page = ui::HistoryPage::Month;
+            }
+            ui::HistoryHit::CycleTab => {
+                if let Some(view) = self.history_view_cache.as_ref() {
+                    self.history_navigation.open_selected_or_current_cycle(view);
+                }
+            }
+            ui::HistoryHit::PreviousCycle => {
+                if let Some(index) = self.history_navigation.selected_cycle
+                    && index > 0
+                {
+                    self.history_navigation.selected_cycle = Some(index - 1);
+                }
+            }
+            ui::HistoryHit::NextCycle => {
+                if let (Some(view), Some(index)) =
+                    (self.history_view_cache.as_ref(), self.history_navigation.selected_cycle)
+                    && index + 1 < view.cycles.len()
+                {
+                    self.history_navigation.selected_cycle = Some(index + 1);
+                }
+            }
+            ui::HistoryHit::Cycle(index) => {
+                if self.history_view_cache.as_ref().is_some_and(|view| index < view.cycles.len()) {
+                    self.history_navigation.selected_cycle = Some(index);
+                    self.history_navigation.page = ui::HistoryPage::Cycle;
+                    self.hovered_history_cycle = None;
+                }
+            }
+        }
+    }
+
     fn start_refresh_animation(&mut self) {
         self.refresh_animation_started = Some(Instant::now());
         unsafe {
@@ -839,12 +1002,15 @@ impl AppState {
         match outcome.result {
             Ok(snapshot) => {
                 self.failures = 0;
+                self.active_account_key = snapshot.account_key.clone();
                 self.usage_history.record_refresh(
                     snapshot.account_key.as_deref(),
                     &snapshot.quota,
                     snapshot.token_usage.as_ref(),
                 );
-                let _ = self.store.save_usage_history(&self.usage_history);
+                self.history_dirty = true;
+                self.refresh_history_view_cache();
+                self.persist_usage_history(false);
                 let _ = self.store.save_snapshot(&snapshot.quota);
                 self.display = DisplayState::live(snapshot.quota);
                 self.reset_refresh_timer(self.settings.refresh_minutes.saturating_mul(60_000));
@@ -862,6 +1028,7 @@ impl AppState {
                     _ => 15 * 60_000,
                 };
                 self.reset_refresh_timer(backoff);
+                self.refresh_history_view_cache();
             }
         }
         let _ = self.update_tray(false);
@@ -872,6 +1039,26 @@ impl AppState {
         if self.refresh_pending {
             self.refresh_pending = false;
             self.start_refresh(true);
+        }
+    }
+
+    fn refresh_history_view_cache(&mut self) {
+        self.history_view_cache = self
+            .usage_history
+            .history_for(self.active_account_key.as_deref())
+            .map(|history| history.view(Utc::now().timestamp()));
+    }
+
+    fn persist_usage_history(&mut self, force: bool) {
+        if !self.history_dirty {
+            return;
+        }
+        let due = self
+            .last_history_save
+            .is_none_or(|last| force || last.elapsed() >= HISTORY_SAVE_INTERVAL);
+        if due && self.store.save_usage_history(&self.usage_history).is_ok() {
+            self.history_dirty = false;
+            self.last_history_save = Some(Instant::now());
         }
     }
 
@@ -886,6 +1073,13 @@ impl AppState {
 
     fn refresh_time_sensitive_state(&mut self) {
         let now = Utc::now().timestamp();
+        if self
+            .history_view_cache
+            .as_ref()
+            .is_some_and(|view| view.today != chrono::Local::now().date_naive())
+        {
+            self.refresh_history_view_cache();
+        }
         if self.display.refresh_state != RefreshState::Live
             && self.display.snapshot.as_ref().is_some_and(|value| !value.is_cache_valid(now))
         {
@@ -1219,6 +1413,10 @@ impl AppState {
         self.flyout_ignore_inactive_until = None;
         self.flyout_hidden_for_tray_activation = None;
         self.pressed_quota = None;
+        self.pressed_history = None;
+        self.hovered_history_cycle = None;
+        self.history_navigation.page = ui::HistoryPage::Main;
+        self.history_navigation.selected_cycle = None;
         self.refresh_button_pressed = false;
         self.refresh_animation_started = None;
         if !self.refreshing {
@@ -1677,7 +1875,14 @@ fn diagnostic(stage: &str) {
     use std::io::Write;
     eprintln!("{stage}");
     let path = std::env::temp_dir().join("CodexStatus-diagnostic.log");
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    let truncate = path.metadata().is_ok_and(|metadata| metadata.len() >= 256 * 1024);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(!truncate)
+        .truncate(truncate)
+        .open(path)
+    {
         let _ = writeln!(file, "{} {stage}", Utc::now().to_rfc3339());
     }
 }

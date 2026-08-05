@@ -6,6 +6,7 @@ use std::io::{self, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use windows::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, REPLACEFILE_WRITE_THROUGH,
     ReplaceFileW,
@@ -13,6 +14,10 @@ use windows::Win32::Storage::FileSystem::{
 use windows::core::PCWSTR;
 
 const APP_DIR: &str = "CodexStatus";
+const SMALL_STATE_LIMIT: u64 = 1024 * 1024;
+const HISTORY_STATE_LIMIT: u64 = 8 * 1024 * 1024;
+const TRAY_LOG_LIMIT: u64 = 256 * 1024;
+const STALE_TEMP_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 static TEMPORARY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,10 +74,12 @@ impl AppStore {
         let base =
             std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
         let channel = env!("CODEX_STATUS_CHANNEL");
-        Self {
+        let store = Self {
             directory: channel_directory(&base, channel),
             updates_directory: base.join(APP_DIR).join("updates").join(channel),
-        }
+        };
+        store.cleanup_stale_state_files();
+        store
     }
 
     #[cfg(test)]
@@ -83,7 +90,8 @@ impl AppStore {
 
     pub fn load_settings(&self) -> Settings {
         let mut settings =
-            read_json::<Settings>(&self.directory.join("settings.json")).unwrap_or_default();
+            read_json::<Settings>(&self.directory.join("settings.json"), SMALL_STATE_LIMIT)
+                .unwrap_or_default();
         settings.normalize();
         settings
     }
@@ -93,7 +101,7 @@ impl AppStore {
     }
 
     pub fn load_snapshot(&self) -> Option<QuotaSnapshot> {
-        read_json(&self.directory.join("snapshot.json"))
+        read_json(&self.directory.join("snapshot.json"), SMALL_STATE_LIMIT)
     }
 
     pub fn save_snapshot(&self, snapshot: &QuotaSnapshot) -> io::Result<()> {
@@ -101,7 +109,11 @@ impl AppStore {
     }
 
     pub fn load_usage_history(&self) -> UsageLedger {
-        read_json(&self.directory.join("usage-history.json")).unwrap_or_default()
+        let mut history: UsageLedger =
+            read_json(&self.directory.join("usage-history.json"), HISTORY_STATE_LIMIT)
+                .unwrap_or_default();
+        history.prune();
+        history
     }
 
     pub fn save_usage_history(&self, history: &UsageLedger) -> io::Result<()> {
@@ -114,10 +126,13 @@ impl AppStore {
 
     pub fn append_tray_error(&self, entry: &str) -> io::Result<()> {
         fs::create_dir_all(&self.directory)?;
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.directory.join("tray-errors.log"))?;
+        let path = self.directory.join("tray-errors.log");
+        if path.metadata().is_ok_and(|metadata| metadata.len() >= TRAY_LOG_LIMIT) {
+            let backup = self.directory.join("tray-errors.old.log");
+            let _ = fs::remove_file(&backup);
+            let _ = fs::rename(&path, backup);
+        }
+        let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
         writeln!(file, "{entry}")
     }
 
@@ -125,9 +140,53 @@ impl AppStore {
         fs::create_dir_all(&self.directory)?;
         fs::write(self.directory.join("settings-error.log"), entry)
     }
+
+    fn cleanup_stale_state_files(&self) {
+        let Ok(entries) = fs::read_dir(&self.directory) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if !is_state_temporary_name(&name) {
+                continue;
+            }
+            let Ok(metadata) = fs::symlink_metadata(&path) else { continue };
+            if !metadata.file_type().is_file()
+                || !metadata
+                    .modified()
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age >= STALE_TEMP_AGE)
+            {
+                continue;
+            }
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
-fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
+fn is_state_temporary_name(name: &str) -> bool {
+    ["settings.tmp-", "snapshot.tmp-", "usage-history.tmp-"]
+        .into_iter()
+        .find_map(|prefix| name.strip_prefix(prefix))
+        .is_some_and(|suffix| {
+            let mut parts = suffix.split('-');
+            matches!(
+                (parts.next(), parts.next(), parts.next()),
+                (Some(pid), Some(sequence), None)
+                    if !pid.is_empty()
+                        && !sequence.is_empty()
+                        && pid.bytes().all(|byte| byte.is_ascii_digit())
+                        && sequence.bytes().all(|byte| byte.is_ascii_digit())
+            )
+        })
+}
+
+fn read_json<T: for<'de> Deserialize<'de>>(path: &Path, limit: u64) -> Option<T> {
+    if path.metadata().ok()?.len() > limit {
+        return None;
+    }
     let bytes = fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
@@ -138,7 +197,7 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     }
     let sequence = TEMPORARY_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temporary = path.with_extension(format!("tmp-{}-{sequence}", std::process::id()));
-    let bytes = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
+    let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
     let result = (|| {
         let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
         file.write_all(&bytes)?;
@@ -268,5 +327,43 @@ mod tests {
         assert_eq!(leftovers, 0);
 
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn oversized_history_file_is_rejected_before_reading() {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let directory = std::env::temp_dir().join(format!("codex-status-history-limit-{suffix}"));
+        fs::create_dir_all(&directory).unwrap();
+        let file = fs::File::create(directory.join("usage-history.json")).unwrap();
+        file.set_len(HISTORY_STATE_LIMIT + 1).unwrap();
+        let store = AppStore::at(directory.clone());
+        assert_eq!(store.load_usage_history(), UsageLedger::default());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn tray_error_log_rotates_at_the_fixed_limit() {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let directory = std::env::temp_dir().join(format!("codex-status-tray-log-{suffix}"));
+        fs::create_dir_all(&directory).unwrap();
+        fs::File::create(directory.join("tray-errors.log"))
+            .unwrap()
+            .set_len(TRAY_LOG_LIMIT)
+            .unwrap();
+        let store = AppStore::at(directory.clone());
+        store.append_tray_error("new failure").unwrap();
+        assert!(directory.join("tray-errors.old.log").is_file());
+        assert_eq!(fs::read_to_string(directory.join("tray-errors.log")).unwrap(), "new failure\n");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn stale_cleanup_matches_only_our_exact_temporary_names() {
+        assert!(is_state_temporary_name("settings.tmp-123-0"));
+        assert!(is_state_temporary_name("snapshot.tmp-7-42"));
+        assert!(is_state_temporary_name("usage-history.tmp-1-9"));
+        assert!(!is_state_temporary_name("notes.tmp-backup"));
+        assert!(!is_state_temporary_name("settings.tmp-old-0"));
+        assert!(!is_state_temporary_name("settings.tmp-1-2-extra"));
     }
 }

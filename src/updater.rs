@@ -2,13 +2,14 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, c_void};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::ptr;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Networking::WinHttp::{
     INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
@@ -37,6 +38,7 @@ const MAX_METADATA_BYTES: usize = 512 * 1024;
 const MAX_EXECUTABLE_BYTES: usize = 32 * 1024 * 1024;
 const UPDATE_WAIT_MS: u32 = 30_000;
 const HTTP_REQUEST_DEADLINE: Duration = Duration::from_secs(60);
+const STALE_PENDING_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, thiserror::Error)]
 pub enum UpdateError {
@@ -65,6 +67,8 @@ pub enum UpdateError {
 #[derive(Debug, Clone)]
 pub struct StagedUpdate {
     pub executable: PathBuf,
+    digest: String,
+    size: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -220,7 +224,9 @@ impl HttpClient {
 
 pub fn check_and_stage(updates_directory: &Path) -> Result<Option<StagedUpdate>, UpdateError> {
     let channel = update_asset_channel().ok_or(UpdateError::UnsupportedChannel)?;
-    validate_target_for_update(&std::env::current_exe()?)?;
+    let target = std::env::current_exe()?;
+    validate_target_for_update(&target)?;
+    cleanup_stale_pending_updates(&target);
     let staging = StagingTree::open(updates_directory)?;
     staging.cleanup();
 
@@ -252,7 +258,7 @@ pub fn check_and_stage(updates_directory: &Path) -> Result<Option<StagedUpdate>,
         fs::remove_file(&executable)?;
     }
     fs::rename(temporary, &executable)?;
-    Ok(Some(StagedUpdate { executable }))
+    Ok(Some(StagedUpdate { executable, digest, size: bytes.len() as u64 }))
 }
 
 fn create_staged_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -510,6 +516,8 @@ fn update_asset_channel_for(channel: &str) -> Option<UpdateAssetChannel> {
 
 pub fn launch_staged_update(update: &StagedUpdate) -> Result<(), UpdateError> {
     let target = std::env::current_exe()?;
+    let _directory_locks = lock_path_ancestors(&update.executable)?;
+    let _verified_file = verify_staged_file(update)?;
     Command::new(&update.executable)
         .arg("--apply-update")
         .arg(std::process::id().to_string())
@@ -517,6 +525,58 @@ pub fn launch_staged_update(update: &StagedUpdate) -> Result<(), UpdateError> {
         .creation_flags(CREATE_NO_WINDOW.0)
         .spawn()?;
     Ok(())
+}
+
+fn lock_path_ancestors(path: &Path) -> Result<Vec<DirectoryLock>, UpdateError> {
+    let parent = path.parent().ok_or(UpdateError::UnsafeTarget)?;
+    let mut ancestors: Vec<_> = parent.ancestors().collect();
+    ancestors.reverse();
+    ancestors.into_iter().map(DirectoryLock::open).collect()
+}
+
+fn verify_staged_file(update: &StagedUpdate) -> Result<File, UpdateError> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ.0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(&update.executable)?;
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe {
+        GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut information)?;
+    }
+    if information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_REPARSE_POINT.0)
+        != 0
+    {
+        return Err(UpdateError::UnsafeTarget);
+    }
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.len() != update.size
+        || metadata.len() < 64 * 1024
+        || metadata.len() > MAX_EXECUTABLE_BYTES as u64
+    {
+        return Err(UpdateError::InvalidResponse);
+    }
+    let mut hasher = Sha256::new();
+    let mut header = [0_u8; 2];
+    file.read_exact(&mut header)?;
+    if header != *b"MZ" {
+        return Err(UpdateError::InvalidResponse);
+    }
+    hasher.update(header);
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let actual: String = hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect();
+    if actual != update.digest {
+        return Err(UpdateError::DigestMismatch);
+    }
+    Ok(file)
 }
 
 pub fn apply_update_silently(parent_pid: u32, target: &Path) {
@@ -600,7 +660,9 @@ fn apply_update(parent_pid: u32, target: &Path) -> Result<(), UpdateError> {
     if staged == target {
         return Err(UpdateError::UnsafeTarget);
     }
-    let pending = target.with_extension(format!("update-{}", std::process::id()));
+    cleanup_stale_pending_updates(target);
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let pending = target.with_extension(format!("update-{}-{nonce}", std::process::id()));
     copy_to_new_file(&staged, &pending)?;
     let pending_wide = wide0(pending.as_os_str());
     let target_wide = wide0(target.as_os_str());
@@ -617,6 +679,38 @@ fn apply_update(parent_pid: u32, target: &Path) -> Result<(), UpdateError> {
     }
     launch_target(target)?;
     Ok(())
+}
+
+fn cleanup_stale_pending_updates(target: &Path) {
+    let Some(parent) = target.parent() else { return };
+    let Some(stem) = target.file_stem().and_then(OsStr::to_str) else { return };
+    let prefix = format!("{stem}.update-");
+    let Ok(entries) = fs::read_dir(parent) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(suffix) = name.to_str().and_then(|name| name.strip_prefix(&prefix)) else {
+            continue;
+        };
+        if suffix.is_empty()
+            || !suffix
+                .split('-')
+                .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else { continue };
+        if !metadata.file_type().is_file()
+            || !metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age >= STALE_PENDING_AGE)
+        {
+            continue;
+        }
+        let _ = fs::remove_file(path);
+    }
 }
 
 fn copy_to_new_file(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -809,6 +903,29 @@ mod tests {
             sha256_hex(b"CodexStatus"),
             "1348bd7daee4282c641059f8cdd9fe96ae24f501c0cd32fbdabb8c1e60eea85c"
         );
+    }
+
+    #[test]
+    fn staged_update_is_reverified_and_locked_against_replacement() {
+        let directory = temporary_directory("update-reverify");
+        fs::create_dir_all(&directory).unwrap();
+        let executable = directory.join("CodexStatus.exe");
+        let mut bytes = vec![0_u8; 64 * 1024];
+        bytes[..2].copy_from_slice(b"MZ");
+        fs::write(&executable, &bytes).unwrap();
+        let update = StagedUpdate {
+            executable: executable.clone(),
+            digest: sha256_hex(&bytes),
+            size: bytes.len() as u64,
+        };
+
+        let verified = verify_staged_file(&update).unwrap();
+        assert!(fs::write(&executable, &bytes).is_err());
+        drop(verified);
+        bytes[2] = 1;
+        fs::write(&executable, &bytes).unwrap();
+        assert!(matches!(verify_staged_file(&update), Err(UpdateError::DigestMismatch)));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

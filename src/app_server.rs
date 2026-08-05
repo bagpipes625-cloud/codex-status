@@ -29,6 +29,7 @@ use windows::Win32::System::Threading::{
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+const OPTIONAL_USAGE_TIMEOUT: Duration = Duration::from_millis(500);
 const READER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 const ERROR_LIMIT: usize = 240;
 const STDOUT_LINE_LIMIT: usize = 256 * 1024;
@@ -171,7 +172,13 @@ fn fetch_with_command(command: &CommandSpec) -> Result<AppServerSnapshot, AppSer
         write_json(&mut stdin, &json!({"method": "account/rateLimits/read", "id": 2}))?;
         write_json(&mut stdin, &json!({"method": "account/usage/read", "id": 3}))?;
 
-        let responses = receive_many(&receiver, &[1, 2, 3], REQUEST_TIMEOUT)?;
+        let mut responses = receive_required(&receiver, &[1, 2], &[3], REQUEST_TIMEOUT)?;
+        if !responses.contains_key(&3)
+            && let Ok(response) =
+                receive_response(&receiver, 3, "account/usage/read", OPTIONAL_USAGE_TIMEOUT)
+        {
+            responses.insert(3, response);
+        }
         let account =
             response_result(responses.get(&1).ok_or(AppServerError::Closed)?, "account/read")?;
         let limits = response_result(
@@ -264,14 +271,15 @@ fn receive_response(
     }
 }
 
-fn receive_many(
+fn receive_required(
     receiver: &mpsc::Receiver<String>,
-    ids: &[u64],
+    required_ids: &[u64],
+    optional_ids: &[u64],
     timeout: Duration,
 ) -> Result<HashMap<u64, RpcResponse>, AppServerError> {
     let deadline = Instant::now() + timeout;
     let mut responses = HashMap::new();
-    while ids.iter().any(|id| !responses.contains_key(id)) {
+    while required_ids.iter().any(|id| !responses.contains_key(id)) {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(AppServerError::Timeout);
@@ -281,7 +289,9 @@ fn receive_many(
             mpsc::RecvTimeoutError::Disconnected => AppServerError::Closed,
         })?;
         if let Ok(response) = serde_json::from_str::<RpcResponse>(&line) {
-            if let Some(id) = response.id.filter(|id| ids.contains(id)) {
+            if let Some(id) =
+                response.id.filter(|id| required_ids.contains(id) || optional_ids.contains(id))
+            {
                 responses.insert(id, response);
             }
         }
@@ -690,6 +700,27 @@ mod tests {
         let (_sender, receiver) = mpsc::channel();
         let error = receive_response(&receiver, 1, "test", Duration::from_millis(1)).unwrap_err();
         assert!(matches!(error, AppServerError::Timeout));
+    }
+
+    #[test]
+    fn required_responses_do_not_wait_for_optional_usage() {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(r#"{"id":1,"result":{}}"#.to_owned()).unwrap();
+        sender.send(r#"{"id":2,"result":{}}"#.to_owned()).unwrap();
+        let responses = receive_required(&receiver, &[1, 2], &[3], Duration::from_secs(1)).unwrap();
+        assert!(responses.contains_key(&1));
+        assert!(responses.contains_key(&2));
+        assert!(!responses.contains_key(&3));
+    }
+
+    #[test]
+    fn required_response_collection_preserves_early_optional_usage() {
+        let (sender, receiver) = mpsc::channel();
+        for id in [3, 1, 2] {
+            sender.send(format!(r#"{{"id":{id},"result":{{}}}}"#)).unwrap();
+        }
+        let responses = receive_required(&receiver, &[1, 2], &[3], Duration::from_secs(1)).unwrap();
+        assert!(responses.contains_key(&3));
     }
 
     #[test]

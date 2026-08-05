@@ -1,7 +1,8 @@
+use crate::history::UsageHistoryView;
 use crate::model::{
     AccountSummary, DisplayState, QuotaAvailability, QuotaKind, QuotaWindow, RefreshState,
 };
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Datelike, Local};
 use std::ffi::c_void;
 use std::mem::size_of;
 use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT};
@@ -29,6 +30,12 @@ use winreg::RegKey;
 use winreg::enums::HKEY_CURRENT_USER;
 
 mod direct2d;
+mod history_view;
+
+pub use history_view::{
+    HistoryHit, HistoryNavigation, HistoryPage, UsageSummaryDay, hit_test as history_hit_test,
+    hovered_cycle,
+};
 
 pub const CARD_WIDTH: i32 = 376;
 pub const CARD_HEIGHT: i32 = 352;
@@ -59,6 +66,14 @@ pub struct CardInteraction {
     pub pressed_quota: Option<QuotaKind>,
     pub refresh_feedback: bool,
     pub refresh_rotation_degrees: f32,
+    pub hovered_cycle: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CardView<'a> {
+    pub history: Option<&'a UsageHistoryView>,
+    pub navigation: &'a HistoryNavigation,
+    pub interaction: CardInteraction,
 }
 
 pub fn flyout_dimensions(state: &DisplayState) -> FlyoutDimensions {
@@ -98,25 +113,79 @@ fn quota_panel_geometry(slot: QuotaPanelSlot) -> QuotaPanelGeometry {
 }
 
 struct AccountMetrics {
-    plan: String,
     credits: String,
     credit_detail: Option<String>,
 }
 
+struct DailyUsageMetrics {
+    percent: String,
+    tokens: String,
+}
+
+fn daily_usage_metrics(
+    history: Option<&UsageHistoryView>,
+    selection: UsageSummaryDay,
+    locale: Locale,
+) -> DailyUsageMetrics {
+    let Some(history) = history else {
+        return DailyUsageMetrics { percent: "--".to_owned(), tokens: "--".to_owned() };
+    };
+    let date = match selection {
+        UsageSummaryDay::Yesterday => history.today - chrono::Duration::days(1),
+        UsageSummaryDay::Today => history.today,
+    };
+    let Some(day) = history.day(date) else {
+        return DailyUsageMetrics { percent: "--".to_owned(), tokens: "--".to_owned() };
+    };
+    DailyUsageMetrics {
+        percent: estimated_text(format_percent(day.weekly_consumed_percent), !day.quota_complete),
+        tokens: day
+            .tokens
+            .map(|value| format_tokens(value, locale))
+            .map(|value| estimated_text(value, !day.token_complete))
+            .unwrap_or_else(|| "--".to_owned()),
+    }
+}
+
+fn estimated_text(value: String, estimated: bool) -> String {
+    if estimated { format!("≈{value}") } else { value }
+}
+
+fn format_percent(value: f64) -> String {
+    if (value - value.round()).abs() < 0.05 {
+        format!("{:.0}%", value)
+    } else {
+        format!("{value:.1}%")
+    }
+}
+
+fn format_tokens(value: u64, locale: Locale) -> String {
+    let (divisor, suffix) = match locale {
+        Locale::Chinese if value >= 100_000_000 => (100_000_000.0, "亿"),
+        Locale::Chinese if value >= 10_000 => (10_000.0, "万"),
+        Locale::Chinese => return value.to_string(),
+        Locale::English if value >= 1_000_000_000 => (1_000_000_000.0, "B"),
+        Locale::English if value >= 1_000_000 => (1_000_000.0, "M"),
+        Locale::English if value >= 1_000 => (1_000.0, "K"),
+        Locale::English => return value.to_string(),
+    };
+    let scaled = value as f64 / divisor;
+    if (scaled - scaled.round()).abs() < 0.05 {
+        format!("{scaled:.0}{suffix}")
+    } else {
+        format!("{scaled:.1}{suffix}")
+    }
+}
+
 fn account_metrics(state: &DisplayState, locale: Locale) -> AccountMetrics {
     let snapshot = state.snapshot.as_ref();
-    let plan = snapshot
-        .and_then(|snapshot| snapshot.account.plan_type.as_deref())
-        .map(|plan| plan_label(plan, locale))
-        .unwrap_or("--")
-        .to_owned();
     let credits = snapshot
         .and_then(|snapshot| snapshot.account.reset_credits)
         .map(|credits| format!("{credits} {}", locale.text("resets", "次")))
         .unwrap_or_else(|| "--".to_owned());
     let credit_detail =
         snapshot.and_then(|snapshot| reset_credit_detail(&snapshot.account, locale));
-    AccountMetrics { plan, credits, credit_detail }
+    AccountMetrics { credits, credit_detail }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,8 +404,8 @@ pub fn paint_card(
     preferred: QuotaKind,
     locale: Locale,
     theme: Theme,
-    interaction: CardInteraction,
-) {
+    view: CardView<'_>,
+) -> bool {
     unsafe {
         let mut paint = PAINTSTRUCT::default();
         let hdc = BeginPaint(hwnd, &mut paint);
@@ -354,18 +423,20 @@ pub fn paint_card(
             preferred,
             locale,
             theme,
-            interaction,
+            history: view.history,
+            navigation: view.navigation,
+            interaction: view.interaction,
         });
         if !painted {
             let buffer = CreateCompatibleDC(Some(hdc));
             let bitmap = CreateCompatibleBitmap(hdc, width, height);
             if !buffer.is_invalid() && !bitmap.is_invalid() {
                 let old_bitmap = SelectObject(buffer, HGDIOBJ(bitmap.0));
-                draw_card(buffer, state, preferred, locale, theme, interaction, dpi);
+                draw_card(buffer, state, preferred, locale, theme, view, dpi);
                 let _ = BitBlt(hdc, 0, 0, width, height, Some(buffer), 0, 0, SRCCOPY);
                 let _ = SelectObject(buffer, old_bitmap);
             } else {
-                draw_card(hdc, state, preferred, locale, theme, interaction, dpi);
+                draw_card(hdc, state, preferred, locale, theme, view, dpi);
             }
             if !bitmap.is_invalid() {
                 let _ = DeleteObject(HGDIOBJ(bitmap.0));
@@ -375,6 +446,7 @@ pub fn paint_card(
             }
         }
         let _ = EndPaint(hwnd, &paint);
+        painted
     }
 }
 
@@ -384,6 +456,7 @@ pub fn prewarm_card_renderer(
     preferred: QuotaKind,
     locale: Locale,
     theme: Theme,
+    view: CardView<'_>,
 ) {
     unsafe {
         let mut client = RECT::default();
@@ -396,11 +469,9 @@ pub fn prewarm_card_renderer(
             preferred,
             locale,
             theme,
-            interaction: CardInteraction {
-                pressed_quota: None,
-                refresh_feedback: false,
-                refresh_rotation_degrees: 0.0,
-            },
+            history: view.history,
+            navigation: view.navigation,
+            interaction: view.interaction,
         });
     }
 }
@@ -415,10 +486,13 @@ unsafe fn draw_card(
     preferred: QuotaKind,
     locale: Locale,
     theme: Theme,
-    interaction: CardInteraction,
+    view: CardView<'_>,
     dpi: u32,
 ) {
     unsafe {
+        let history = view.history;
+        let navigation = view.navigation;
+        let interaction = view.interaction;
         let dimensions = flyout_dimensions(state);
         let width = scale(dimensions.width, dpi);
         let height = scale(dimensions.height, dpi);
@@ -431,6 +505,11 @@ unsafe fn draw_card(
             dpi,
         );
         let _ = SetBkMode(hdc, TRANSPARENT);
+
+        if navigation.page != HistoryPage::Main {
+            draw_history_fallback(hdc, history, navigation, locale, theme, dpi, dimensions);
+            return;
+        }
 
         let effective_kind = state.resolved_quota_kind(preferred);
         let selected_percent = state.quota_percent(effective_kind);
@@ -505,6 +584,7 @@ unsafe fn draw_card(
         );
 
         let account = account_metrics(state, locale);
+        let daily = daily_usage_metrics(history, navigation.summary_day, locale);
         match state.quota_availability() {
             QuotaAvailability::Single(kind) => {
                 draw_quota_panel(
@@ -520,7 +600,15 @@ unsafe fn draw_card(
                     theme,
                     dpi,
                 );
-                draw_stacked_metrics(hdc, locale, &account, theme, dpi);
+                draw_stacked_metrics(
+                    hdc,
+                    locale,
+                    &daily,
+                    navigation.summary_day,
+                    &account,
+                    theme,
+                    dpi,
+                );
             }
             QuotaAvailability::None | QuotaAvailability::Both => {
                 draw_quota_panel(
@@ -575,13 +663,152 @@ unsafe fn draw_card(
                     metrics,
                     divider,
                     divider_width,
-                    &account.plan,
+                    &daily.percent,
+                    &daily.tokens,
+                    navigation.summary_day,
                     &account.credits,
                     account.credit_detail.as_deref(),
                     theme,
                     dpi,
                 );
             }
+        }
+    }
+}
+
+unsafe fn draw_history_fallback(
+    hdc: HDC,
+    history: Option<&UsageHistoryView>,
+    navigation: &HistoryNavigation,
+    locale: Locale,
+    theme: Theme,
+    dpi: u32,
+    dimensions: FlyoutDimensions,
+) {
+    unsafe {
+        let width = scale(dimensions.width, dpi);
+        let height = scale(dimensions.height, dpi);
+        draw_text_bottom(
+            hdc,
+            locale,
+            locale.text("◀ Back", "◀ 返回"),
+            RECT {
+                left: scale(16, dpi),
+                top: scale(8, dpi),
+                right: scale(82, dpi),
+                bottom: scale(38, dpi),
+            },
+            scale(11, dpi),
+            FW_NORMAL.0 as i32,
+            theme.text,
+        );
+        let panel = RECT {
+            left: scale(16, dpi),
+            top: scale(40, dpi),
+            right: width - scale(16, dpi),
+            bottom: height - scale(42, dpi),
+        };
+        outlined_surface(hdc, panel, 10, theme.surface_alt, theme.line, dpi);
+        match navigation.page {
+            HistoryPage::Month => {
+                let title = match locale {
+                    Locale::Chinese => {
+                        format!("{}年{}月", navigation.month.year(), navigation.month.month())
+                    }
+                    Locale::English => navigation.month.format("%B %Y").to_string(),
+                };
+                draw_text_center(
+                    hdc,
+                    locale,
+                    &title,
+                    RECT {
+                        left: panel.left,
+                        top: panel.top + scale(6, dpi),
+                        right: panel.right,
+                        bottom: panel.top + scale(38, dpi),
+                    },
+                    scale(15, dpi),
+                    FW_SEMIBOLD.0 as i32,
+                    theme.text,
+                );
+                let message = if history.is_some_and(|value| !value.cycles.is_empty()) {
+                    locale.text(
+                        "Direct2D is unavailable; history remains recorded",
+                        "Direct2D 不可用，历史数据仍会正常记录",
+                    )
+                } else {
+                    locale.text("No history yet", "暂无历史数据")
+                };
+                draw_text_center(
+                    hdc,
+                    locale,
+                    message,
+                    RECT {
+                        left: panel.left + scale(16, dpi),
+                        top: panel.top + scale(54, dpi),
+                        right: panel.right - scale(16, dpi),
+                        bottom: panel.bottom - scale(20, dpi),
+                    },
+                    scale(11, dpi),
+                    FW_NORMAL.0 as i32,
+                    theme.muted,
+                );
+            }
+            HistoryPage::Cycle => {
+                let cycle = history.and_then(|view| {
+                    navigation.selected_cycle.and_then(|index| view.cycles.get(index)).or_else(
+                        || view.current_cycle_index().and_then(|index| view.cycles.get(index)),
+                    )
+                });
+                let title = cycle
+                    .map(|cycle| match locale {
+                        Locale::Chinese => format!(
+                            "{}月{}日 - {}月{}日",
+                            cycle.start_date.month(),
+                            cycle.start_date.day(),
+                            cycle.display_end_date.month(),
+                            cycle.display_end_date.day()
+                        ),
+                        Locale::English => format!(
+                            "{} - {}",
+                            cycle.start_date.format("%b %d"),
+                            cycle.display_end_date.format("%b %d")
+                        ),
+                    })
+                    .unwrap_or_else(|| locale.text("Daily usage", "单日消耗").to_owned());
+                draw_text_center(
+                    hdc,
+                    locale,
+                    &title,
+                    RECT {
+                        left: panel.left,
+                        top: panel.top + scale(6, dpi),
+                        right: panel.right,
+                        bottom: panel.top + scale(38, dpi),
+                    },
+                    scale(15, dpi),
+                    FW_SEMIBOLD.0 as i32,
+                    theme.text,
+                );
+                draw_text_center(
+                    hdc,
+                    locale,
+                    locale.text(
+                        "Direct2D is unavailable; history remains recorded",
+                        "Direct2D 不可用，历史数据仍会正常记录",
+                    ),
+                    RECT {
+                        left: panel.left + scale(16, dpi),
+                        top: panel.top + scale(54, dpi),
+                        right: panel.right - scale(16, dpi),
+                        bottom: panel.bottom - scale(20, dpi),
+                    },
+                    scale(11, dpi),
+                    FW_NORMAL.0 as i32,
+                    theme.muted,
+                );
+            }
+            HistoryPage::Main => {}
         }
     }
 }
@@ -785,6 +1012,8 @@ unsafe fn draw_centered_percentage(
 unsafe fn draw_stacked_metrics(
     hdc: HDC,
     locale: Locale,
+    daily: &DailyUsageMetrics,
+    selection: UsageSummaryDay,
     account: &AccountMetrics,
     theme: Theme,
     dpi: u32,
@@ -811,7 +1040,10 @@ unsafe fn draw_stacked_metrics(
         draw_text_center(
             hdc,
             locale,
-            locale.text("Plan", "套餐"),
+            match selection {
+                UsageSummaryDay::Yesterday => locale.text("Yesterday ▶", "昨日消耗 ▶"),
+                UsageSummaryDay::Today => locale.text("◀ Today", "◀ 今日消耗"),
+            },
             RECT {
                 left: metrics.left + scale(8, dpi),
                 top: scale(59, dpi),
@@ -825,7 +1057,7 @@ unsafe fn draw_stacked_metrics(
         draw_text_center(
             hdc,
             locale,
-            &account.plan,
+            &daily.percent,
             RECT {
                 left: metrics.left + scale(8, dpi),
                 top: scale(87, dpi),
@@ -835,6 +1067,20 @@ unsafe fn draw_stacked_metrics(
             scale(20, dpi),
             FW_SEMIBOLD.0 as i32,
             theme.text,
+        );
+        draw_text_center(
+            hdc,
+            locale,
+            &daily.tokens,
+            RECT {
+                left: metrics.left + scale(8, dpi),
+                top: scale(120, dpi),
+                right: metrics.right - scale(8, dpi),
+                bottom: scale(145, dpi),
+            },
+            scale(11, dpi),
+            FW_NORMAL.0 as i32,
+            theme.muted,
         );
         draw_text_center(
             hdc,
@@ -875,7 +1121,7 @@ unsafe fn draw_stacked_metrics(
                     right: metrics.right - scale(5, dpi),
                     bottom: scale(262, dpi),
                 },
-                scale(10, dpi),
+                scale(11, dpi),
                 FW_NORMAL.0 as i32,
                 theme.muted,
             );
@@ -890,7 +1136,9 @@ unsafe fn draw_bottom_metrics(
     metrics: RECT,
     divider: i32,
     divider_width: i32,
-    plan: &str,
+    daily_percent: &str,
+    daily_tokens: &str,
+    selection: UsageSummaryDay,
     credits: &str,
     credit_detail: Option<&str>,
     theme: Theme,
@@ -902,7 +1150,10 @@ unsafe fn draw_bottom_metrics(
         draw_text(
             hdc,
             locale,
-            locale.text("Plan", "套餐"),
+            match selection {
+                UsageSummaryDay::Yesterday => locale.text("Yesterday ▶", "昨日消耗 ▶"),
+                UsageSummaryDay::Today => locale.text("◀ Today", "◀ 今日消耗"),
+            },
             RECT {
                 left,
                 top: metrics.top + scale(3, dpi),
@@ -916,7 +1167,7 @@ unsafe fn draw_bottom_metrics(
         draw_text_bottom(
             hdc,
             locale,
-            plan,
+            daily_percent,
             RECT {
                 left,
                 top: metrics.top + scale(20, dpi),
@@ -926,6 +1177,22 @@ unsafe fn draw_bottom_metrics(
             scale(20, dpi),
             FW_SEMIBOLD.0 as i32,
             theme.text,
+        );
+        let percent_width =
+            measure_text_width(hdc, locale, daily_percent, scale(20, dpi), FW_SEMIBOLD.0 as i32);
+        draw_text_bottom(
+            hdc,
+            locale,
+            daily_tokens,
+            RECT {
+                left: (left + percent_width + scale(10, dpi)).min(divider - scale(50, dpi)),
+                top: metrics.top + scale(24, dpi),
+                right: divider - scale(10, dpi),
+                bottom: metrics.bottom - scale(7, dpi),
+            },
+            scale(11, dpi),
+            FW_NORMAL.0 as i32,
+            theme.muted,
         );
         draw_text(
             hdc,
@@ -1288,20 +1555,6 @@ fn quota_label(kind: QuotaKind, locale: Locale) -> &'static str {
     }
 }
 
-fn plan_label(plan: &str, locale: Locale) -> &str {
-    match plan.to_ascii_lowercase().as_str() {
-        "free" => locale.text("Free", "免费"),
-        "go" => "Go",
-        "plus" => "Plus",
-        "prolite" => "5x Pro",
-        "pro" => "Pro",
-        "team" => "Team",
-        "business" => "Business",
-        "enterprise" => "Enterprise",
-        _ => plan,
-    }
-}
-
 fn quota_bar_color(percent: Option<u8>, high_contrast: bool) -> COLORREF {
     if high_contrast {
         return rgb(255, 255, 255);
@@ -1547,7 +1800,9 @@ fn wide0(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history::DailyUsageRecord;
     use crate::model::{AccountSummary, QuotaSnapshot, QuotaWindow, SESSION_MINUTES, WEEK_MINUTES};
+    use chrono::NaiveDate;
 
     fn quota(remaining_percent: f64, window_minutes: u64) -> QuotaWindow {
         QuotaWindow {
@@ -1739,16 +1994,6 @@ mod tests {
     }
 
     #[test]
-    fn labels_supported_personal_plans() {
-        assert_eq!(plan_label("free", Locale::Chinese), "免费");
-        assert_eq!(plan_label("free", Locale::English), "Free");
-        assert_eq!(plan_label("go", Locale::Chinese), "Go");
-        assert_eq!(plan_label("plus", Locale::Chinese), "Plus");
-        assert_eq!(plan_label("prolite", Locale::Chinese), "5x Pro");
-        assert_eq!(plan_label("pro", Locale::Chinese), "Pro");
-    }
-
-    #[test]
     fn colors_quota_bar_at_requested_thresholds() {
         assert_eq!(quota_bar_color(Some(50), false), rgb(16, 163, 127));
         assert_eq!(quota_bar_color(Some(49), false), rgb(210, 134, 0));
@@ -1772,5 +2017,66 @@ mod tests {
         };
         assert_ne!(outer_track_color(theme, true), quota_bar_color(Some(50), true));
         assert_ne!(inner_track_color(theme), theoretical_color(theme));
+    }
+
+    #[test]
+    fn daily_summary_uses_the_selected_day_and_compact_units() {
+        let view = UsageHistoryView {
+            days: vec![
+                DailyUsageRecord {
+                    date: "2026-08-04".to_owned(),
+                    weekly_consumed_percent: 7.0,
+                    tokens: Some(120_000_000),
+                    quota_complete: true,
+                    token_complete: true,
+                },
+                DailyUsageRecord {
+                    date: "2026-08-05".to_owned(),
+                    weekly_consumed_percent: 2.25,
+                    tokens: Some(25_000),
+                    quota_complete: true,
+                    token_complete: true,
+                },
+            ],
+            cycles: Vec::new(),
+            today: NaiveDate::from_ymd_opt(2026, 8, 5).unwrap(),
+        };
+
+        let yesterday =
+            daily_usage_metrics(Some(&view), UsageSummaryDay::Yesterday, Locale::Chinese);
+        assert_eq!(yesterday.percent, "7%");
+        assert_eq!(yesterday.tokens, "1.2亿");
+        let today = daily_usage_metrics(Some(&view), UsageSummaryDay::Today, Locale::Chinese);
+        assert_eq!(today.percent, "2.2%");
+        assert_eq!(today.tokens, "2.5万");
+    }
+
+    #[test]
+    fn daily_summary_distinguishes_no_history_from_a_zero_day() {
+        let mut view = UsageHistoryView {
+            days: vec![DailyUsageRecord {
+                date: "2026-08-05".to_owned(),
+                weekly_consumed_percent: 0.0,
+                tokens: Some(0),
+                quota_complete: true,
+                token_complete: true,
+            }],
+            cycles: Vec::new(),
+            today: NaiveDate::from_ymd_opt(2026, 8, 5).unwrap(),
+        };
+        let missing = daily_usage_metrics(Some(&view), UsageSummaryDay::Yesterday, Locale::Chinese);
+        assert_eq!(missing.percent, "--");
+        assert_eq!(missing.tokens, "--");
+        let zero = daily_usage_metrics(Some(&view), UsageSummaryDay::Today, Locale::Chinese);
+        assert_eq!(zero.percent, "0%");
+        assert_eq!(zero.tokens, "0");
+        view.days[0].quota_complete = false;
+        view.days[0].token_complete = false;
+        let estimated = daily_usage_metrics(Some(&view), UsageSummaryDay::Today, Locale::Chinese);
+        assert_eq!(estimated.percent, "≈0%");
+        assert_eq!(estimated.tokens, "≈0");
+        let unavailable = daily_usage_metrics(None, UsageSummaryDay::Yesterday, Locale::Chinese);
+        assert_eq!(unavailable.percent, "--");
+        assert_eq!(unavailable.tokens, "--");
     }
 }
