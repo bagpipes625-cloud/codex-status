@@ -279,6 +279,7 @@ struct AppState {
     pressed_quota: Option<QuotaKind>,
     pressed_history: Option<ui::HistoryHit>,
     hovered_history_cycle: Option<usize>,
+    hovered_history_values: bool,
     refresh_button_pressed: bool,
 }
 
@@ -403,6 +404,7 @@ pub fn run() -> Result<(), AppError> {
         pressed_quota: None,
         pressed_history: None,
         hovered_history_cycle: None,
+        hovered_history_values: false,
         refresh_button_pressed: false,
     });
     let raw = Box::into_raw(state);
@@ -559,6 +561,7 @@ unsafe extern "system" fn main_window_proc(
                                 refresh_feedback: false,
                                 refresh_rotation_degrees: 0.0,
                                 hovered_cycle: None,
+                                hovered_history_values: false,
                             },
                         },
                     );
@@ -653,6 +656,7 @@ unsafe extern "system" fn flyout_window_proc(
                             refresh_feedback: state.refresh_feedback,
                             refresh_rotation_degrees: state.refresh_rotation_degrees(),
                             hovered_cycle: state.hovered_history_cycle,
+                            hovered_history_values: state.hovered_history_values,
                         },
                     },
                 );
@@ -764,8 +768,23 @@ unsafe extern "system" fn flyout_window_proc(
                     dpi,
                     state.full_history_render,
                 );
-                if hovered != state.hovered_history_cycle {
+                let hovered_history_values = matches!(
+                    ui::history_hit_test(
+                        &state.history_navigation,
+                        history,
+                        compact,
+                        x,
+                        y,
+                        dpi,
+                        state.full_history_render,
+                    ),
+                    Some(ui::HistoryHit::OpenHistory)
+                );
+                if hovered != state.hovered_history_cycle
+                    || hovered_history_values != state.hovered_history_values
+                {
                     state.hovered_history_cycle = hovered;
+                    state.hovered_history_values = hovered_history_values;
                     let _ = InvalidateRect(Some(hwnd), None, false);
                 }
                 return LRESULT(0);
@@ -1413,6 +1432,7 @@ impl AppState {
         self.pressed_quota = None;
         self.pressed_history = None;
         self.hovered_history_cycle = None;
+        self.hovered_history_values = false;
         self.history_navigation.page = ui::HistoryPage::Main;
         self.history_navigation.selected_cycle = None;
         self.refresh_button_pressed = false;

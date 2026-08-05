@@ -67,6 +67,7 @@ pub struct CardInteraction {
     pub refresh_feedback: bool,
     pub refresh_rotation_degrees: f32,
     pub hovered_cycle: Option<usize>,
+    pub hovered_history_values: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -120,6 +121,7 @@ struct AccountMetrics {
 struct DailyUsageMetrics {
     percent: String,
     tokens: String,
+    selection: UsageSummaryDay,
 }
 
 fn daily_usage_metrics(
@@ -128,14 +130,14 @@ fn daily_usage_metrics(
     locale: Locale,
 ) -> DailyUsageMetrics {
     let Some(history) = history else {
-        return DailyUsageMetrics { percent: "--".to_owned(), tokens: "--".to_owned() };
+        return DailyUsageMetrics { percent: "--".to_owned(), tokens: "--".to_owned(), selection };
     };
     let date = match selection {
         UsageSummaryDay::Yesterday => history.today - chrono::Duration::days(1),
         UsageSummaryDay::Today => history.today,
     };
     let Some(day) = history.day(date) else {
-        return DailyUsageMetrics { percent: "--".to_owned(), tokens: "--".to_owned() };
+        return DailyUsageMetrics { percent: "--".to_owned(), tokens: "--".to_owned(), selection };
     };
     DailyUsageMetrics {
         percent: estimated_text(format_percent(day.weekly_consumed_percent), !day.quota_complete),
@@ -144,6 +146,7 @@ fn daily_usage_metrics(
             .map(|value| format_tokens(value, locale))
             .map(|value| estimated_text(value, !day.token_complete))
             .unwrap_or_else(|| "--".to_owned()),
+        selection,
     }
 }
 
@@ -604,10 +607,10 @@ unsafe fn draw_card(
                     hdc,
                     locale,
                     &daily,
-                    navigation.summary_day,
                     &account,
                     theme,
                     dpi,
+                    interaction.hovered_history_values,
                 );
             }
             QuotaAvailability::None | QuotaAvailability::Both => {
@@ -670,6 +673,7 @@ unsafe fn draw_card(
                     account.credit_detail.as_deref(),
                     theme,
                     dpi,
+                    interaction.hovered_history_values,
                 );
             }
         }
@@ -1013,10 +1017,10 @@ unsafe fn draw_stacked_metrics(
     hdc: HDC,
     locale: Locale,
     daily: &DailyUsageMetrics,
-    selection: UsageSummaryDay,
     account: &AccountMetrics,
     theme: Theme,
     dpi: u32,
+    hovered_history_values: bool,
 ) {
     unsafe {
         let metrics = RECT {
@@ -1040,7 +1044,7 @@ unsafe fn draw_stacked_metrics(
         draw_text_center(
             hdc,
             locale,
-            match selection {
+            match daily.selection {
                 UsageSummaryDay::Yesterday => locale.text("Yesterday ▶", "昨日消耗 ▶"),
                 UsageSummaryDay::Today => locale.text("◀ Today", "◀ 今日消耗"),
             },
@@ -1066,7 +1070,7 @@ unsafe fn draw_stacked_metrics(
             },
             scale(20, dpi),
             FW_SEMIBOLD.0 as i32,
-            theme.text,
+            interactive_text_color(theme, hovered_history_values, false),
         );
         draw_text_center(
             hdc,
@@ -1080,7 +1084,7 @@ unsafe fn draw_stacked_metrics(
             },
             scale(11, dpi),
             FW_NORMAL.0 as i32,
-            theme.muted,
+            interactive_text_color(theme, hovered_history_values, true),
         );
         draw_text_center(
             hdc,
@@ -1143,6 +1147,7 @@ unsafe fn draw_bottom_metrics(
     credit_detail: Option<&str>,
     theme: Theme,
     dpi: u32,
+    hovered_history_values: bool,
 ) {
     unsafe {
         let left = metrics.left + scale(14, dpi);
@@ -1176,7 +1181,7 @@ unsafe fn draw_bottom_metrics(
             },
             scale(20, dpi),
             FW_SEMIBOLD.0 as i32,
-            theme.text,
+            interactive_text_color(theme, hovered_history_values, false),
         );
         let percent_width =
             measure_text_width(hdc, locale, daily_percent, scale(20, dpi), FW_SEMIBOLD.0 as i32);
@@ -1192,7 +1197,7 @@ unsafe fn draw_bottom_metrics(
             },
             scale(11, dpi),
             FW_NORMAL.0 as i32,
-            theme.muted,
+            interactive_text_color(theme, hovered_history_values, true),
         );
         draw_text(
             hdc,
@@ -1565,6 +1570,13 @@ fn quota_bar_color(percent: Option<u8>, high_contrast: bool) -> COLORREF {
         Some(_) => rgb(211, 64, 73),
         None => rgb(104, 109, 118),
     }
+}
+
+fn interactive_text_color(theme: Theme, hovered: bool, secondary: bool) -> COLORREF {
+    if !hovered || theme.high_contrast {
+        return if secondary { theme.muted } else { theme.text };
+    }
+    if theme.dark { rgb(112, 194, 175) } else { rgb(18, 126, 103) }
 }
 
 fn accent_for(state: &DisplayState, percent: Option<u8>, high_contrast: bool) -> COLORREF {
@@ -2000,6 +2012,31 @@ mod tests {
         assert_eq!(quota_bar_color(Some(20), false), rgb(210, 134, 0));
         assert_eq!(quota_bar_color(Some(19), false), rgb(211, 64, 73));
         assert_eq!(quota_bar_color(Some(0), false), rgb(211, 64, 73));
+    }
+
+    #[test]
+    fn history_values_gain_subtle_hover_feedback_without_overriding_high_contrast() {
+        for dark in [false, true] {
+            let theme = Theme {
+                dark,
+                tray_dark: dark,
+                high_contrast: false,
+                background: rgb(240, 240, 240),
+                surface: rgb(255, 255, 255),
+                surface_alt: rgb(248, 248, 248),
+                text: rgb(24, 24, 24),
+                muted: rgb(96, 96, 96),
+                line: rgb(220, 220, 220),
+            };
+            assert_eq!(interactive_text_color(theme, false, false), theme.text);
+            assert_eq!(interactive_text_color(theme, false, true), theme.muted);
+            assert_ne!(interactive_text_color(theme, true, false), theme.text);
+            assert_ne!(interactive_text_color(theme, true, true), theme.muted);
+
+            let high_contrast = Theme { high_contrast: true, ..theme };
+            assert_eq!(interactive_text_color(high_contrast, true, false), theme.text);
+            assert_eq!(interactive_text_color(high_contrast, true, true), theme.muted);
+        }
     }
 
     #[test]

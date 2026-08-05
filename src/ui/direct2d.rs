@@ -12,9 +12,9 @@ use super::{
     REFRESH_ARC_START_DEGREES, REFRESH_ARC_SWEEP_DEGREES, REFRESH_BUTTON_GAP,
     REFRESH_BUTTON_RADIUS, REFRESH_BUTTON_RIGHT, Theme, UsageSummaryDay, accent_for,
     account_metrics, daily_usage_metrics, estimated_text, flyout_dimensions, format_percent,
-    format_tokens, inner_track_color, outer_track_color, quota_bar_color, quota_card_colors,
-    quota_label, quota_panel_geometry, refresh_icon_color, reset_details, theoretical_color,
-    theoretical_remaining_percent, updated_text, version_text,
+    format_tokens, inner_track_color, interactive_text_color, outer_track_color, quota_bar_color,
+    quota_card_colors, quota_label, quota_panel_geometry, refresh_icon_color, reset_details,
+    theoretical_color, theoretical_remaining_percent, updated_text, version_text,
 };
 use crate::history::UsageHistoryView;
 use crate::model::{DisplayState, QuotaAvailability, QuotaKind, QuotaWindow};
@@ -293,6 +293,7 @@ struct Palette {
     background: COLORREF,
     text: COLORREF,
     muted: COLORREF,
+    interactive: COLORREF,
     refresh_icon: COLORREF,
     line: COLORREF,
     metrics_surface: COLORREF,
@@ -335,6 +336,7 @@ impl Palette {
             background: input.theme.background,
             text: input.theme.text,
             muted: input.theme.muted,
+            interactive: interactive_text_color(input.theme, true, false),
             refresh_icon: refresh_icon_color(input.theme),
             line: input.theme.line,
             metrics_surface: input.theme.surface_alt,
@@ -369,6 +371,7 @@ struct Brushes {
     background: ID2D1SolidColorBrush,
     text: ID2D1SolidColorBrush,
     muted: ID2D1SolidColorBrush,
+    interactive: ID2D1SolidColorBrush,
     refresh_icon: ID2D1SolidColorBrush,
     line: ID2D1SolidColorBrush,
     metrics_surface: ID2D1SolidColorBrush,
@@ -414,6 +417,7 @@ impl Brushes {
             background: brush(target, palette.background)?,
             text: brush(target, palette.text)?,
             muted: brush(target, palette.muted)?,
+            interactive: brush(target, palette.interactive)?,
             refresh_icon: brush(target, palette.refresh_icon)?,
             line: brush(target, palette.line)?,
             metrics_surface: brush(target, palette.metrics_surface)?,
@@ -1512,6 +1516,13 @@ fn draw_stacked_metrics(
         );
     }
     let daily = daily_usage_metrics(input.history, input.navigation.summary_day, input.locale);
+    let value_brush =
+        if input.interaction.hovered_history_values { &brushes.interactive } else { &brushes.text };
+    let detail_brush = if input.interaction.hovered_history_values {
+        &brushes.interactive
+    } else {
+        &brushes.muted
+    };
     draw_usage_heading(
         target,
         factory,
@@ -1526,14 +1537,14 @@ fn draw_stacked_metrics(
         &daily.percent,
         rect(197.0, 86.0, 315.0, 124.0),
         &formats.stacked_value,
-        &brushes.text,
+        value_brush,
     );
     draw_text(
         target,
         &daily.tokens,
         rect(197.0, 120.0, 315.0, 145.0),
         &formats.stacked_detail,
-        &brushes.muted,
+        detail_brush,
     );
     draw_text(
         target,
@@ -1585,6 +1596,13 @@ fn draw_bottom_metrics(
         );
     }
     let daily = daily_usage_metrics(input.history, input.navigation.summary_day, input.locale);
+    let value_brush =
+        if input.interaction.hovered_history_values { &brushes.interactive } else { &brushes.text };
+    let detail_brush = if input.interaction.hovered_history_values {
+        &brushes.interactive
+    } else {
+        &brushes.muted
+    };
     draw_usage_heading(
         target,
         factory,
@@ -1599,7 +1617,7 @@ fn draw_bottom_metrics(
         &daily.percent,
         rect(30.0, 298.0, 178.0, 334.0),
         &formats.metric_value,
-        &brushes.text,
+        value_brush,
     );
     let percent_width = measure_text(dwrite, &daily.percent, &formats.metric_value)
         .map(|metrics| metrics.widthIncludingTrailingWhitespace)
@@ -1609,7 +1627,7 @@ fn draw_bottom_metrics(
         &daily.tokens,
         rect((30.0 + percent_width + 10.0).min(128.0), 303.0, 178.0, 335.0),
         &formats.detail,
-        &brushes.muted,
+        detail_brush,
     );
     draw_text(
         target,
