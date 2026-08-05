@@ -68,6 +68,20 @@ pub struct QuotaSnapshot {
     pub fetched_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyTokenUsage {
+    pub start_date: String,
+    pub tokens: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUsageSnapshot {
+    pub lifetime_tokens: Option<u64>,
+    pub daily_buckets: Vec<DailyTokenUsage>,
+}
+
 impl QuotaSnapshot {
     pub fn is_cache_valid(&self, now: i64) -> bool {
         [self.weekly.as_ref(), self.session.as_ref()]
@@ -228,6 +242,27 @@ pub fn parse_snapshot(
     })
 }
 
+pub fn parse_token_usage(value: &Value) -> TokenUsageSnapshot {
+    let lifetime_tokens = value.pointer("/summary/lifetimeTokens").and_then(Value::as_u64);
+    let daily_buckets = value
+        .get("dailyUsageBuckets")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|bucket| {
+            let start_date = bucket.get("startDate")?.as_str()?;
+            let tokens = bucket.get("tokens")?.as_u64()?;
+            is_iso_date(start_date)
+                .then(|| DailyTokenUsage { start_date: start_date.to_owned(), tokens })
+        })
+        .collect();
+    TokenUsageSnapshot { lifetime_tokens, daily_buckets }
+}
+
+fn is_iso_date(value: &str) -> bool {
+    chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok()
+}
+
 fn select_codex_bucket(rate_result: &Value) -> Option<&Value> {
     if let Some(map) = rate_result.get("rateLimitsByLimitId").and_then(Value::as_object) {
         if let Some(bucket) = map.get("codex") {
@@ -264,6 +299,24 @@ mod tests {
 
     fn account() -> Value {
         json!({"account": {"type": "chatgpt", "planType": "plus"}})
+    }
+
+    #[test]
+    fn parses_token_usage_and_ignores_malformed_daily_buckets() {
+        let usage = parse_token_usage(&json!({
+            "summary": {"lifetimeTokens": 1_234_567},
+            "dailyUsageBuckets": [
+                {"startDate": "2026-08-05", "tokens": 12_345},
+                {"startDate": "not-a-date", "tokens": 7},
+                {"startDate": "2026-08-04", "tokens": -1}
+            ]
+        }));
+
+        assert_eq!(usage.lifetime_tokens, Some(1_234_567));
+        assert_eq!(
+            usage.daily_buckets,
+            vec![DailyTokenUsage { start_date: "2026-08-05".to_owned(), tokens: 12_345 }]
+        );
     }
 
     #[test]

@@ -25,6 +25,12 @@ fn main() {
                 now + 4 * 24 * 60 * 60 + 7 * 60 * 60
             )
             .unwrap();
+        } else if line.contains("\"id\":3") {
+            writeln!(
+                stdout,
+                r#"{{"id":3,"result":{{"summary":{{"lifetimeTokens":1234567}},"dailyUsageBuckets":[]}}}}"#
+            )
+            .unwrap();
         }
         stdout.flush().unwrap();
     }

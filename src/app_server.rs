@@ -1,6 +1,9 @@
-use crate::model::{ParseError, QuotaSnapshot, parse_snapshot};
+use crate::model::{
+    ParseError, QuotaSnapshot, TokenUsageSnapshot, parse_snapshot, parse_token_usage,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -65,12 +68,19 @@ pub struct AppServerClient {
     commands: Result<Vec<CommandSpec>, String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct AppServerSnapshot {
+    pub quota: QuotaSnapshot,
+    pub token_usage: Option<TokenUsageSnapshot>,
+    pub account_key: Option<String>,
+}
+
 impl AppServerClient {
     pub fn new() -> Self {
         Self { commands: resolve_commands().map_err(|error| error.to_string()) }
     }
 
-    pub fn fetch(&self) -> Result<QuotaSnapshot, AppServerError> {
+    pub fn fetch(&self) -> Result<AppServerSnapshot, AppServerError> {
         let commands = self.commands.as_ref().map_err(|message| {
             if message.contains("Node.js") {
                 AppServerError::NodeNotFound
@@ -104,7 +114,7 @@ impl Default for AppServerClient {
     }
 }
 
-fn fetch_with_command(command: &CommandSpec) -> Result<QuotaSnapshot, AppServerError> {
+fn fetch_with_command(command: &CommandSpec) -> Result<AppServerSnapshot, AppServerError> {
     let (mut child, suspended_thread) = spawn_suspended(command)?;
     let job = match JobGuard::assign(&child) {
         Ok(job) => job,
@@ -159,15 +169,21 @@ fn fetch_with_command(command: &CommandSpec) -> Result<QuotaSnapshot, AppServerE
             &json!({"method": "account/read", "id": 1, "params": {"refreshToken": false}}),
         )?;
         write_json(&mut stdin, &json!({"method": "account/rateLimits/read", "id": 2}))?;
+        write_json(&mut stdin, &json!({"method": "account/usage/read", "id": 3}))?;
 
-        let responses = receive_many(&receiver, &[1, 2], REQUEST_TIMEOUT)?;
+        let responses = receive_many(&receiver, &[1, 2, 3], REQUEST_TIMEOUT)?;
         let account =
             response_result(responses.get(&1).ok_or(AppServerError::Closed)?, "account/read")?;
         let limits = response_result(
             responses.get(&2).ok_or(AppServerError::Closed)?,
             "account/rateLimits/read",
         )?;
-        parse_snapshot(account, limits, chrono::Utc::now().timestamp()).map_err(Into::into)
+        let quota = parse_snapshot(account, limits, chrono::Utc::now().timestamp())?;
+        let token_usage = responses
+            .get(&3)
+            .and_then(|response| response_result(response, "account/usage/read").ok())
+            .map(parse_token_usage);
+        Ok(AppServerSnapshot { quota, token_usage, account_key: account_key(account) })
     })();
 
     drop(stdin);
@@ -291,6 +307,22 @@ fn sanitize(value: &str) -> String {
         .collect()
 }
 
+fn account_key(account_result: &Value) -> Option<String> {
+    let account = account_result.get("account")?;
+    let identity = account
+        .get("email")
+        .and_then(Value::as_str)
+        .or_else(|| account.get("id").and_then(Value::as_str))?
+        .trim()
+        .to_lowercase();
+    if identity.is_empty() {
+        return None;
+    }
+    let account_type = account.get("type").and_then(Value::as_str).unwrap_or("unknown");
+    let digest = Sha256::digest(format!("{account_type}\0{identity}").as_bytes());
+    Some(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 fn read_capped(mut reader: impl Read, limit: usize) -> String {
     let mut bytes = Vec::with_capacity(limit);
     let mut buffer = [0_u8; 1024];
@@ -308,7 +340,7 @@ fn forward_bounded_lines(mut reader: impl Read, sender: mpsc::Sender<String>) {
     let mut chunk = [0_u8; 4096];
     let mut line = Vec::with_capacity(4096);
     let mut overflow = false;
-    let mut forwarded = [false; 3];
+    let mut forwarded = [false; 4];
     while let Ok(read) = reader.read(&mut chunk) {
         if read == 0 {
             break;
@@ -358,7 +390,7 @@ fn expected_response_id(line: &str) -> Option<usize> {
         return None;
     }
     let id = object.get("id")?.as_u64()?;
-    usize::try_from(id).ok().filter(|id| *id < 3)
+    usize::try_from(id).ok().filter(|id| *id < 4)
 }
 
 #[derive(Debug, Deserialize)]
@@ -606,6 +638,16 @@ mod tests {
     }
 
     #[test]
+    fn account_keys_are_stable_case_insensitive_and_do_not_expose_email() {
+        let first = json!({"account": {"type": "chatgpt", "email": "User@Example.com"}});
+        let second = json!({"account": {"type": "chatgpt", "email": "user@example.com"}});
+        let key = account_key(&first).unwrap();
+        assert_eq!(Some(key.as_str()), account_key(&second).as_deref());
+        assert_eq!(key.len(), 64);
+        assert!(!key.contains("example"));
+    }
+
+    #[test]
     fn puts_inaccessible_store_candidates_after_npm() {
         let directory = root("path with spaces");
         let npm = directory.join("npm");
@@ -671,13 +713,18 @@ mod tests {
             b"\n{\"id\":1,\"method\":\"server/request\"}\n\
               {\"id\":1,\"result\":{\"first\":true}}\r\n\
               {\"id\":1,\"result\":{\"duplicate\":true}}\n\
-              {\"id\":2,\"result\":{}}\n",
+              {\"id\":2,\"result\":{}}\n\
+              {\"id\":3,\"result\":{}}\n",
         );
         let (sender, receiver) = mpsc::channel();
         forward_bounded_lines(std::io::Cursor::new(source), sender);
         assert_eq!(
             receiver.into_iter().collect::<Vec<_>>(),
-            vec![r#"{"id":1,"result":{"first":true}}"#, r#"{"id":2,"result":{}}"#]
+            vec![
+                r#"{"id":1,"result":{"first":true}}"#,
+                r#"{"id":2,"result":{}}"#,
+                r#"{"id":3,"result":{}}"#,
+            ]
         );
     }
 }

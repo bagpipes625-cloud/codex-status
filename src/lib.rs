@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod app_server;
+pub mod history;
 mod icon;
 pub mod model;
 pub mod settings;

@@ -1,3 +1,4 @@
+use crate::history::UsageLedger;
 use crate::model::{QuotaKind, QuotaSnapshot};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -97,6 +98,14 @@ impl AppStore {
 
     pub fn save_snapshot(&self, snapshot: &QuotaSnapshot) -> io::Result<()> {
         write_json_atomic(&self.directory.join("snapshot.json"), snapshot)
+    }
+
+    pub fn load_usage_history(&self) -> UsageLedger {
+        read_json(&self.directory.join("usage-history.json")).unwrap_or_default()
+    }
+
+    pub fn save_usage_history(&self, history: &UsageLedger) -> io::Result<()> {
+        write_json_atomic(&self.directory.join("usage-history.json"), history)
     }
 
     pub fn updates_directory(&self) -> PathBuf {
@@ -215,6 +224,17 @@ mod tests {
             Settings { refresh_minutes: 15, alert_threshold: Some(20), ..Settings::default() };
         store.save_settings(&settings).unwrap();
         assert_eq!(store.load_settings(), settings);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn round_trips_usage_history_atomically() {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let directory = std::env::temp_dir().join(format!("codex-status-history-{suffix}"));
+        let store = AppStore::at(directory.clone());
+        let history = UsageLedger::default();
+        store.save_usage_history(&history).unwrap();
+        assert_eq!(store.load_usage_history(), history);
         fs::remove_dir_all(directory).unwrap();
     }
 

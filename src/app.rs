@@ -1,6 +1,9 @@
-use crate::app_server::AppServerClient;
+use crate::app_server::{AppServerClient, AppServerSnapshot};
+use crate::history::UsageLedger;
 use crate::icon::{OwnedIcon, create_icon, tone_for};
-use crate::model::{DisplayState, QuotaAvailability, QuotaKind, QuotaSnapshot, RefreshState};
+#[cfg(test)]
+use crate::model::QuotaSnapshot;
+use crate::model::{DisplayState, QuotaAvailability, QuotaKind, RefreshState};
 use crate::settings::{AppStore, Settings};
 use crate::{startup, ui, updater};
 use chrono::Utc;
@@ -179,7 +182,7 @@ impl Drop for MenuHandle {
 }
 
 struct RefreshOutcome {
-    result: Result<QuotaSnapshot, String>,
+    result: Result<AppServerSnapshot, String>,
 }
 
 struct UpdateOutcome {
@@ -245,6 +248,7 @@ struct AppState {
     flyout: HWND,
     taskbar_created: u32,
     store: AppStore,
+    usage_history: UsageLedger,
     settings: Settings,
     locale: ui::Locale,
     theme: ui::Theme,
@@ -343,6 +347,7 @@ pub fn run() -> Result<(), AppError> {
 
     let store = AppStore::discover();
     let settings = store.load_settings();
+    let usage_history = store.load_usage_history();
     let locale = ui::Locale::detect(&settings.locale);
     let theme = ui::detect_theme(&settings.theme);
     let now = Utc::now().timestamp();
@@ -356,6 +361,7 @@ pub fn run() -> Result<(), AppError> {
         flyout,
         taskbar_created,
         store,
+        usage_history,
         settings,
         locale,
         theme,
@@ -833,8 +839,14 @@ impl AppState {
         match outcome.result {
             Ok(snapshot) => {
                 self.failures = 0;
-                let _ = self.store.save_snapshot(&snapshot);
-                self.display = DisplayState::live(snapshot);
+                self.usage_history.record_refresh(
+                    snapshot.account_key.as_deref(),
+                    &snapshot.quota,
+                    snapshot.token_usage.as_ref(),
+                );
+                let _ = self.store.save_usage_history(&self.usage_history);
+                let _ = self.store.save_snapshot(&snapshot.quota);
+                self.display = DisplayState::live(snapshot.quota);
                 self.reset_refresh_timer(self.settings.refresh_minutes.saturating_mul(60_000));
                 self.maybe_alert();
             }
