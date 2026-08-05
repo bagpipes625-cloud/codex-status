@@ -30,7 +30,7 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::Ime::ImmDisableIME;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_ESCAPE};
-#[cfg(not(codex_status_channel = "portable"))]
+#[cfg(any(codex_status_channel = "stable", codex_status_channel = "beta"))]
 use windows::Win32::UI::Shell::NIF_GUID;
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIIF_RESPECT_QUIET_TIME,
@@ -52,7 +52,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_OVERLAPPED, WS_POPUP,
 };
-#[cfg(not(codex_status_channel = "portable"))]
+#[cfg(any(codex_status_channel = "stable", codex_status_channel = "beta"))]
 use windows::core::GUID;
 use windows::core::{PCWSTR, w};
 
@@ -89,9 +89,7 @@ const FLYOUT_CLASS: PCWSTR = w!("CodexStatus.Development.FlyoutWindow.v1");
 const MUTEX_NAME: PCWSTR =
     w!("Local\\CodexStatus.Development.3E70297E-FB9B-4F98-AF42-DE19BD4824EC");
 #[cfg(codex_status_channel = "development")]
-const TRAY_GUID: GUID = GUID::from_u128(0x3e70297e_fb9b_4f98_af42_de19bd4824ec);
-#[cfg(codex_status_channel = "development")]
-const TRAY_IDENTITY_TEXT: &str = "GUID 3e70297e-fb9b-4f98-af42-de19bd4824ec";
+const TRAY_IDENTITY_TEXT: &str = "HWND + uID 1";
 
 #[cfg(codex_status_channel = "portable")]
 const MAIN_CLASS: PCWSTR = w!("CodexStatus.Portable.MainWindow.v1");
@@ -1282,7 +1280,7 @@ impl AppState {
     }
 
     fn notify_data(&self) -> NOTIFYICONDATAW {
-        #[cfg(codex_status_channel = "portable")]
+        #[cfg(any(codex_status_channel = "portable", codex_status_channel = "development"))]
         {
             NOTIFYICONDATAW {
                 cbSize: size_of::<NOTIFYICONDATAW>() as u32,
@@ -1291,7 +1289,7 @@ impl AppState {
                 ..Default::default()
             }
         }
-        #[cfg(not(codex_status_channel = "portable"))]
+        #[cfg(any(codex_status_channel = "stable", codex_status_channel = "beta"))]
         {
             NOTIFYICONDATAW {
                 cbSize: size_of::<NOTIFYICONDATAW>() as u32,
@@ -1544,14 +1542,14 @@ impl AppState {
     }
 
     fn tray_rect(&self) -> Option<RECT> {
-        #[cfg(codex_status_channel = "portable")]
+        #[cfg(any(codex_status_channel = "portable", codex_status_channel = "development"))]
         let identifier = NOTIFYICONIDENTIFIER {
             cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
             hWnd: self.hwnd,
             uID: TRAY_ID,
             ..Default::default()
         };
-        #[cfg(not(codex_status_channel = "portable"))]
+        #[cfg(any(codex_status_channel = "stable", codex_status_channel = "beta"))]
         let identifier = NOTIFYICONIDENTIFIER {
             cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
             hWnd: self.hwnd,
