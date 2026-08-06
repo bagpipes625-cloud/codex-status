@@ -33,8 +33,8 @@ mod direct2d;
 mod history_view;
 
 pub use history_view::{
-    HistoryHit, HistoryNavigation, HistoryPage, HoveredCycle, UsageSummaryDay,
-    hit_test as history_hit_test, hovered_cycle,
+    HistoryHit, HistoryNavigation, HistoryPage, HoveredHistoryDay, UsageSummaryWeek,
+    hit_test as history_hit_test, hovered_day as hovered_history_day,
 };
 
 pub const CARD_WIDTH: i32 = 376;
@@ -66,7 +66,7 @@ pub struct CardInteraction {
     pub pressed_quota: Option<QuotaKind>,
     pub refresh_feedback: bool,
     pub refresh_rotation_degrees: f32,
-    pub hovered_cycle: Option<HoveredCycle>,
+    pub hovered_day: Option<HoveredHistoryDay>,
     pub hovered_history_values: bool,
 }
 
@@ -118,62 +118,46 @@ struct AccountMetrics {
     credit_detail: Option<String>,
 }
 
-struct DailyUsageMetrics {
-    percent: String,
+struct WeeklyUsageMetrics {
     tokens: String,
-    selection: UsageSummaryDay,
+    range: String,
+    selection: UsageSummaryWeek,
 }
 
-fn daily_usage_metrics(
+fn weekly_usage_metrics(
     history: Option<&UsageHistoryView>,
-    selection: UsageSummaryDay,
+    selection: UsageSummaryWeek,
     locale: Locale,
-) -> DailyUsageMetrics {
+) -> WeeklyUsageMetrics {
     let Some(history) = history else {
-        return DailyUsageMetrics { percent: "--".to_owned(), tokens: "--".to_owned(), selection };
+        return WeeklyUsageMetrics { tokens: "--".to_owned(), range: "--".to_owned(), selection };
     };
-    let date = match selection {
-        UsageSummaryDay::Yesterday => history.today - chrono::Duration::days(1),
-        UsageSummaryDay::Today => history.today,
+    let start = match selection {
+        UsageSummaryWeek::Previous => history.previous_week_start(),
+        UsageSummaryWeek::Current => history.current_week_start(),
     };
-    let Some(day) = history.day(date) else {
-        return DailyUsageMetrics { percent: "--".to_owned(), tokens: "--".to_owned(), selection };
+    let week = history.week(start);
+    let range = match locale {
+        Locale::Chinese => format!(
+            "{}月{}日-{}月{}日",
+            start.month(),
+            start.day(),
+            (start + chrono::Duration::days(6)).month(),
+            (start + chrono::Duration::days(6)).day()
+        ),
+        Locale::English => format!(
+            "{}-{}",
+            start.format("%b %-d"),
+            (start + chrono::Duration::days(6)).format("%b %-d")
+        ),
     };
-    DailyUsageMetrics {
-        percent: daily_quota_text(day.weekly_consumed_percent, day.quota_complete),
-        tokens: day
-            .tokens
-            .map(|value| historical_token_text(value, !day.token_complete, locale))
+    WeeklyUsageMetrics {
+        tokens: week
+            .filter(|week| week.has_data)
+            .map(|week| format_tokens(week.tokens, locale))
             .unwrap_or_else(|| "--".to_owned()),
+        range,
         selection,
-    }
-}
-
-fn estimated_text(value: String, estimated: bool) -> String {
-    if estimated { format!("≈{value}") } else { value }
-}
-
-fn daily_quota_text(value: f64, complete: bool) -> String {
-    if !complete && value.abs() < 0.05 { "--".to_owned() } else { format_percent(value) }
-}
-
-fn cycle_quota_text(value: f64, active: bool, complete: bool) -> String {
-    estimated_text(format_percent(value), !active && !complete)
-}
-
-fn historical_token_text(value: u64, estimated: bool, locale: Locale) -> String {
-    if estimated && value == 0 {
-        "--".to_owned()
-    } else {
-        estimated_text(format_tokens(value, locale), estimated)
-    }
-}
-
-fn format_percent(value: f64) -> String {
-    if (value - value.round()).abs() < 0.05 {
-        format!("{:.0}%", value)
-    } else {
-        format!("{value:.1}%")
     }
 }
 
@@ -188,7 +172,7 @@ fn format_tokens(value: u64, locale: Locale) -> String {
         Locale::English => return value.to_string(),
     };
     let scaled = value as f64 / divisor;
-    if (scaled - scaled.round()).abs() < 0.05 {
+    if scaled >= 100.0 || (scaled - scaled.round()).abs() < 0.05 {
         format!("{scaled:.0}{suffix}")
     } else {
         format!("{scaled:.1}{suffix}")
@@ -602,7 +586,7 @@ unsafe fn draw_card(
         );
 
         let account = account_metrics(state, locale);
-        let daily = daily_usage_metrics(history, navigation.summary_day, locale);
+        let weekly = weekly_usage_metrics(history, navigation.summary_week, locale);
         match state.quota_availability() {
             QuotaAvailability::Single(kind) => {
                 draw_quota_panel(
@@ -621,7 +605,7 @@ unsafe fn draw_card(
                 draw_stacked_metrics(
                     hdc,
                     locale,
-                    &daily,
+                    &weekly,
                     &account,
                     theme,
                     dpi,
@@ -681,9 +665,9 @@ unsafe fn draw_card(
                     metrics,
                     divider,
                     divider_width,
-                    &daily.percent,
-                    &daily.tokens,
-                    navigation.summary_day,
+                    &weekly.tokens,
+                    &weekly.range,
+                    navigation.summary_week,
                     &account.credits,
                     account.credit_detail.as_deref(),
                     theme,
@@ -750,7 +734,7 @@ unsafe fn draw_history_fallback(
                     FW_SEMIBOLD.0 as i32,
                     theme.text,
                 );
-                let message = if history.is_some_and(|value| !value.cycles.is_empty()) {
+                let message = if history.is_some_and(|value| !value.days.is_empty()) {
                     locale.text(
                         "Direct2D is unavailable; history remains recorded",
                         "Direct2D 不可用，历史数据仍会正常记录",
@@ -773,28 +757,21 @@ unsafe fn draw_history_fallback(
                     theme.muted,
                 );
             }
-            HistoryPage::Cycle => {
-                let cycle = history.and_then(|view| {
-                    navigation.selected_cycle.and_then(|index| view.cycles.get(index)).or_else(
-                        || view.current_cycle_index().and_then(|index| view.cycles.get(index)),
-                    )
-                });
-                let title = cycle
-                    .map(|cycle| match locale {
-                        Locale::Chinese => format!(
-                            "{}月{}日 - {}月{}日",
-                            cycle.start_date.month(),
-                            cycle.start_date.day(),
-                            cycle.display_end_date.month(),
-                            cycle.display_end_date.day()
-                        ),
-                        Locale::English => format!(
-                            "{} - {}",
-                            cycle.start_date.format("%b %d"),
-                            cycle.display_end_date.format("%b %d")
-                        ),
-                    })
-                    .unwrap_or_else(|| locale.text("Daily usage", "单日消耗").to_owned());
+            HistoryPage::Week => {
+                let start = navigation.selected_week;
+                let end = start + chrono::Duration::days(6);
+                let title = match locale {
+                    Locale::Chinese => format!(
+                        "{}月{}日 - {}月{}日",
+                        start.month(),
+                        start.day(),
+                        end.month(),
+                        end.day()
+                    ),
+                    Locale::English => {
+                        format!("{} - {}", start.format("%b %d"), end.format("%b %d"))
+                    }
+                };
                 draw_text_center(
                     hdc,
                     locale,
@@ -1031,7 +1008,7 @@ unsafe fn draw_centered_percentage(
 unsafe fn draw_stacked_metrics(
     hdc: HDC,
     locale: Locale,
-    daily: &DailyUsageMetrics,
+    weekly: &WeeklyUsageMetrics,
     account: &AccountMetrics,
     theme: Theme,
     dpi: u32,
@@ -1059,9 +1036,9 @@ unsafe fn draw_stacked_metrics(
         draw_text_center(
             hdc,
             locale,
-            match daily.selection {
-                UsageSummaryDay::Yesterday => locale.text("Yesterday ▶", "昨日消耗 ▶"),
-                UsageSummaryDay::Today => locale.text("◀ Today", "◀ 今日消耗"),
+            match weekly.selection {
+                UsageSummaryWeek::Previous => locale.text("Last week usage", "上周消耗"),
+                UsageSummaryWeek::Current => locale.text("This week usage", "本周消耗"),
             },
             RECT {
                 left: metrics.left + scale(8, dpi),
@@ -1076,7 +1053,29 @@ unsafe fn draw_stacked_metrics(
         draw_text_center(
             hdc,
             locale,
-            &daily.percent,
+            if weekly.selection == UsageSummaryWeek::Previous { "▶" } else { "◀" },
+            RECT {
+                left: if weekly.selection == UsageSummaryWeek::Previous {
+                    scale(280, dpi)
+                } else {
+                    scale(218, dpi)
+                },
+                top: scale(59, dpi),
+                right: if weekly.selection == UsageSummaryWeek::Previous {
+                    scale(296, dpi)
+                } else {
+                    scale(234, dpi)
+                },
+                bottom: scale(83, dpi),
+            },
+            scale(9, dpi),
+            FW_NORMAL.0 as i32,
+            theme.muted,
+        );
+        draw_text_center(
+            hdc,
+            locale,
+            &weekly.tokens,
             RECT {
                 left: metrics.left + scale(8, dpi),
                 top: scale(87, dpi),
@@ -1090,7 +1089,7 @@ unsafe fn draw_stacked_metrics(
         draw_text_center(
             hdc,
             locale,
-            &daily.tokens,
+            &weekly.range,
             RECT {
                 left: metrics.left + scale(8, dpi),
                 top: scale(120, dpi),
@@ -1155,9 +1154,9 @@ unsafe fn draw_bottom_metrics(
     metrics: RECT,
     divider: i32,
     divider_width: i32,
-    daily_percent: &str,
-    daily_tokens: &str,
-    selection: UsageSummaryDay,
+    weekly_tokens: &str,
+    weekly_range: &str,
+    selection: UsageSummaryWeek,
     credits: &str,
     credit_detail: Option<&str>,
     theme: Theme,
@@ -1167,12 +1166,12 @@ unsafe fn draw_bottom_metrics(
     unsafe {
         let left = metrics.left + scale(14, dpi);
         let right_left = divider + divider_width + scale(14, dpi);
-        draw_text(
+        draw_text_center(
             hdc,
             locale,
             match selection {
-                UsageSummaryDay::Yesterday => locale.text("Yesterday ▶", "昨日消耗 ▶"),
-                UsageSummaryDay::Today => locale.text("◀ Today", "◀ 今日消耗"),
+                UsageSummaryWeek::Previous => locale.text("Last week usage", "上周消耗"),
+                UsageSummaryWeek::Current => locale.text("This week usage", "本周消耗"),
             },
             RECT {
                 left,
@@ -1184,10 +1183,32 @@ unsafe fn draw_bottom_metrics(
             FW_NORMAL.0 as i32,
             theme.muted,
         );
+        draw_text_center(
+            hdc,
+            locale,
+            if selection == UsageSummaryWeek::Previous { "▶" } else { "◀" },
+            RECT {
+                left: if selection == UsageSummaryWeek::Previous {
+                    divider - scale(32, dpi)
+                } else {
+                    left
+                },
+                top: metrics.top + scale(3, dpi),
+                right: if selection == UsageSummaryWeek::Previous {
+                    divider - scale(14, dpi)
+                } else {
+                    left + scale(18, dpi)
+                },
+                bottom: metrics.top + scale(25, dpi),
+            },
+            scale(9, dpi),
+            FW_NORMAL.0 as i32,
+            theme.muted,
+        );
         draw_text_bottom(
             hdc,
             locale,
-            daily_percent,
+            weekly_tokens,
             RECT {
                 left,
                 top: metrics.top + scale(20, dpi),
@@ -1198,14 +1219,12 @@ unsafe fn draw_bottom_metrics(
             FW_SEMIBOLD.0 as i32,
             interactive_text_color(theme, hovered_history_values, false),
         );
-        let percent_width =
-            measure_text_width(hdc, locale, daily_percent, scale(20, dpi), FW_SEMIBOLD.0 as i32);
         draw_text_bottom(
             hdc,
             locale,
-            daily_tokens,
+            weekly_range,
             RECT {
-                left: (left + percent_width + scale(10, dpi)).min(divider - scale(50, dpi)),
+                left,
                 top: metrics.top + scale(24, dpi),
                 right: divider - scale(10, dpi),
                 bottom: metrics.bottom - scale(7, dpi),
@@ -2072,74 +2091,62 @@ mod tests {
     }
 
     #[test]
-    fn daily_summary_uses_the_selected_day_and_compact_units() {
+    fn weekly_summary_uses_natural_weeks_and_compact_units() {
         let view = UsageHistoryView {
             days: vec![
-                DailyUsageRecord {
-                    date: "2026-08-04".to_owned(),
-                    weekly_consumed_percent: 7.0,
-                    tokens: Some(120_000_000),
-                    quota_complete: true,
-                    token_complete: true,
+                DailyUsageRecord { date: "2026-07-27".to_owned(), tokens: 120_000_000 },
+                DailyUsageRecord { date: "2026-08-03".to_owned(), tokens: 25_000 },
+            ],
+            weeks: vec![
+                crate::history::NaturalWeekView {
+                    start_date: NaiveDate::from_ymd_opt(2026, 7, 27).unwrap(),
+                    end_date: NaiveDate::from_ymd_opt(2026, 8, 2).unwrap(),
+                    tokens: 120_000_000,
+                    has_data: true,
                 },
-                DailyUsageRecord {
-                    date: "2026-08-05".to_owned(),
-                    weekly_consumed_percent: 2.25,
-                    tokens: Some(25_000),
-                    quota_complete: true,
-                    token_complete: true,
+                crate::history::NaturalWeekView {
+                    start_date: NaiveDate::from_ymd_opt(2026, 8, 3).unwrap(),
+                    end_date: NaiveDate::from_ymd_opt(2026, 8, 9).unwrap(),
+                    tokens: 25_000,
+                    has_data: true,
                 },
             ],
-            cycles: Vec::new(),
             today: NaiveDate::from_ymd_opt(2026, 8, 5).unwrap(),
         };
 
-        let yesterday =
-            daily_usage_metrics(Some(&view), UsageSummaryDay::Yesterday, Locale::Chinese);
-        assert_eq!(yesterday.percent, "7%");
-        assert_eq!(yesterday.tokens, "1.2亿");
-        let today = daily_usage_metrics(Some(&view), UsageSummaryDay::Today, Locale::Chinese);
-        assert_eq!(today.percent, "2.2%");
-        assert_eq!(today.tokens, "2.5万");
+        let previous =
+            weekly_usage_metrics(Some(&view), UsageSummaryWeek::Previous, Locale::Chinese);
+        assert_eq!(previous.tokens, "1.2亿");
+        let current = weekly_usage_metrics(Some(&view), UsageSummaryWeek::Current, Locale::Chinese);
+        assert_eq!(current.tokens, "2.5万");
     }
 
     #[test]
-    fn daily_summary_distinguishes_no_history_from_a_zero_day() {
-        let mut view = UsageHistoryView {
-            days: vec![DailyUsageRecord {
-                date: "2026-08-05".to_owned(),
-                weekly_consumed_percent: 0.0,
-                tokens: Some(0),
-                quota_complete: true,
-                token_complete: true,
+    fn weekly_summary_distinguishes_missing_from_zero() {
+        let view = UsageHistoryView {
+            days: vec![DailyUsageRecord { date: "2026-08-05".to_owned(), tokens: 0 }],
+            weeks: vec![crate::history::NaturalWeekView {
+                start_date: NaiveDate::from_ymd_opt(2026, 8, 3).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2026, 8, 9).unwrap(),
+                tokens: 0,
+                has_data: true,
             }],
-            cycles: Vec::new(),
             today: NaiveDate::from_ymd_opt(2026, 8, 5).unwrap(),
         };
-        let missing = daily_usage_metrics(Some(&view), UsageSummaryDay::Yesterday, Locale::Chinese);
-        assert_eq!(missing.percent, "--");
+        let missing =
+            weekly_usage_metrics(Some(&view), UsageSummaryWeek::Previous, Locale::Chinese);
         assert_eq!(missing.tokens, "--");
-        let zero = daily_usage_metrics(Some(&view), UsageSummaryDay::Today, Locale::Chinese);
-        assert_eq!(zero.percent, "0%");
+        let zero = weekly_usage_metrics(Some(&view), UsageSummaryWeek::Current, Locale::Chinese);
         assert_eq!(zero.tokens, "0");
-        view.days[0].quota_complete = false;
-        view.days[0].token_complete = false;
-        let estimated = daily_usage_metrics(Some(&view), UsageSummaryDay::Today, Locale::Chinese);
-        assert_eq!(estimated.percent, "--");
-        assert_eq!(estimated.tokens, "--");
-        let unavailable = daily_usage_metrics(None, UsageSummaryDay::Yesterday, Locale::Chinese);
-        assert_eq!(unavailable.percent, "--");
+        let unavailable = weekly_usage_metrics(None, UsageSummaryWeek::Previous, Locale::Chinese);
         assert_eq!(unavailable.tokens, "--");
     }
 
     #[test]
-    fn data_quality_markers_distinguish_values_from_sampling_coverage() {
-        assert_eq!(daily_quota_text(31.0, false), "31%");
-        assert_eq!(daily_quota_text(0.0, false), "--");
-        assert_eq!(cycle_quota_text(31.0, true, false), "31%");
-        assert_eq!(cycle_quota_text(31.0, false, false), "≈31%");
-        assert_eq!(historical_token_text(0, true, Locale::Chinese), "--");
-        assert_eq!(historical_token_text(12_000_000, true, Locale::Chinese), "≈1200万");
-        assert_eq!(historical_token_text(12_000_000, false, Locale::Chinese), "1200万");
+    fn token_labels_keep_one_decimal_only_below_three_integer_digits() {
+        assert_eq!(format_tokens(340_000_000, Locale::Chinese), "3.4亿");
+        assert_eq!(format_tokens(1_230_000_000, Locale::Chinese), "12.3亿");
+        assert_eq!(format_tokens(78_983_000, Locale::Chinese), "7898万");
+        assert_eq!(format_tokens(120_000_000, Locale::Chinese), "1.2亿");
     }
 }

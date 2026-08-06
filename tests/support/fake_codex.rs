@@ -4,6 +4,8 @@
 use std::io::{self, BufRead, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::Local;
+
 fn main() {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
     let stdin = io::stdin();
@@ -26,9 +28,10 @@ fn main() {
             )
             .unwrap();
         } else if line.contains("\"id\":3") {
+            let today = Local::now().format("%Y-%m-%d");
             writeln!(
                 stdout,
-                r#"{{"id":3,"result":{{"summary":{{"lifetimeTokens":1234567}},"dailyUsageBuckets":[]}}}}"#
+                r#"{{"id":3,"result":{{"dailyUsageBuckets":[{{"startDate":"{today}","tokens":1234567}}]}}}}"#
             )
             .unwrap();
         }

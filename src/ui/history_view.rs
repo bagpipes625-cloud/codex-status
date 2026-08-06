@@ -1,17 +1,17 @@
-use crate::history::UsageHistoryView;
-use chrono::{Datelike, Local, NaiveDate};
+use crate::history::{UsageHistoryView, monday_of};
+use chrono::{Datelike, Duration, Local, NaiveDate};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UsageSummaryDay {
-    Yesterday,
-    Today,
+pub enum UsageSummaryWeek {
+    Previous,
+    Current,
 }
 
-impl UsageSummaryDay {
+impl UsageSummaryWeek {
     pub fn toggle(self) -> Self {
         match self {
-            Self::Yesterday => Self::Today,
-            Self::Today => Self::Yesterday,
+            Self::Previous => Self::Current,
+            Self::Current => Self::Previous,
         }
     }
 }
@@ -20,15 +20,15 @@ impl UsageSummaryDay {
 pub enum HistoryPage {
     Main,
     Month,
-    Cycle,
+    Week,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryNavigation {
     pub page: HistoryPage,
     pub month: NaiveDate,
-    pub selected_cycle: Option<usize>,
-    pub summary_day: UsageSummaryDay,
+    pub selected_week: NaiveDate,
+    pub summary_week: UsageSummaryWeek,
 }
 
 impl Default for HistoryNavigation {
@@ -37,27 +37,23 @@ impl Default for HistoryNavigation {
         Self {
             page: HistoryPage::Main,
             month: today.with_day(1).expect("first day of current month"),
-            selected_cycle: None,
-            summary_day: UsageSummaryDay::Yesterday,
+            selected_week: monday_of(today),
+            summary_week: UsageSummaryWeek::Current,
         }
     }
 }
 
 impl HistoryNavigation {
-    pub fn open_month(&mut self, view: Option<&UsageHistoryView>) {
+    pub fn open_current_week(&mut self, view: Option<&UsageHistoryView>) {
         if let Some(view) = view {
             self.month = view.today.with_day(1).expect("first day of current month");
-            self.selected_cycle = view.current_cycle_index();
+            self.selected_week = view.current_week_start();
         }
-        self.page = HistoryPage::Month;
+        self.page = HistoryPage::Week;
     }
 
-    pub fn open_selected_or_current_cycle(&mut self, view: &UsageHistoryView) {
-        let selected = self.selected_cycle.filter(|index| *index < view.cycles.len());
-        self.selected_cycle = selected.or_else(|| view.current_cycle_index());
-        if self.selected_cycle.is_some() {
-            self.page = HistoryPage::Cycle;
-        }
+    pub fn open_selected_week(&mut self) {
+        self.page = HistoryPage::Week;
     }
 
     pub fn shift_month(&mut self, delta: i32) {
@@ -68,25 +64,29 @@ impl HistoryNavigation {
             self.month = value;
         }
     }
+
+    pub fn shift_week(&mut self, delta: i64) {
+        self.selected_week += Duration::days(delta.saturating_mul(7));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryHit {
     Back,
-    ToggleSummaryDay,
+    ToggleSummaryWeek,
     OpenHistory,
     PreviousMonth,
     NextMonth,
     MonthTab,
-    CycleTab,
-    PreviousCycle,
-    NextCycle,
-    Cycle(usize),
+    WeekTab,
+    PreviousWeek,
+    NextWeek,
+    Week(NaiveDate),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HoveredCycle {
-    pub index: usize,
+pub struct HoveredHistoryDay {
+    pub date: NaiveDate,
     pub row: usize,
     pub column: usize,
 }
@@ -105,22 +105,22 @@ pub fn hit_test(
     match navigation.page {
         HistoryPage::Main => {
             if compact {
-                if contains(x, y, 197, 59, 315, 91) {
-                    Some(HistoryHit::ToggleSummaryDay)
-                } else if contains(x, y, 197, 91, 315, 151) {
+                if contains(x, y, 197, 59, 315, 86) {
+                    Some(HistoryHit::ToggleSummaryWeek)
+                } else if contains(x, y, 197, 86, 315, 151) {
                     Some(HistoryHit::OpenHistory)
                 } else {
                     None
                 }
-            } else if contains(x, y, 30, 278, 178, 303) {
-                Some(HistoryHit::ToggleSummaryDay)
-            } else if contains(x, y, 30, 303, 178, 335) {
+            } else if contains(x, y, 30, 278, 178, 298) {
+                Some(HistoryHit::ToggleSummaryWeek)
+            } else if contains(x, y, 30, 298, 178, 335) {
                 Some(HistoryHit::OpenHistory)
             } else {
                 None
             }
         }
-        HistoryPage::Month | HistoryPage::Cycle => {
+        HistoryPage::Month | HistoryPage::Week => {
             if contains(x, y, 10, 7, 72, 39) {
                 return Some(HistoryHit::Back);
             }
@@ -129,17 +129,29 @@ pub fn hit_test(
             }
             let width = if compact { 336 } else { 376 };
             if contains(x, y, 43, 43, 72, 77) {
-                return Some(match navigation.page {
-                    HistoryPage::Month => HistoryHit::PreviousMonth,
-                    HistoryPage::Cycle => HistoryHit::PreviousCycle,
-                    HistoryPage::Main => unreachable!(),
+                return Some(if navigation.page == HistoryPage::Month {
+                    HistoryHit::PreviousMonth
+                } else {
+                    HistoryHit::PreviousWeek
                 });
             }
             if contains(x, y, width - 72, 43, width - 43, 77) {
-                return Some(match navigation.page {
-                    HistoryPage::Month => HistoryHit::NextMonth,
-                    HistoryPage::Cycle => HistoryHit::NextCycle,
-                    HistoryPage::Main => unreachable!(),
+                let today =
+                    history.map(|view| view.today).unwrap_or_else(|| Local::now().date_naive());
+                let at_latest = match navigation.page {
+                    HistoryPage::Month => {
+                        navigation.month >= today.with_day(1).expect("first day of current month")
+                    }
+                    HistoryPage::Week => navigation.selected_week >= monday_of(today),
+                    HistoryPage::Main => false,
+                };
+                if at_latest {
+                    return None;
+                }
+                return Some(if navigation.page == HistoryPage::Month {
+                    HistoryHit::NextMonth
+                } else {
+                    HistoryHit::NextWeek
                 });
             }
             let tabs_top = if compact { 249 } else { 316 };
@@ -148,19 +160,21 @@ pub fn hit_test(
                 return Some(HistoryHit::MonthTab);
             }
             if contains(x, y, tabs_left + 80, tabs_top, tabs_left + 160, tabs_top + 28) {
-                return Some(HistoryHit::CycleTab);
+                return Some(HistoryHit::WeekTab);
             }
             if navigation.page == HistoryPage::Month {
-                return history
-                    .and_then(|view| month_cycle_at(navigation.month, view, compact, x, y))
-                    .map(|hovered| HistoryHit::Cycle(hovered.index));
+                let today =
+                    history.map(|view| view.today).unwrap_or_else(|| Local::now().date_naive());
+                return month_date_at(navigation.month, compact, x, y)
+                    .filter(|date| *date <= today)
+                    .map(|date| HistoryHit::Week(monday_of(date)));
             }
             None
         }
     }
 }
 
-pub fn hovered_cycle(
+pub fn hovered_day(
     navigation: &HistoryNavigation,
     history: Option<&UsageHistoryView>,
     compact: bool,
@@ -168,21 +182,19 @@ pub fn hovered_cycle(
     y: i32,
     dpi: u32,
     full_history: bool,
-) -> Option<HoveredCycle> {
+) -> Option<HoveredHistoryDay> {
     if navigation.page != HistoryPage::Month || !full_history {
         return None;
     }
-    let history = history?;
-    month_cycle_at(navigation.month, history, compact, logical(x, dpi), logical(y, dpi))
+    let date = month_date_at(navigation.month, compact, logical(x, dpi), logical(y, dpi))?;
+    history?.day(date)?;
+    let offset = navigation.month.weekday().num_days_from_monday() as i64;
+    let first = navigation.month - Duration::days(offset);
+    let index = (date - first).num_days() as usize;
+    Some(HoveredHistoryDay { date, row: index / 7, column: index % 7 })
 }
 
-fn month_cycle_at(
-    month: NaiveDate,
-    history: &UsageHistoryView,
-    compact: bool,
-    x: i32,
-    y: i32,
-) -> Option<HoveredCycle> {
+fn month_date_at(month: NaiveDate, compact: bool, x: i32, y: i32) -> Option<NaiveDate> {
     let grid_left = 24;
     let grid_right = if compact { 312 } else { 352 };
     let grid_top = if compact { 96 } else { 101 };
@@ -193,16 +205,7 @@ fn month_cycle_at(
     let column = ((x - grid_left) * 7 / (grid_right - grid_left)).clamp(0, 6);
     let row = ((y - grid_top) * 6 / (grid_bottom - grid_top)).clamp(0, 5);
     let offset = month.weekday().num_days_from_monday() as i64;
-    let date =
-        month - chrono::Duration::days(offset) + chrono::Duration::days((row * 7 + column) as i64);
-    history
-        .cycles
-        .iter()
-        .enumerate()
-        .rfind(|(_, cycle)| {
-            date >= cycle.start_date && date <= cycle.observed_end_date.min(cycle.display_end_date)
-        })
-        .map(|(index, _)| HoveredCycle { index, row: row as usize, column: column as usize })
+    Some(month - Duration::days(offset) + Duration::days((row * 7 + column) as i64))
 }
 
 fn logical(value: i32, dpi: u32) -> i32 {
@@ -216,96 +219,103 @@ fn contains(x: i32, y: i32, left: i32, top: i32, right: i32, bottom: i32) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::history::WeeklyCycleView;
-
-    fn active_history() -> UsageHistoryView {
-        UsageHistoryView {
-            days: Vec::new(),
-            cycles: vec![WeeklyCycleView {
-                started_at: 0,
-                ended_at: None,
-                scheduled_reset_at: None,
-                start_date: NaiveDate::from_ymd_opt(2026, 8, 1).unwrap(),
-                observed_end_date: NaiveDate::from_ymd_opt(2026, 8, 5).unwrap(),
-                display_end_date: NaiveDate::from_ymd_opt(2026, 8, 7).unwrap(),
-                consumed_percent: 28.0,
-                token_activity: None,
-                token_estimated: false,
-                quota_complete: false,
-                reset_kind: None,
-                active: true,
-                stale: false,
-            }],
-            today: NaiveDate::from_ymd_opt(2026, 8, 5).unwrap(),
-        }
-    }
 
     #[test]
-    fn month_navigation_wraps_years() {
+    fn month_and_week_navigation_cross_boundaries() {
         let mut navigation = HistoryNavigation {
             month: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            selected_week: NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(),
             ..HistoryNavigation::default()
         };
         navigation.shift_month(-1);
         assert_eq!(navigation.month, NaiveDate::from_ymd_opt(2025, 12, 1).unwrap());
-        navigation.shift_month(2);
-        assert_eq!(navigation.month, NaiveDate::from_ymd_opt(2026, 2, 1).unwrap());
+        navigation.shift_week(-1);
+        assert_eq!(navigation.selected_week, NaiveDate::from_ymd_opt(2025, 12, 29).unwrap());
     }
 
     #[test]
-    fn main_summary_hits_are_separate_from_detail_hits() {
+    fn calendar_click_selects_the_containing_monday() {
+        let navigation = HistoryNavigation {
+            page: HistoryPage::Month,
+            month: NaiveDate::from_ymd_opt(2026, 8, 1).unwrap(),
+            ..HistoryNavigation::default()
+        };
+        assert_eq!(
+            hit_test(&navigation, None, true, 168, 130, 96, true),
+            Some(HistoryHit::Week(NaiveDate::from_ymd_opt(2026, 8, 3).unwrap()))
+        );
+    }
+
+    #[test]
+    fn fallback_exposes_only_back_navigation() {
+        let navigation = HistoryNavigation { page: HistoryPage::Month, ..Default::default() };
+        assert_eq!(hit_test(&navigation, None, true, 30, 20, 96, false), Some(HistoryHit::Back));
+        assert_eq!(hit_test(&navigation, None, true, 45, 130, 96, false), None);
+    }
+
+    #[test]
+    fn current_week_cannot_navigate_into_the_future() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 6).unwrap();
+        let view = UsageHistoryView { days: Vec::new(), weeks: Vec::new(), today };
+        let navigation = HistoryNavigation {
+            page: HistoryPage::Week,
+            selected_week: monday_of(today),
+            ..HistoryNavigation::default()
+        };
+        assert_eq!(hit_test(&navigation, Some(&view), true, 280, 60, 96, true), None);
+    }
+
+    #[test]
+    fn opening_history_defaults_to_the_current_natural_week() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 6).unwrap();
+        let view = UsageHistoryView { days: Vec::new(), weeks: Vec::new(), today };
+        let mut navigation = HistoryNavigation::default();
+        navigation.open_current_week(Some(&view));
+        assert_eq!(navigation.page, HistoryPage::Week);
+        assert_eq!(navigation.selected_week, NaiveDate::from_ymd_opt(2026, 8, 3).unwrap());
+    }
+
+    #[test]
+    fn summary_heading_toggles_but_token_value_opens_week_view() {
         let navigation = HistoryNavigation::default();
         assert_eq!(
-            hit_test(&navigation, None, false, 60, 285, 96, true),
-            Some(HistoryHit::ToggleSummaryDay)
+            hit_test(&navigation, None, true, 250, 72, 96, true),
+            Some(HistoryHit::ToggleSummaryWeek)
         );
         assert_eq!(
-            hit_test(&navigation, None, false, 60, 318, 96, true),
+            hit_test(&navigation, None, true, 250, 100, 96, true),
+            Some(HistoryHit::OpenHistory)
+        );
+        assert_eq!(
+            hit_test(&navigation, None, false, 100, 286, 96, true),
+            Some(HistoryHit::ToggleSummaryWeek)
+        );
+        assert_eq!(
+            hit_test(&navigation, None, false, 100, 310, 96, true),
             Some(HistoryHit::OpenHistory)
         );
     }
 
     #[test]
-    fn current_cycle_hit_area_stops_at_today() {
-        let history = active_history();
-        let navigation = HistoryNavigation {
-            page: HistoryPage::Month,
-            month: NaiveDate::from_ymd_opt(2026, 8, 1).unwrap(),
-            selected_cycle: Some(0),
-            summary_day: UsageSummaryDay::Yesterday,
+    fn history_navigation_rejects_future_months_weeks_and_days_without_data() {
+        let today = Local::now().date_naive();
+        let mut week = HistoryNavigation {
+            page: HistoryPage::Week,
+            selected_week: monday_of(today),
+            ..HistoryNavigation::default()
         };
+        assert_eq!(hit_test(&week, None, true, 280, 60, 96, true), None);
 
-        // August 3 is in the active cycle; August 6 is a future date in the same display window.
-        assert_eq!(
-            hit_test(&navigation, Some(&history), true, 45, 130, 96, true),
-            Some(HistoryHit::Cycle(0))
-        );
-        assert_eq!(hit_test(&navigation, Some(&history), true, 168, 130, 96, true), None);
-    }
+        week.page = HistoryPage::Month;
+        week.month = today.with_day(1).unwrap();
+        assert_eq!(hit_test(&week, None, true, 280, 60, 96, true), None);
 
-    #[test]
-    fn opening_history_selects_the_active_cycle() {
-        let history = active_history();
-        let mut navigation = HistoryNavigation::default();
-        navigation.open_month(Some(&history));
-        assert_eq!(navigation.page, HistoryPage::Month);
-        assert_eq!(navigation.month, NaiveDate::from_ymd_opt(2026, 8, 1).unwrap());
-        assert_eq!(navigation.selected_cycle, Some(0));
-    }
-
-    #[test]
-    fn simplified_fallback_exposes_only_the_visible_back_action() {
-        let history = active_history();
-        let navigation = HistoryNavigation {
-            page: HistoryPage::Month,
-            month: history.today.with_day(1).unwrap(),
-            selected_cycle: Some(0),
-            summary_day: UsageSummaryDay::Yesterday,
+        let next_month = if today.month() == 12 {
+            NaiveDate::from_ymd_opt(today.year() + 1, 1, 1).unwrap()
+        } else {
+            NaiveDate::from_ymd_opt(today.year(), today.month() + 1, 1).unwrap()
         };
-        assert_eq!(
-            hit_test(&navigation, Some(&history), true, 30, 20, 96, false),
-            Some(HistoryHit::Back)
-        );
-        assert_eq!(hit_test(&navigation, Some(&history), true, 45, 130, 96, false), None);
+        week.month = next_month;
+        assert!(hit_test(&week, None, true, 168, 130, 96, true).is_none());
     }
 }

@@ -4,7 +4,7 @@ use crate::model::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
@@ -29,7 +29,6 @@ use windows::Win32::System::Threading::{
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
-const OPTIONAL_USAGE_TIMEOUT: Duration = Duration::from_millis(500);
 const READER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 const ERROR_LIMIT: usize = 240;
 const STDOUT_LINE_LIMIT: usize = 256 * 1024;
@@ -172,13 +171,7 @@ fn fetch_with_command(command: &CommandSpec) -> Result<AppServerSnapshot, AppSer
         write_json(&mut stdin, &json!({"method": "account/rateLimits/read", "id": 2}))?;
         write_json(&mut stdin, &json!({"method": "account/usage/read", "id": 3}))?;
 
-        let mut responses = receive_required(&receiver, &[1, 2], &[3], REQUEST_TIMEOUT)?;
-        if !responses.contains_key(&3)
-            && let Ok(response) =
-                receive_response(&receiver, 3, "account/usage/read", OPTIONAL_USAGE_TIMEOUT)
-        {
-            responses.insert(3, response);
-        }
+        let responses = receive_account_responses(&receiver, REQUEST_TIMEOUT)?;
         let account =
             response_result(responses.get(&1).ok_or(AppServerError::Closed)?, "account/read")?;
         let limits = response_result(
@@ -294,6 +287,23 @@ fn receive_required(
             {
                 responses.insert(id, response);
             }
+        }
+    }
+    Ok(responses)
+}
+
+fn receive_account_responses(
+    receiver: &mpsc::Receiver<String>,
+    timeout: Duration,
+) -> Result<HashMap<u64, RpcResponse>, AppServerError> {
+    let deadline = Instant::now() + timeout;
+    let mut responses = receive_required(receiver, &[1, 2], &[3], timeout)?;
+    if let Entry::Vacant(entry) = responses.entry(3) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if !remaining.is_zero()
+            && let Ok(response) = receive_response(receiver, 3, "account/usage/read", remaining)
+        {
+            entry.insert(response);
         }
     }
     Ok(responses)
@@ -720,6 +730,21 @@ mod tests {
             sender.send(format!(r#"{{"id":{id},"result":{{}}}}"#)).unwrap();
         }
         let responses = receive_required(&receiver, &[1, 2], &[3], Duration::from_secs(1)).unwrap();
+        assert!(responses.contains_key(&3));
+    }
+
+    #[test]
+    fn account_response_collection_waits_for_late_usage_within_the_shared_deadline() {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(r#"{"id":1,"result":{}}"#.to_owned()).unwrap();
+        sender.send(r#"{"id":2,"result":{}}"#.to_owned()).unwrap();
+        let late_sender = sender.clone();
+        let late = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            late_sender.send(r#"{"id":3,"result":{}}"#.to_owned()).unwrap();
+        });
+        let responses = receive_account_responses(&receiver, Duration::from_millis(200)).unwrap();
+        late.join().unwrap();
         assert!(responses.contains_key(&3));
     }
 

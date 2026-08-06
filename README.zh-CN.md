@@ -54,7 +54,7 @@ CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标显示�
 - **右键：** 立即刷新、打开 Codex 用量页、选择 1/5/15 分钟刷新、配置低额度提醒、选择主题、切换开机启动、检查更新或退出。
 - **托盘数字：** 用户选择的 5 小时或周剩余百分比，四舍五入到整数。双额度模式下状态条跟随未选中的额度；单额度模式下数字和状态条都跟随唯一可用额度。
 
-每次刷新会短暂启动本机 `codex app-server`，完成 `initialize → account/read → account/rateLimits/read` 后，使用 Windows Job Object 关闭整个子进程树。周窗口优先精确匹配 10,080 分钟；否则只接受 6–8 天窗口，绝不会把短窗口误标成周额度。
+每次刷新会短暂启动本机 `codex app-server`，完成 `initialize → account/read → account/rateLimits/read + account/usage/read` 后，使用 Windows Job Object 关闭整个子进程树。周窗口优先精确匹配 10,080 分钟；否则只接受 6–8 天窗口，绝不会把短窗口误标成周额度。程序只在本地镜像官方每日用量桶，用于自然周与月历 Token 展示；缺失日期不会推算补值。
 
 每张额度卡的外环显示真实剩余百分比；内环根据现有的重置时间和周期长度在本地计算剩余时间比例，不会增加任何网络请求。
 
@@ -62,10 +62,12 @@ CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标显示�
 
 CodexStatus 不读取或保存 OAuth Token、邮箱、项目内容、提示词和 app-server 原始响应，也不收集遥测。只有用户选择 **检查更新** 后才会访问 GitHub，不设置后台更新定时器。
 
-`%LOCALAPPDATA%\CodexStatus` 下通常只有两个状态文件：
+`%LOCALAPPDATA%\CodexStatus` 下通常有两个状态文件：
 
 - `settings.json`：刷新间隔、界面语言、主题、提醒阈值、首次引导和提醒去重状态。
-- `snapshot.json`：最近一次经过解析的非敏感额度快照；跨过重置时间后立即停止使用，并在下一次成功刷新时替换文件。
+- `usage-history.json`：官方每日 Token 日桶，以不可逆账户摘要隔离，最多保留 8 个账户各 730 天。
+
+额度失败兜底只保留当前进程中已经过账户确认的最近一次实时结果。程序启动时不会复用磁盘额度快照，因为 CodexStatus 关闭期间当前 Codex 账户可能已经切换。
 
 stable 通道继续使用上述兼容位置；development、beta 和 portable 通道分别
 使用 `%LOCALAPPDATA%\CodexStatus\channels` 下的独立子目录，避免多个通道

@@ -8,13 +8,13 @@
 use super::{
     AccountMetrics, CardInteraction, FLYOUT_CORNER_RADIUS, HEADER_ACCENT_BOTTOM, HEADER_ACCENT_TOP,
     HEADER_TEXT_BOTTOM, HEADER_TEXT_TOP, HEADER_VERSION_BOTTOM, HEADER_VERSION_TOP,
-    HistoryNavigation, HistoryPage, HoveredCycle, Locale, QuotaPanelGeometry, QuotaPanelSlot,
+    HistoryNavigation, HistoryPage, Locale, QuotaPanelGeometry, QuotaPanelSlot,
     REFRESH_ARC_START_DEGREES, REFRESH_ARC_SWEEP_DEGREES, REFRESH_BUTTON_GAP,
-    REFRESH_BUTTON_RADIUS, REFRESH_BUTTON_RIGHT, Theme, UsageSummaryDay, accent_for,
-    account_metrics, cycle_quota_text, daily_quota_text, daily_usage_metrics, flyout_dimensions,
-    historical_token_text, inner_track_color, interactive_text_color, outer_track_color,
-    quota_bar_color, quota_card_colors, quota_label, quota_panel_geometry, refresh_icon_color,
-    reset_details, theoretical_color, theoretical_remaining_percent, updated_text, version_text,
+    REFRESH_BUTTON_RADIUS, REFRESH_BUTTON_RIGHT, Theme, UsageSummaryWeek, accent_for,
+    account_metrics, flyout_dimensions, format_tokens, inner_track_color, interactive_text_color,
+    outer_track_color, quota_bar_color, quota_card_colors, quota_label, quota_panel_geometry,
+    refresh_icon_color, reset_details, theoretical_color, theoretical_remaining_percent,
+    updated_text, version_text, weekly_usage_metrics,
 };
 use crate::history::UsageHistoryView;
 use crate::model::{DisplayState, QuotaAvailability, QuotaKind, QuotaWindow};
@@ -682,10 +682,10 @@ fn draw_frame(
         );
         match input.navigation.page {
             HistoryPage::Month => {
-                draw_history_month(target, factory, formats, brushes, input, width)?;
+                draw_history_month(target, factory, dwrite, formats, brushes, input, width)?;
             }
-            HistoryPage::Cycle => {
-                draw_history_cycle(target, factory, formats, brushes, input, width)?;
+            HistoryPage::Week => {
+                draw_history_week(target, factory, formats, brushes, input, width)?;
             }
             HistoryPage::Main => unreachable!(),
         }
@@ -800,6 +800,7 @@ fn draw_refresh_icon(
 fn draw_history_month(
     target: &ID2D1HwndRenderTarget,
     factory: &ID2D1Factory,
+    dwrite: &IDWriteFactory,
     formats: &FormatSet,
     brushes: &Brushes,
     input: &PaintInput<'_>,
@@ -815,29 +816,25 @@ fn draw_history_month(
         target.FillRoundedRectangle(&panel, &brushes.metrics_surface);
         target.DrawRoundedRectangle(&panel, &brushes.line, 1.0, None::<&ID2D1StrokeStyle>);
     }
-
     let month = input.navigation.month;
-    let month_title = match input.locale {
+    let title = match input.locale {
         Locale::Chinese => format!("{}年{}月", month.year(), month.month()),
         Locale::English => month.format("%B %Y").to_string(),
     };
-    draw_text(
-        target,
-        &month_title,
-        rect(76.0, 47.0, width - 76.0, 75.0),
-        &formats.title,
-        &brushes.text,
-    );
-    let title_center_y = 61.0;
-    let _ = draw_solid_triangle(target, factory, 58.0, title_center_y, false, 12.0, &brushes.muted);
+    draw_text(target, &title, rect(76.0, 47.0, width - 76.0, 75.0), &formats.title, &brushes.text);
+    let _ = draw_solid_triangle(target, factory, 58.0, 61.0, false, 12.0, &brushes.muted);
+    let today =
+        input.history.map(|history| history.today).unwrap_or_else(|| Local::now().date_naive());
+    let current_month = today.with_day(1).expect("first day of current month");
+    let next_enabled = month < current_month;
     let _ = draw_solid_triangle(
         target,
         factory,
         width - 58.0,
-        title_center_y,
+        61.0,
         true,
         12.0,
-        &brushes.muted,
+        if next_enabled { &brushes.muted } else { &brushes.line },
     );
 
     let weekdays = if input.locale == Locale::Chinese {
@@ -848,7 +845,6 @@ fn draw_history_month(
     let grid_left = 24.0;
     let grid_right = width - 24.0;
     let cell_width = (grid_right - grid_left) / 7.0;
-    let weekday_top = 75.0;
     let grid_top = if compact { 96.0 } else { 101.0 };
     let grid_bottom = panel_bottom - 7.0;
     let row_height = (grid_bottom - grid_top) / 6.0;
@@ -857,7 +853,7 @@ fn draw_history_month(
         draw_text(
             target,
             label,
-            rect(left, weekday_top, left + cell_width, grid_top),
+            rect(left, 75.0, left + cell_width, grid_top),
             &formats.stacked_detail,
             &brushes.muted,
         );
@@ -865,213 +861,147 @@ fn draw_history_month(
 
     let outside_surface = brush(
         target,
-        if input.theme.dark { super::rgb(52, 52, 52) } else { super::rgb(232, 232, 232) },
+        if input.theme.dark { super::rgb(48, 48, 48) } else { super::rgb(235, 235, 235) },
     )?;
     let outside_text = brush(
         target,
         if input.theme.dark { super::rgb(125, 125, 125) } else { super::rgb(150, 150, 150) },
     )?;
     let history = input.history;
-    let selected_cycle = input
-        .interaction
-        .hovered_cycle
-        .map(|hovered| hovered.index)
-        .or(input.navigation.selected_cycle);
-    let offset = month.weekday().num_days_from_monday() as i64;
-    let first = month - Duration::days(offset);
+    let first = month - Duration::days(month.weekday().num_days_from_monday() as i64);
     let dates: Vec<_> = (0..42).map(|day| first + Duration::days(day)).collect();
-    let groups: Vec<i32> = dates
+    let values: Vec<u64> = dates
         .iter()
-        .map(|date| {
-            if date.month() != month.month() {
-                -2
-            } else {
-                history
-                    .and_then(|history| history_cycle_for_date(history, *date))
-                    .map(|index| index as i32)
-                    .unwrap_or(-1)
-            }
-        })
+        .filter(|date| date.month() == month.month())
+        .filter_map(|date| history.and_then(|value| value.day(*date)).map(|day| day.tokens))
         .collect();
-    let mut visible_cycle_indices: Vec<usize> =
-        groups.iter().filter_map(|group| (*group >= 0).then_some(*group as usize)).collect();
-    visible_cycle_indices.sort_unstable();
-    visible_cycle_indices.dedup();
-    let cycle_brushes = visible_cycle_indices
-        .into_iter()
-        .filter_map(|index| {
-            history.and_then(|value| value.cycles.get(index)).map(|cycle| (index, cycle))
-        })
-        .map(|(index, cycle)| {
-            let (surface, selected_surface, edge) =
-                history_cycle_colors(index, cycle.active, cycle.reset_kind, input.theme.dark);
-            Ok((
-                index,
-                (brush(target, surface)?, brush(target, selected_surface)?, brush(target, edge)?),
-            ))
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    for row in 0..6 {
-        let mut start_column = 0;
-        while start_column < 7 {
-            let group = groups[row * 7 + start_column];
-            let mut end_column = start_column + 1;
-            while end_column < 7 && groups[row * 7 + end_column] == group {
-                end_column += 1;
-            }
-            if group != -1 {
-                let left = grid_left + start_column as f32 * cell_width + 0.75;
-                let right = grid_left + end_column as f32 * cell_width - 0.75;
-                let top = grid_top + row as f32 * row_height + 1.5;
-                let bottom = grid_top + (row + 1) as f32 * row_height - 1.5;
-                let band = rounded_rect(left, top, right, bottom, 4.0);
-                let selected = group >= 0 && selected_cycle == Some(group as usize);
-                let cycle_brush = (group >= 0).then(|| {
-                    cycle_brushes
-                        .iter()
-                        .find(|(index, _)| *index == group as usize)
-                        .map(|(_, brushes)| brushes)
-                        .expect("visible cycle brush")
-                });
-                if selected && !input.theme.high_contrast {
-                    draw_card_shadow(target, &band, brushes);
-                }
-                unsafe {
-                    let fill = if group == -2 {
-                        &outside_surface
-                    } else if selected {
-                        &cycle_brush.expect("cycle brush").1
-                    } else {
-                        &cycle_brush.expect("cycle brush").0
-                    };
-                    target.FillRoundedRectangle(&band, fill);
-                    if selected {
-                        target.DrawRoundedRectangle(
-                            &band,
-                            &cycle_brush.expect("cycle brush").2,
-                            1.0,
-                            None::<&ID2D1StrokeStyle>,
-                        );
-                    }
-                }
-            }
-            start_column = end_column;
-        }
-    }
+    let minimum = values.iter().copied().min().unwrap_or(0);
+    let maximum = values.iter().copied().max().unwrap_or(0);
 
     for (index, date) in dates.iter().enumerate() {
         let row = index / 7;
         let column = index % 7;
         let left = grid_left + column as f32 * cell_width;
         let top = grid_top + row as f32 * row_height;
-        let muted = date.month() != month.month()
-            || (history.is_some_and(|history| *date > history.today) && groups[index] < 0);
+        let outside = date.month() != month.month();
+        let hovered = input.interaction.hovered_day.is_some_and(|value| value.date == *date);
+        let lift = if hovered { 2.0 } else { 0.0 };
+        let cell = rounded_rect(
+            left + 1.5,
+            top + 1.5 - lift,
+            left + cell_width - 1.5,
+            top + row_height - 1.5 - lift,
+            4.0,
+        );
+        let heat_brush = history
+            .and_then(|value| value.day(*date))
+            .filter(|_| !outside)
+            .map(|day| brush(target, heat_color(day.tokens, minimum, maximum, input.theme.dark)))
+            .transpose()?;
+        if hovered && !input.theme.high_contrast {
+            draw_card_shadow(target, &cell, brushes);
+        }
+        unsafe {
+            if outside {
+                target.FillRoundedRectangle(&cell, &outside_surface);
+            } else if let Some(fill) = heat_brush.as_ref() {
+                target.FillRoundedRectangle(&cell, fill);
+                if hovered {
+                    target.DrawRoundedRectangle(
+                        &cell,
+                        &brushes.status,
+                        1.0,
+                        None::<&ID2D1StrokeStyle>,
+                    );
+                }
+            }
+        }
+        let muted = outside || history.is_some_and(|value| *date > value.today);
         draw_text(
             target,
             &date.day().to_string(),
-            rect(left + 2.0, top, left + cell_width - 2.0, top + row_height),
+            rect(left + 2.0, top - lift, left + cell_width - 2.0, top + row_height - lift),
             &formats.date,
             if muted { &outside_text } else { &brushes.text },
         );
     }
 
-    if let (Some(history), Some(hovered)) = (history, input.interaction.hovered_cycle)
-        && let Some(cycle) = history.cycles.get(hovered.index)
+    if let (Some(history), Some(hovered)) = (history, input.interaction.hovered_day)
+        && let Some(day) = history.day(hovered.date)
     {
-        let tooltip_width = if compact { 250.0 } else { 264.0 };
-        let geometry = MonthGridGeometry { width, panel_bottom, grid_top, row_height, cell_width };
-        let (tooltip_left, tooltip_top) =
-            month_tooltip_position(geometry, &groups, hovered, tooltip_width);
-        let tooltip_brush = brush(
+        let tooltip = match input.locale {
+            Locale::Chinese => format!(
+                "{}月{}日  ·  Token {}",
+                hovered.date.month(),
+                hovered.date.day(),
+                format_tokens(day.tokens, input.locale)
+            ),
+            Locale::English => format!(
+                "{}  ·  {} tokens",
+                hovered.date.format("%b %-d"),
+                format_tokens(day.tokens, input.locale)
+            ),
+        };
+        let measured = measure_text(dwrite, &tooltip, &formats.metric_label)
+            .map(|metrics| metrics.widthIncludingTrailingWhitespace)
+            .unwrap_or(150.0);
+        let tooltip_width = (measured + 20.0).clamp(120.0, width - 40.0);
+        let anchor_x = grid_left + (hovered.column as f32 + 0.5) * cell_width;
+        let left = (anchor_x - tooltip_width / 2.0).clamp(20.0, width - 20.0 - tooltip_width);
+        let cell_top = grid_top + hovered.row as f32 * row_height;
+        let below = cell_top + row_height + 5.0;
+        let top =
+            if below + 30.0 <= panel_bottom - 5.0 { below } else { (cell_top - 35.0).max(78.0) };
+        let surface = brush(
             target,
             if input.theme.dark { super::rgb(18, 18, 18) } else { super::rgb(45, 45, 45) },
         )?;
-        let tooltip_text = brush(target, super::rgb(250, 250, 250))?;
+        let text = brush(target, super::rgb(250, 250, 250))?;
         unsafe {
             target.FillRoundedRectangle(
-                &rounded_rect(
-                    tooltip_left,
-                    tooltip_top,
-                    tooltip_left + tooltip_width,
-                    tooltip_top + 30.0,
-                    6.0,
-                ),
-                &tooltip_brush,
+                &rounded_rect(left, top, left + tooltip_width, top + 30.0, 6.0),
+                &surface,
             );
         }
-        let tokens = cycle
-            .token_activity
-            .map(|value| historical_token_text(value, cycle.token_estimated, input.locale))
-            .unwrap_or_else(|| "--".to_owned());
-        let percent = cycle_quota_text(cycle.consumed_percent, cycle.active, cycle.quota_complete);
-        let tooltip = match input.locale {
-            Locale::Chinese => format!("消耗周额度 {percent}  ·  消耗 Token {tokens}"),
-            Locale::English => format!("Weekly {percent}  ·  Tokens {tokens}"),
-        };
         draw_text(
             target,
             &tooltip,
-            rect(
-                tooltip_left + 10.0,
-                tooltip_top,
-                tooltip_left + tooltip_width - 10.0,
-                tooltip_top + 30.0,
-            ),
+            rect(left + 8.0, top, left + tooltip_width - 8.0, top + 30.0),
             &formats.metric_label,
-            &tooltip_text,
+            &text,
         );
     }
     draw_history_tabs(target, formats, brushes, input, width, true);
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
-struct MonthGridGeometry {
-    width: f32,
-    panel_bottom: f32,
-    grid_top: f32,
-    row_height: f32,
-    cell_width: f32,
+fn heat_color(value: u64, minimum: u64, maximum: u64, dark: bool) -> COLORREF {
+    let position = if maximum > minimum {
+        value.saturating_sub(minimum) as f32 / (maximum - minimum) as f32
+    } else {
+        0.5
+    };
+    let (low, middle, high) = if dark {
+        ((44, 91, 59), (108, 94, 43), (116, 52, 55))
+    } else {
+        ((99, 190, 123), (255, 235, 132), (248, 105, 107))
+    };
+    let color = if position <= 0.5 {
+        interpolate_rgb(low, middle, position * 2.0)
+    } else {
+        interpolate_rgb(middle, high, (position - 0.5) * 2.0)
+    };
+    super::rgb(color.0, color.1, color.2)
 }
 
-fn month_tooltip_position(
-    geometry: MonthGridGeometry,
-    groups: &[i32],
-    hovered: HoveredCycle,
-    tooltip_width: f32,
-) -> (f32, f32) {
-    const GRID_LEFT: f32 = 24.0;
-    const TOOLTIP_HEIGHT: f32 = 30.0;
-    const GAP: f32 = 6.0;
-    const PANEL_MARGIN: f32 = 20.0;
-
-    let row_start = hovered.row.saturating_mul(7);
-    let row_end = (row_start + 7).min(groups.len());
-    let target = hovered.index as i32;
-    let mut start_column = hovered.column.min(6);
-    while start_column > 0 && groups.get(row_start + start_column - 1) == Some(&target) {
-        start_column -= 1;
-    }
-    let mut end_column = (hovered.column + 1).min(7);
-    while row_start + end_column < row_end && groups.get(row_start + end_column) == Some(&target) {
-        end_column += 1;
-    }
-
-    let anchor_center = GRID_LEFT + (start_column + end_column) as f32 * geometry.cell_width / 2.0;
-    let tooltip_left = (anchor_center - tooltip_width / 2.0)
-        .clamp(PANEL_MARGIN, geometry.width - PANEL_MARGIN - tooltip_width);
-
-    let band_top = geometry.grid_top + hovered.row as f32 * geometry.row_height + 1.5;
-    let band_bottom = geometry.grid_top + (hovered.row + 1) as f32 * geometry.row_height - 1.5;
-    let above = band_top - GAP - TOOLTIP_HEIGHT;
-    let tooltip_top = if above >= geometry.grid_top { above } else { band_bottom + GAP }
-        .clamp(78.0, geometry.panel_bottom - TOOLTIP_HEIGHT - 7.0);
-
-    (tooltip_left, tooltip_top)
+fn interpolate_rgb(from: (u8, u8, u8), to: (u8, u8, u8), amount: f32) -> (u8, u8, u8) {
+    let amount = amount.clamp(0.0, 1.0);
+    let channel =
+        |left: u8, right: u8| (left as f32 + (right as f32 - left as f32) * amount).round() as u8;
+    (channel(from.0, to.0), channel(from.1, to.1), channel(from.2, to.2))
 }
 
-fn draw_history_cycle(
+fn draw_history_week(
     target: &ID2D1HwndRenderTarget,
     factory: &ID2D1Factory,
     formats: &FormatSet,
@@ -1089,107 +1019,62 @@ fn draw_history_cycle(
         target.FillRoundedRectangle(&panel, &brushes.metrics_surface);
         target.DrawRoundedRectangle(&panel, &brushes.line, 1.0, None::<&ID2D1StrokeStyle>);
     }
-    let Some(history) = input.history else {
-        draw_text(
-            target,
-            input.locale.text("No history yet", "暂无历史数据"),
-            rect(24.0, 90.0, width - 24.0, panel_bottom - 20.0),
-            &formats.title,
-            &brushes.muted,
-        );
-        draw_history_tabs(target, formats, brushes, input, width, false);
-        return Ok(());
-    };
-    let Some(index) = input.navigation.selected_cycle.or_else(|| history.current_cycle_index())
-    else {
-        draw_text(
-            target,
-            input.locale.text("No history yet", "暂无历史数据"),
-            rect(24.0, 90.0, width - 24.0, panel_bottom - 20.0),
-            &formats.title,
-            &brushes.muted,
-        );
-        draw_history_tabs(target, formats, brushes, input, width, false);
-        return Ok(());
-    };
-    let Some(cycle) = history.cycles.get(index) else {
-        return Ok(());
-    };
-    let dates: Vec<NaiveDate> = if cycle.active {
-        (0..7).map(|day| cycle.start_date + Duration::days(day)).collect()
-    } else {
-        let count = (cycle.display_end_date - cycle.start_date).num_days().clamp(0, 6) + 1;
-        (0..count).map(|day| cycle.start_date + Duration::days(day)).collect()
-    };
-    let range_text = history_date_range(
-        cycle.start_date,
-        *dates.last().unwrap_or(&cycle.start_date),
-        input.locale,
-    );
+    let start = input.navigation.selected_week;
+    let end = start + Duration::days(6);
     draw_text(
         target,
-        &range_text,
+        &history_date_range(start, end, input.locale),
         rect(76.0, 47.0, width - 76.0, 75.0),
         &formats.title,
         &brushes.text,
     );
-    let previous_brush = if index > 0 { &brushes.muted } else { &brushes.line };
-    let next_brush = if index + 1 < history.cycles.len() { &brushes.muted } else { &brushes.line };
-    let _ = draw_solid_triangle(target, factory, 58.0, 61.0, false, 12.0, previous_brush);
-    let _ = draw_solid_triangle(target, factory, width - 58.0, 61.0, true, 12.0, next_brush);
-    let (surface_color, _, strong_color) =
-        history_cycle_colors(index, cycle.active, cycle.reset_kind, input.theme.dark);
-    let cycle_surface = brush(target, surface_color)?;
-    let cycle_strong = brush(target, strong_color)?;
-    let inactive_text = brush(
+    let _ = draw_solid_triangle(target, factory, 58.0, 61.0, false, 12.0, &brushes.muted);
+    let current_week = input
+        .history
+        .map(UsageHistoryView::current_week_start)
+        .unwrap_or_else(|| crate::history::monday_of(Local::now().date_naive()));
+    let next_enabled = start < current_week;
+    let _ = draw_solid_triangle(
         target,
-        if input.theme.dark { super::rgb(125, 125, 125) } else { super::rgb(150, 150, 150) },
-    )?;
-    let badge = if cycle.stale {
-        input.locale.text("Awaiting refresh", "待刷新校准").to_owned()
-    } else if cycle.active {
-        input.locale.text("In progress", "进行中").to_owned()
-    } else {
-        let days = dates.len();
-        match (input.locale, cycle.reset_kind) {
-            (Locale::Chinese, Some(crate::history::ResetKind::Natural)) => {
-                format!("自然周期 · {days}天")
-            }
-            (Locale::Chinese, _) => format!("非自然周期 · {days}天"),
-            (Locale::English, Some(crate::history::ResetKind::Natural)) => {
-                format!("Natural · {days} days")
-            }
-            (Locale::English, _) => format!("Non-natural · {days} days"),
-        }
-    };
-    let badge_width = if input.locale == Locale::Chinese { 128.0 } else { 142.0 };
-    let badge_left = (width - badge_width) / 2.0;
-    unsafe {
-        target.FillRoundedRectangle(
-            &rounded_rect(badge_left, 77.0, badge_left + badge_width, 96.0, 5.0),
-            &cycle_surface,
-        );
-    }
-    draw_text(
-        target,
-        &badge,
-        rect(badge_left, 77.0, badge_left + badge_width, 96.0),
-        &formats.stacked_detail,
-        &cycle_strong,
+        factory,
+        width - 58.0,
+        61.0,
+        true,
+        12.0,
+        if next_enabled { &brushes.muted } else { &brushes.line },
     );
 
+    let total = input
+        .history
+        .and_then(|history| history.week(start))
+        .filter(|week| week.has_data)
+        .map(|week| format_tokens(week.tokens, input.locale))
+        .unwrap_or_else(|| "--".to_owned());
+    let total = match input.locale {
+        Locale::Chinese => format!("当周合计 {total}"),
+        Locale::English => format!("Week total {total}"),
+    };
+    draw_text(
+        target,
+        &total,
+        rect(76.0, 72.0, width - 76.0, 98.0),
+        &formats.stacked_detail,
+        &brushes.muted,
+    );
+
+    let dates: Vec<_> = (0..7).map(|day| start + Duration::days(day)).collect();
+    let values: Vec<Option<u64>> = dates
+        .iter()
+        .map(|date| input.history.and_then(|history| history.day(*date)).map(|day| day.tokens))
+        .collect();
+    let maximum = values.iter().flatten().copied().max().unwrap_or(1).max(1);
     let grid_left = 24.0;
     let grid_right = width - 24.0;
-    let column_width = (grid_right - grid_left) / dates.len().max(1) as f32;
-    let baseline = panel_bottom - 51.0;
+    let column_width = (grid_right - grid_left) / 7.0;
     let plot_top = 103.0;
-    let values: Vec<_> = dates
-        .iter()
-        .map(|date| history.day(*date).map(|day| day.weekly_consumed_percent))
-        .collect();
-    let maximum = values.iter().flatten().copied().fold(10.0_f64, f64::max).max(1.0);
-    let plot_height = baseline - plot_top - 15.0;
-    for step in 0..3 {
+    let baseline = panel_bottom - 52.0;
+    let plot_height = baseline - plot_top - 18.0;
+    for step in 0..4 {
         let y = plot_top + step as f32 * (baseline - plot_top) / 3.0;
         unsafe {
             target.DrawLine(
@@ -1201,40 +1086,34 @@ fn draw_history_cycle(
             );
         }
     }
-    let observed_count = dates.iter().take_while(|date| **date <= cycle.observed_end_date).count();
-    if observed_count > 0 {
-        let right = grid_left + observed_count as f32 * column_width - 0.75;
-        unsafe {
-            target.FillRoundedRectangle(
-                &rounded_rect(grid_left + 0.75, baseline, right, baseline + 19.0, 4.0),
-                &cycle_surface,
-            );
-        }
-    }
+    let bar = brush(
+        target,
+        if input.theme.dark { super::rgb(74, 143, 93) } else { super::rgb(67, 160, 92) },
+    )?;
+    let inactive = brush(
+        target,
+        if input.theme.dark { super::rgb(125, 125, 125) } else { super::rgb(150, 150, 150) },
+    )?;
     for (column, date) in dates.iter().enumerate() {
         let left = grid_left + column as f32 * column_width;
         let center_x = left + column_width / 2.0;
-        let day = history.day(*date);
-        let observed = *date <= cycle.observed_end_date && day.is_some();
-        if observed {
-            let percent = values[column].unwrap_or_default();
-            let bar_height = plot_height * (percent / maximum) as f32;
-            let half_width = if dates.len() < 7 { 11.0 } else { 9.0 };
+        if let Some(value) = values[column] {
+            let bar_height = plot_height * value as f32 / maximum as f32;
             unsafe {
                 target.FillRoundedRectangle(
                     &rounded_rect(
-                        center_x - half_width,
+                        center_x - 9.0,
                         baseline - bar_height,
-                        center_x + half_width,
+                        center_x + 9.0,
                         baseline + 2.0,
                         5.0,
                     ),
-                    &cycle_strong,
+                    &bar,
                 );
             }
             draw_text(
                 target,
-                &daily_quota_text(percent, day.is_some_and(|value| value.quota_complete)),
+                &format_tokens(value, input.locale),
                 rect(
                     left,
                     baseline - bar_height - 21.0,
@@ -1245,32 +1124,25 @@ fn draw_history_cycle(
                 &brushes.text,
             );
         }
+        let unavailable =
+            input.history.is_some_and(|history| *date > history.today) || values[column].is_none();
         draw_text(
             target,
             &history_day_label(*date, input.locale),
-            rect(left, baseline, left + column_width, baseline + 19.0),
+            rect(left, baseline, left + column_width, baseline + 21.0),
             &formats.stacked_detail,
-            if observed { &brushes.text } else { &inactive_text },
+            if unavailable { &inactive } else { &brushes.text },
         );
-        let tokens = if observed {
-            day.and_then(|day| day.tokens)
-                .map(|value| {
-                    historical_token_text(
-                        value,
-                        day.is_some_and(|record| !record.token_complete),
-                        input.locale,
-                    )
-                })
-                .unwrap_or_else(|| "--".to_owned())
-        } else {
-            "—".to_owned()
+        let weekday = match input.locale {
+            Locale::Chinese => ["一", "二", "三", "四", "五", "六", "日"][column],
+            Locale::English => ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][column],
         };
         draw_text(
             target,
-            &tokens,
+            weekday,
             rect(left, baseline + 19.0, left + column_width, baseline + 40.0),
             &formats.stacked_detail,
-            if observed { &brushes.muted } else { &inactive_text },
+            if unavailable { &inactive } else { &brushes.muted },
         );
     }
     draw_history_tabs(target, formats, brushes, input, width, false);
@@ -1285,8 +1157,7 @@ fn draw_history_tabs(
     width: f32,
     month_selected: bool,
 ) {
-    let compact = width < 360.0;
-    let top = if compact { 249.5 } else { 316.5 };
+    let top = if width < 360.0 { 249.5 } else { 316.5 };
     let bottom = top + 27.0;
     let left = (width - 160.0) / 2.0;
     unsafe {
@@ -1323,73 +1194,11 @@ fn draw_history_tabs(
     );
     draw_text(
         target,
-        input.locale.text("Day", "单日"),
+        input.locale.text("Week", "周"),
         rect(left + 80.0, top, left + 160.0, bottom),
         &formats.stacked_detail,
         if month_selected { &brushes.muted } else { &brushes.status },
     );
-}
-
-fn history_cycle_for_date(history: &UsageHistoryView, date: NaiveDate) -> Option<usize> {
-    history
-        .cycles
-        .iter()
-        .enumerate()
-        .rfind(|(_, cycle)| {
-            date >= cycle.start_date
-                && date
-                    <= if cycle.active { cycle.observed_end_date } else { cycle.display_end_date }
-        })
-        .map(|(index, _)| index)
-}
-
-fn history_cycle_colors(
-    index: usize,
-    active: bool,
-    reset_kind: Option<crate::history::ResetKind>,
-    dark: bool,
-) -> (COLORREF, COLORREF, COLORREF) {
-    if active {
-        return if dark {
-            (super::rgb(46, 65, 84), super::rgb(53, 79, 105), super::rgb(72, 119, 166))
-        } else {
-            (super::rgb(211, 228, 247), super::rgb(183, 208, 235), super::rgb(71, 126, 184))
-        };
-    }
-    if reset_kind == Some(crate::history::ResetKind::NonNatural) {
-        return if dark {
-            (super::rgb(43, 72, 61), super::rgb(51, 90, 74), super::rgb(74, 143, 113))
-        } else {
-            (super::rgb(207, 238, 225), super::rgb(179, 222, 203), super::rgb(69, 157, 116))
-        };
-    }
-    type Rgb = (u8, u8, u8);
-    type HistoryColorPair = (Rgb, Rgb);
-    const LIGHT: [HistoryColorPair; 5] = [
-        ((228, 218, 246), (142, 101, 204)),
-        ((211, 228, 247), (71, 126, 184)),
-        ((247, 229, 190), (184, 126, 30)),
-        ((242, 215, 227), (181, 91, 132)),
-        ((207, 233, 236), (57, 135, 143)),
-    ];
-    const DARK: [HistoryColorPair; 5] = [
-        ((67, 55, 82), (132, 102, 174)),
-        ((46, 65, 84), (72, 119, 166)),
-        ((82, 67, 42), (177, 128, 54)),
-        ((79, 51, 63), (171, 91, 126)),
-        ((42, 72, 75), (65, 139, 145)),
-    ];
-    let (surface, edge) = if dark { DARK[index % DARK.len()] } else { LIGHT[index % LIGHT.len()] };
-    let selected = (
-        ((surface.0 as u16 * 4 + edge.0 as u16) / 5) as u8,
-        ((surface.1 as u16 * 4 + edge.1 as u16) / 5) as u8,
-        ((surface.2 as u16 * 4 + edge.2 as u16) / 5) as u8,
-    );
-    (
-        super::rgb(surface.0, surface.1, surface.2),
-        super::rgb(selected.0, selected.1, selected.2),
-        super::rgb(edge.0, edge.1, edge.2),
-    )
 }
 
 fn history_date_range(start: NaiveDate, end: NaiveDate, locale: Locale) -> String {
@@ -1564,7 +1373,7 @@ fn draw_stacked_metrics(
             None::<&ID2D1StrokeStyle>,
         );
     }
-    let daily = daily_usage_metrics(input.history, input.navigation.summary_day, input.locale);
+    let weekly = weekly_usage_metrics(input.history, input.navigation.summary_week, input.locale);
     let value_brush =
         if input.interaction.hovered_history_values { &brushes.interactive } else { &brushes.text };
     let detail_brush = if input.interaction.hovered_history_values {
@@ -1578,19 +1387,19 @@ fn draw_stacked_metrics(
         formats,
         brushes,
         input.locale,
-        input.navigation.summary_day,
+        input.navigation.summary_week,
         true,
     );
     draw_text(
         target,
-        &daily.percent,
+        &weekly.tokens,
         rect(197.0, 86.0, 315.0, 124.0),
         &formats.stacked_value,
         value_brush,
     );
     draw_text(
         target,
-        &daily.tokens,
+        &weekly.range,
         rect(197.0, 120.0, 315.0, 145.0),
         &formats.stacked_detail,
         detail_brush,
@@ -1644,7 +1453,7 @@ fn draw_bottom_metrics(
             None::<&ID2D1StrokeStyle>,
         );
     }
-    let daily = daily_usage_metrics(input.history, input.navigation.summary_day, input.locale);
+    let weekly = weekly_usage_metrics(input.history, input.navigation.summary_week, input.locale);
     let value_brush =
         if input.interaction.hovered_history_values { &brushes.interactive } else { &brushes.text };
     let detail_brush = if input.interaction.hovered_history_values {
@@ -1658,23 +1467,20 @@ fn draw_bottom_metrics(
         formats,
         brushes,
         input.locale,
-        input.navigation.summary_day,
+        input.navigation.summary_week,
         false,
     );
     draw_text(
         target,
-        &daily.percent,
+        &weekly.tokens,
         rect(30.0, 298.0, 178.0, 334.0),
         &formats.metric_value,
         value_brush,
     );
-    let percent_width = measure_text(dwrite, &daily.percent, &formats.metric_value)
-        .map(|metrics| metrics.widthIncludingTrailingWhitespace)
-        .unwrap_or(35.0);
     draw_text(
         target,
-        &daily.tokens,
-        rect((30.0 + percent_width + 10.0).min(128.0), 303.0, 178.0, 335.0),
+        &weekly.range,
+        rect(30.0, 303.0, 178.0, 335.0),
         &formats.detail,
         detail_brush,
     );
@@ -1712,56 +1518,31 @@ fn draw_usage_heading(
     formats: &FormatSet,
     brushes: &Brushes,
     locale: Locale,
-    selection: UsageSummaryDay,
+    selection: UsageSummaryWeek,
     compact: bool,
 ) {
-    let (top, bottom, center_y) = if compact { (64.0, 88.0, 76.0) } else { (278.0, 303.0, 290.5) };
-    match (compact, selection) {
-        (true, UsageSummaryDay::Yesterday) => {
-            draw_text(
-                target,
-                locale.text("Yesterday", "昨日消耗"),
-                rect(218.0, top, 282.0, bottom),
-                &formats.stacked_label,
-                &brushes.muted,
-            );
-            let _ =
-                draw_solid_triangle(target, factory, 282.0, center_y, true, 12.0, &brushes.muted);
-        }
-        (true, UsageSummaryDay::Today) => {
-            let _ =
-                draw_solid_triangle(target, factory, 230.0, center_y, false, 12.0, &brushes.muted);
-            draw_text(
-                target,
-                locale.text("Today", "今日消耗"),
-                rect(230.0, top, 294.0, bottom),
-                &formats.stacked_label,
-                &brushes.muted,
-            );
-        }
-        (false, UsageSummaryDay::Yesterday) => {
-            draw_text(
-                target,
-                locale.text("Yesterday", "昨日消耗"),
-                rect(30.0, top, 100.0, bottom),
-                &formats.metric_label,
-                &brushes.muted,
-            );
-            let _ =
-                draw_solid_triangle(target, factory, 84.0, center_y, true, 12.0, &brushes.muted);
-        }
-        (false, UsageSummaryDay::Today) => {
-            let _ =
-                draw_solid_triangle(target, factory, 36.0, center_y, false, 12.0, &brushes.muted);
-            draw_text(
-                target,
-                locale.text("Today", "今日消耗"),
-                rect(42.0, top, 112.0, bottom),
-                &formats.metric_label,
-                &brushes.muted,
-            );
-        }
-    }
+    let (top, bottom, center_y, label_left, label_right, previous_arrow, current_arrow) = if compact
+    {
+        (64.0, 88.0, 76.0, 224.0, 288.0, 286.0, 226.0)
+    } else {
+        (278.0, 303.0, 290.5, 42.0, 106.0, 104.0, 44.0)
+    };
+    draw_text(
+        target,
+        match selection {
+            UsageSummaryWeek::Previous => locale.text("Last week usage", "上周消耗"),
+            UsageSummaryWeek::Current => locale.text("This week usage", "本周消耗"),
+        },
+        rect(label_left, top, label_right, bottom),
+        if compact { &formats.stacked_label } else { &formats.metric_label },
+        &brushes.muted,
+    );
+    let (base_x, points_right) = match selection {
+        UsageSummaryWeek::Previous => (previous_arrow, true),
+        UsageSummaryWeek::Current => (current_arrow, false),
+    };
+    let _ =
+        draw_solid_triangle(target, factory, base_x, center_y, points_right, 12.0, &brushes.muted);
 }
 
 fn draw_solid_triangle(
@@ -2037,34 +1818,9 @@ mod tests {
     }
 
     #[test]
-    fn month_tooltip_tracks_the_hovered_segment_and_stays_inside_the_panel() {
-        let geometry = MonthGridGeometry {
-            width: 336.0,
-            panel_bottom: 242.5,
-            grid_top: 96.0,
-            row_height: (235.5 - 96.0) / 6.0,
-            cell_width: (312.0 - 24.0) / 7.0,
-        };
-        let mut groups = vec![-1; 42];
-        groups[0..2].fill(3);
-        groups[40..42].fill(3);
-
-        let top_left = month_tooltip_position(
-            geometry,
-            &groups,
-            HoveredCycle { index: 3, row: 0, column: 0 },
-            250.0,
-        );
-        let bottom_right = month_tooltip_position(
-            geometry,
-            &groups,
-            HoveredCycle { index: 3, row: 5, column: 6 },
-            250.0,
-        );
-
-        assert_eq!(top_left.0, 20.0);
-        assert_eq!(bottom_right.0, 66.0);
-        assert!(top_left.1 > geometry.grid_top);
-        assert!(bottom_right.1 < geometry.grid_top + 5.0 * geometry.row_height);
+    fn monthly_heat_scale_maps_low_to_green_and_high_to_red() {
+        assert_eq!(heat_color(10, 10, 30, false), super::super::rgb(99, 190, 123));
+        assert_eq!(heat_color(30, 10, 30, false), super::super::rgb(248, 105, 107));
+        assert_eq!(heat_color(20, 10, 30, false), super::super::rgb(255, 235, 132));
     }
 }

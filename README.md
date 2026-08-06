@@ -61,7 +61,7 @@ The installer is not yet code-signed, so Microsoft Defender SmartScreen may show
 - **Right-click:** refresh now, open the Codex usage page, choose a 1/5/15-minute interval, configure a low-quota alert, select a theme, toggle startup, check for updates, or exit.
 - **Tray label:** the selected five-hour or weekly remaining percentage, rounded to the nearest whole number. With two windows, the status rule tracks the non-selected quota; with one window, both the label and rule follow the available quota.
 
-CodexStatus only calls the locally installed `codex app-server`. Each refresh performs `initialize → account/read → account/rateLimits/read`, then closes the process tree using a Windows Job Object. It selects an exact 10,080-minute window first and only accepts a 6–8 day fallback; a short window is never mislabeled as weekly quota.
+CodexStatus only calls the locally installed `codex app-server`. Each refresh performs `initialize → account/read → account/rateLimits/read + account/usage/read`, then closes the process tree using a Windows Job Object. It selects an exact 10,080-minute window first and only accepts a 6–8 day fallback; a short window is never mislabeled as weekly quota. Official daily usage buckets are mirrored locally for the natural-week and calendar Token views; missing days are not estimated.
 
 Each quota card draws its actual remaining percentage on the outer gauge. The
 inner gauge shows the percentage of cycle time remaining, calculated locally
@@ -75,8 +75,12 @@ CodexStatus never reads or stores your OAuth token, email address, project conte
 Two normal state files are stored under `%LOCALAPPDATA%\CodexStatus`:
 
 - `settings.json`: refresh interval, UI language, theme, alert threshold, onboarding state, and alert deduplication state.
-- `snapshot.json`: the latest non-sensitive parsed quota snapshot. Expired windows
-  are ignored immediately and the file is replaced by the next successful refresh.
+- `usage-history.json`: official per-day Token buckets, isolated by a non-reversible
+  account digest and bounded to 730 days for up to eight accounts.
+
+Quota fallback is kept only in memory after an account-verified live refresh. A
+persisted quota snapshot is not reused at startup because the active Codex account
+may have changed while CodexStatus was closed.
 
 The stable channel keeps this existing location. Development, beta, and portable
 channels use isolated subdirectories under `%LOCALAPPDATA%\CodexStatus\channels`

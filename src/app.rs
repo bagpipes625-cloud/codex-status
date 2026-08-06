@@ -6,7 +6,7 @@ use crate::model::QuotaSnapshot;
 use crate::model::{DisplayState, QuotaAvailability, QuotaKind, RefreshState};
 use crate::settings::{AppStore, Settings};
 use crate::{startup, ui, updater};
-use chrono::{Datelike, Utc};
+use chrono::{Datelike, Local, Utc};
 use std::cell::Cell;
 use std::mem::size_of;
 use std::path::PathBuf;
@@ -278,7 +278,7 @@ struct AppState {
     flyout_hidden_for_tray_activation: Option<Instant>,
     pressed_quota: Option<QuotaKind>,
     pressed_history: Option<ui::HistoryHit>,
-    hovered_history_cycle: Option<ui::HoveredCycle>,
+    hovered_history_day: Option<ui::HoveredHistoryDay>,
     hovered_history_values: bool,
     refresh_button_pressed: bool,
 }
@@ -356,14 +356,16 @@ pub fn run() -> Result<(), AppError> {
     let store = AppStore::discover();
     let settings = store.load_settings();
     let usage_history = store.load_usage_history();
-    let active_account_key = usage_history.last_account_key.clone();
+    // The active Codex account is not known until account/read completes. Do not
+    // expose the previous account's history during startup.
+    let active_account_key = None;
     let locale = ui::Locale::detect(&settings.locale);
     let theme = ui::detect_theme(&settings.theme);
-    let now = Utc::now().timestamp();
-    let history_view_cache =
-        usage_history.history_for(active_account_key.as_deref()).map(|history| history.view(now));
-    let cached = store.load_snapshot().filter(|snapshot| snapshot.is_cache_valid(now));
-    let display = DisplayState::loading(cached);
+    let history_view_cache = None;
+    // A persisted quota snapshot cannot be verified against the account that is
+    // active now. Start empty; in-process refresh failures still retain the
+    // latest account-verified live snapshot through DisplayState::after_error.
+    let display = DisplayState::loading(None);
     let taskbar_created = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
     let (refresh_results_tx, refresh_results) = sync_channel(1);
     let (update_results_tx, update_results) = sync_channel(1);
@@ -403,7 +405,7 @@ pub fn run() -> Result<(), AppError> {
         flyout_hidden_for_tray_activation: None,
         pressed_quota: None,
         pressed_history: None,
-        hovered_history_cycle: None,
+        hovered_history_day: None,
         hovered_history_values: false,
         refresh_button_pressed: false,
     });
@@ -560,7 +562,7 @@ unsafe extern "system" fn main_window_proc(
                                 pressed_quota: None,
                                 refresh_feedback: false,
                                 refresh_rotation_degrees: 0.0,
-                                hovered_cycle: None,
+                                hovered_day: None,
                                 hovered_history_values: false,
                             },
                         },
@@ -655,7 +657,7 @@ unsafe extern "system" fn flyout_window_proc(
                             pressed_quota: state.pressed_quota,
                             refresh_feedback: state.refresh_feedback,
                             refresh_rotation_degrees: state.refresh_rotation_degrees(),
-                            hovered_cycle: state.hovered_history_cycle,
+                            hovered_day: state.hovered_history_day,
                             hovered_history_values: state.hovered_history_values,
                         },
                     },
@@ -759,7 +761,7 @@ unsafe extern "system" fn flyout_window_proc(
                 let history = state.history_view();
                 let compact =
                     matches!(state.display.quota_availability(), QuotaAvailability::Single(_));
-                let hovered = ui::hovered_cycle(
+                let hovered = ui::hovered_history_day(
                     &state.history_navigation,
                     history,
                     compact,
@@ -780,10 +782,10 @@ unsafe extern "system" fn flyout_window_proc(
                     ),
                     Some(ui::HistoryHit::OpenHistory)
                 );
-                if hovered != state.hovered_history_cycle
+                if hovered != state.hovered_history_day
                     || hovered_history_values != state.hovered_history_values
                 {
-                    state.hovered_history_cycle = hovered;
+                    state.hovered_history_day = hovered;
                     state.hovered_history_values = hovered_history_values;
                     let _ = InvalidateRect(Some(hwnd), None, false);
                 }
@@ -857,53 +859,36 @@ impl AppState {
         match hit {
             ui::HistoryHit::Back => {
                 self.history_navigation.page = ui::HistoryPage::Main;
-                self.hovered_history_cycle = None;
+                self.hovered_history_day = None;
             }
-            ui::HistoryHit::ToggleSummaryDay => {
-                self.history_navigation.summary_day = self.history_navigation.summary_day.toggle();
+            ui::HistoryHit::ToggleSummaryWeek => {
+                self.history_navigation.summary_week =
+                    self.history_navigation.summary_week.toggle();
             }
             ui::HistoryHit::OpenHistory => {
-                self.history_navigation.open_month(self.history_view_cache.as_ref());
-                self.hovered_history_cycle = None;
+                self.history_navigation.open_current_week(self.history_view_cache.as_ref());
+                self.hovered_history_day = None;
             }
             ui::HistoryHit::PreviousMonth => self.history_navigation.shift_month(-1),
             ui::HistoryHit::NextMonth => self.history_navigation.shift_month(1),
             ui::HistoryHit::MonthTab => {
-                if let (Some(view), Some(index)) =
-                    (self.history_view_cache.as_ref(), self.history_navigation.selected_cycle)
-                    && let Some(cycle) = view.cycles.get(index)
-                {
-                    self.history_navigation.month =
-                        cycle.start_date.with_day(1).expect("cycle month start");
-                }
+                self.history_navigation.month =
+                    self.history_navigation.selected_week.with_day(1).expect("week month start");
                 self.history_navigation.page = ui::HistoryPage::Month;
             }
-            ui::HistoryHit::CycleTab => {
-                if let Some(view) = self.history_view_cache.as_ref() {
-                    self.history_navigation.open_selected_or_current_cycle(view);
-                }
+            ui::HistoryHit::WeekTab => {
+                self.history_navigation.open_selected_week();
             }
-            ui::HistoryHit::PreviousCycle => {
-                if let Some(index) = self.history_navigation.selected_cycle
-                    && index > 0
-                {
-                    self.history_navigation.selected_cycle = Some(index - 1);
-                }
+            ui::HistoryHit::PreviousWeek => {
+                self.history_navigation.shift_week(-1);
             }
-            ui::HistoryHit::NextCycle => {
-                if let (Some(view), Some(index)) =
-                    (self.history_view_cache.as_ref(), self.history_navigation.selected_cycle)
-                    && index + 1 < view.cycles.len()
-                {
-                    self.history_navigation.selected_cycle = Some(index + 1);
-                }
+            ui::HistoryHit::NextWeek => {
+                self.history_navigation.shift_week(1);
             }
-            ui::HistoryHit::Cycle(index) => {
-                if self.history_view_cache.as_ref().is_some_and(|view| index < view.cycles.len()) {
-                    self.history_navigation.selected_cycle = Some(index);
-                    self.history_navigation.page = ui::HistoryPage::Cycle;
-                    self.hovered_history_cycle = None;
-                }
+            ui::HistoryHit::Week(start) => {
+                self.history_navigation.selected_week = start;
+                self.history_navigation.page = ui::HistoryPage::Week;
+                self.hovered_history_day = None;
             }
         }
     }
@@ -1022,13 +1007,12 @@ impl AppState {
                 self.active_account_key = snapshot.account_key.clone();
                 self.usage_history.record_refresh(
                     snapshot.account_key.as_deref(),
-                    &snapshot.quota,
                     snapshot.token_usage.as_ref(),
+                    Utc::now().timestamp(),
                 );
                 self.history_dirty = true;
                 self.refresh_history_view_cache();
                 self.persist_usage_history(false);
-                let _ = self.store.save_snapshot(&snapshot.quota);
                 self.display = DisplayState::live(snapshot.quota);
                 self.reset_refresh_timer(self.settings.refresh_minutes.saturating_mul(60_000));
                 self.maybe_alert();
@@ -1431,10 +1415,11 @@ impl AppState {
         self.flyout_hidden_for_tray_activation = None;
         self.pressed_quota = None;
         self.pressed_history = None;
-        self.hovered_history_cycle = None;
+        self.hovered_history_day = None;
         self.hovered_history_values = false;
         self.history_navigation.page = ui::HistoryPage::Main;
-        self.history_navigation.selected_cycle = None;
+        self.history_navigation.selected_week =
+            crate::history::monday_of(Local::now().date_naive());
         self.refresh_button_pressed = false;
         self.refresh_animation_started = None;
         if !self.refreshing {

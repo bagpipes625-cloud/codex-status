@@ -78,7 +78,6 @@ pub struct DailyTokenUsage {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenUsageSnapshot {
-    pub lifetime_tokens: Option<u64>,
     pub daily_buckets: Vec<DailyTokenUsage>,
 }
 
@@ -244,7 +243,6 @@ pub fn parse_snapshot(
 
 pub fn parse_token_usage(value: &Value) -> TokenUsageSnapshot {
     const MAX_DAILY_BUCKETS: usize = 730;
-    let lifetime_tokens = value.pointer("/summary/lifetimeTokens").and_then(Value::as_u64);
     let mut daily_buckets: Vec<_> = value
         .get("dailyUsageBuckets")
         .and_then(Value::as_array)
@@ -261,7 +259,7 @@ pub fn parse_token_usage(value: &Value) -> TokenUsageSnapshot {
     if daily_buckets.len() > MAX_DAILY_BUCKETS {
         daily_buckets.drain(..daily_buckets.len() - MAX_DAILY_BUCKETS);
     }
-    TokenUsageSnapshot { lifetime_tokens, daily_buckets }
+    TokenUsageSnapshot { daily_buckets }
 }
 
 fn is_iso_date(value: &str) -> bool {
@@ -317,7 +315,6 @@ mod tests {
             ]
         }));
 
-        assert_eq!(usage.lifetime_tokens, Some(1_234_567));
         assert_eq!(
             usage.daily_buckets,
             vec![DailyTokenUsage { start_date: "2026-08-05".to_owned(), tokens: 12_345 }]

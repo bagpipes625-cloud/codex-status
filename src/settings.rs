@@ -1,5 +1,5 @@
 use crate::history::UsageLedger;
-use crate::model::{QuotaKind, QuotaSnapshot};
+use crate::model::QuotaKind;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Write};
@@ -98,14 +98,6 @@ impl AppStore {
 
     pub fn save_settings(&self, settings: &Settings) -> io::Result<()> {
         write_json_atomic(&self.directory.join("settings.json"), settings)
-    }
-
-    pub fn load_snapshot(&self) -> Option<QuotaSnapshot> {
-        read_json(&self.directory.join("snapshot.json"), SMALL_STATE_LIMIT)
-    }
-
-    pub fn save_snapshot(&self, snapshot: &QuotaSnapshot) -> io::Result<()> {
-        write_json_atomic(&self.directory.join("snapshot.json"), snapshot)
     }
 
     pub fn load_usage_history(&self) -> UsageLedger {
