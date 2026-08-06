@@ -12,7 +12,7 @@
 |:--:|:--:|
 | ![CodexStatus light quota flyout](assets/screenshots/codexstatus-light.png) | ![CodexStatus dark quota flyout](assets/screenshots/codexstatus-dark.png) |
 
-CodexStatus is a tiny native Windows utility. Its notification-area icon is the selected five-hour or weekly quota—`0` to `100`, or `--` when unavailable. With both windows available, the two-pixel rule tracks the other quota. Click it for selectable side-by-side quota gauges, both reset timings, plan information, and refresh status. If Codex exposes only one quota window, the flyout automatically switches to a compact single-gauge layout.
+CodexStatus is a tiny native Windows utility. Its notification-area icon is the selected five-hour or weekly quota—`0` to `100`, or `--` when unavailable. With both windows available, the two-pixel rule tracks the other quota. Click it for selectable quota gauges, reset information, and current/previous natural-week Token totals. The Token total opens a Monday-to-Sunday chart with a secondary monthly activity calendar. If Codex exposes only one quota window, the flyout automatically switches to a compact single-gauge layout.
 
 This repository is a community-maintained variant derived from
 [mmm1h/codex-status](https://github.com/mmm1h/codex-status). It retains the
@@ -31,7 +31,11 @@ line and product decisions.
 - Direct2D/DirectWrite rounded flyout with antialiased gauges, consistent text,
   GDI fallback, and light, dark, high-contrast, and per-monitor DPI support.
 - System, light, and dark flyout themes selectable from the tray menu.
-- Official Codex app-server RPC: `account/rateLimits/read`; no token scraping and no private endpoints.
+- Official Codex app-server RPCs: `account/rateLimits/read` and
+  `account/usage/read`; no credential scraping and no private endpoints.
+- Official daily Token buckets are kept locally per account for natural-week
+  totals, a weekly bar chart, and a monthly heatmap. Missing days are never
+  estimated, and no OAuth token, prompt, or project content is stored.
 - Event-driven Win32 process with no Electron, WebView, WPF, WinUI, local HTTP server, or resident async runtime.
 - At startup, one hidden frame prewarms the HWND-sized renderer; it then stays
   cached while the flyout is hidden, avoiding visible first-open and repeat-open
@@ -90,7 +94,7 @@ Normal builds do not write activity logs. If Windows rejects a notification icon
 
 ## Performance
 
-Version 0.5.11 remains an event-driven native Win32 process. It performs no
+Version 0.6.0 remains an event-driven native Win32 process. It performs no
 continuous animation or polling between configured refresh timers. One queued
 UI message draws a hidden startup frame to prewarm Direct2D, text resources, and
 the HWND surface before normal flyout use. Those bounded resources remain cached

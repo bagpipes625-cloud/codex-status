@@ -12,7 +12,7 @@
 |:--:|:--:|
 | ![CodexStatus 浅色额度卡片](assets/screenshots/codexstatus-light.png) | ![CodexStatus 深色额度卡片](assets/screenshots/codexstatus-dark.png) |
 
-CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标显示用户选择的 5 小时或周剩余额度 `0–100`；不可用时显示 `--`。两个周期均可用时，底部 2px 色条反映另一周期；如果 Codex 只返回一种有效额度，界面会自动切换为紧凑的单额度布局。
+CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标显示用户选择的 5 小时或周剩余额度 `0–100`；不可用时显示 `--`。两个周期均可用时，底部 2px 色条反映另一周期。面板同时展示本周/上周自然周 Token 总量，点击后进入周一至周日柱状图，并可切换到月度用量日历；如果 Codex 只返回一种有效额度，界面会自动切换为紧凑的单额度布局。
 
 本仓库是基于上游
 [mmm1h/codex-status](https://github.com/mmm1h/codex-status)
@@ -26,7 +26,9 @@ CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标显示�
 - 使用 Direct2D/DirectWrite 绘制抗锯齿圆环和一致文字，保留 GDI
   兜底，并适配浅色、深色、高对比度、多显示器 DPI 和 Windows 10 圆角。
 - 可从托盘菜单选择跟随系统、浅色或深色界面主题。
-- 只使用官方 Codex app-server RPC `account/rateLimits/read`，不读取 Token，不访问私有接口。
+- 只使用官方 Codex app-server RPC `account/rateLimits/read` 与
+  `account/usage/read`，不抓取登录凭据，不访问私有接口。
+- 按账户在本地保存官方每日 Token 日桶，用于自然周合计、周柱状图和月历热力图；缺失日期不推算，也不保存 OAuth Token、提示词或项目内容。
 - 纯 Win32 事件驱动；没有 Electron、WebView、WPF、WinUI、本地 HTTP 服务或常驻异步运行时。
 - 启动时先对隐藏面板绘制一帧，预热窗口尺寸相关的渲染器；之后隐藏时继续缓存，
   避免首次展开和重复展开时初始化 Direct2D 与文字资源。完成这一次预热后，隐藏
@@ -77,7 +79,7 @@ stable 通道继续使用上述兼容位置；development、beta 和 portable �
 
 ## 性能
 
-0.5.11 仍是事件驱动的原生 Win32 程序，在设定的刷新定时器之间不做持续
+0.6.0 仍是事件驱动的原生 Win32 程序，在设定的刷新定时器之间不做持续
 动画或轮询。启动后会通过一条排队的 UI 消息对隐藏面板绘制一帧，预热
 Direct2D、文字资源和 HWND 绘制表面；这些有界资源随后在隐藏状态下保持缓存，
 因此首次与后续展开共享同一份稳定占用，不会持续后台绘制。Windows 仍可按需

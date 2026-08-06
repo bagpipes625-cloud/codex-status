@@ -4,6 +4,24 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-07
+
+- Add local Token activity history sourced exclusively from the official
+  `account/usage/read` daily buckets, isolated by account digest and bounded on
+  disk without storing credentials or estimating missing days.
+- Show current- and previous-natural-week Token totals on the quota flyout;
+  clicking the total opens a Monday-to-Sunday bar chart, with a secondary
+  calendar heatmap for browsing daily activity by month.
+- Keep compact and dual-quota layouts aligned while adding adaptive calendar
+  tooltips, weekly totals, future-date navigation guards, and concise Chinese
+  Token labels such as `3.4亿` and `7898万`.
+- Wait for the optional usage response within the existing shared request
+  deadline, reject unidentified-account history instead of mixing accounts,
+  and bound malformed historical date spans.
+- Stop reusing an unverified persisted quota snapshot at startup; refresh
+  failures within the current process still retain the latest verified live
+  quota in memory.
+
 ## [0.5.11] - 2026-08-03
 
 - Restore the shared flyout outer radius to 8 DIP so the Direct2D border, GDI
