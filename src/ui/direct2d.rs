@@ -1075,7 +1075,7 @@ fn draw_history_week(
     draw_text(
         target,
         &total,
-        rect(76.0, 72.0, width - 76.0, 98.0),
+        rect(76.0, 70.0, width - 76.0, 96.0),
         &formats.history_total,
         &brushes.muted,
     );
