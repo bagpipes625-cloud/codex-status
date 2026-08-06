@@ -157,10 +157,10 @@ pub fn hit_test(
             let tabs_top = if compact { 249 } else { 316 };
             let tabs_left = (width - 160) / 2;
             if contains(x, y, tabs_left, tabs_top, tabs_left + 80, tabs_top + 28) {
-                return Some(HistoryHit::MonthTab);
+                return Some(HistoryHit::WeekTab);
             }
             if contains(x, y, tabs_left + 80, tabs_top, tabs_left + 160, tabs_top + 28) {
-                return Some(HistoryHit::WeekTab);
+                return Some(HistoryHit::MonthTab);
             }
             if navigation.page == HistoryPage::Month {
                 let today =
@@ -317,5 +317,18 @@ mod tests {
         };
         week.month = next_month;
         assert!(hit_test(&week, None, true, 168, 130, 96, true).is_none());
+    }
+
+    #[test]
+    fn history_tabs_map_week_left_and_month_right() {
+        let navigation = HistoryNavigation { page: HistoryPage::Week, ..Default::default() };
+        assert_eq!(
+            hit_test(&navigation, None, true, 110, 260, 96, true),
+            Some(HistoryHit::WeekTab)
+        );
+        assert_eq!(
+            hit_test(&navigation, None, true, 220, 260, 96, true),
+            Some(HistoryHit::MonthTab)
+        );
     }
 }

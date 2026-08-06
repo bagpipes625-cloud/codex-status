@@ -458,6 +458,8 @@ struct FormatSet {
     stacked_label: IDWriteTextFormat,
     stacked_value: IDWriteTextFormat,
     stacked_detail: IDWriteTextFormat,
+    history_total: IDWriteTextFormat,
+    history_tooltip: IDWriteTextFormat,
 }
 
 impl FormatSet {
@@ -558,6 +560,22 @@ impl FormatSet {
                 11.0,
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_TEXT_ALIGNMENT_CENTER,
+                true,
+            )?,
+            history_total: make_format(
+                factory,
+                locale,
+                12.0,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_TEXT_ALIGNMENT_CENTER,
+                true,
+            )?,
+            history_tooltip: make_format(
+                factory,
+                locale,
+                12.0,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_TEXT_ALIGNMENT_LEADING,
                 true,
             )?,
         })
@@ -942,7 +960,7 @@ fn draw_history_month(
                 format_tokens(day.tokens, input.locale)
             ),
         };
-        let measured = measure_text(dwrite, &tooltip, &formats.metric_label)
+        let measured = measure_text(dwrite, &tooltip, &formats.history_tooltip)
             .map(|metrics| metrics.widthIncludingTrailingWhitespace)
             .unwrap_or(150.0);
         let tooltip_width = (measured + 20.0).clamp(120.0, width - 40.0);
@@ -967,7 +985,7 @@ fn draw_history_month(
             target,
             &tooltip,
             rect(left + 8.0, top, left + tooltip_width - 8.0, top + 30.0),
-            &formats.metric_label,
+            &formats.history_tooltip,
             &text,
         );
     }
@@ -1058,7 +1076,7 @@ fn draw_history_week(
         target,
         &total,
         rect(76.0, 72.0, width - 76.0, 98.0),
-        &formats.stacked_detail,
+        &formats.history_total,
         &brushes.muted,
     );
 
@@ -1171,8 +1189,8 @@ fn draw_history_tabs(
             1.0,
             None::<&ID2D1StrokeStyle>,
         );
-        let selected_left = if month_selected { left + 2.0 } else { left + 80.0 };
-        let selected_right = if month_selected { left + 80.0 } else { left + 158.0 };
+        let selected_left = if month_selected { left + 80.0 } else { left + 2.0 };
+        let selected_right = if month_selected { left + 158.0 } else { left + 80.0 };
         target.FillRoundedRectangle(
             &rounded_rect(selected_left, top + 2.0, selected_right, bottom - 2.0, 5.0),
             &brushes.five_surface,
@@ -1187,17 +1205,17 @@ fn draw_history_tabs(
     }
     draw_text(
         target,
-        input.locale.text("Month", "月历"),
+        input.locale.text("Week", "周"),
         rect(left, top, left + 80.0, bottom),
         &formats.stacked_detail,
-        if month_selected { &brushes.status } else { &brushes.muted },
+        if month_selected { &brushes.muted } else { &brushes.status },
     );
     draw_text(
         target,
-        input.locale.text("Week", "周"),
+        input.locale.text("Month", "月"),
         rect(left + 80.0, top, left + 160.0, bottom),
         &formats.stacked_detail,
-        if month_selected { &brushes.muted } else { &brushes.status },
+        if month_selected { &brushes.status } else { &brushes.muted },
     );
 }
 
