@@ -250,17 +250,20 @@ jobs:
           }
 
           function Read-Release {
-            # A missing release is an expected first-publish state. Disable native
-            # error promotion only for this probe and accept only an explicit 404.
-            $PSNativeCommandUseErrorActionPreference = $false
-            $response = gh api "repos/$env:REPOSITORY/releases/tags/$tag" 2>&1
-            $exitCode = $LASTEXITCODE
-            if ($exitCode -ne 0) {
-              $message = ($response | Out-String).Trim()
-              if ($message -match '\bHTTP 404\b') { return $null }
-              throw "Could not inspect release '$tag': $message"
+            # GitHub's release-by-tag endpoint excludes drafts. Enumerate the
+            # authenticated release list so first-publish drafts remain visible.
+            $response = gh api --paginate --slurp `
+              "repos/$env:REPOSITORY/releases?per_page=100"
+            $pages = (($response -join "`n") | ConvertFrom-Json)
+            $matches = @(
+              $pages | ForEach-Object { $_ } |
+                Where-Object { $_.tag_name -ceq $tag }
+            )
+            if ($matches.Count -eq 0) { return $null }
+            if ($matches.Count -ne 1) {
+              throw "More than one release exists for tag '$tag'."
             }
-            $release = (($response -join "`n") | ConvertFrom-Json)
+            $release = $matches[0]
             [pscustomobject]@{ isDraft = [bool]$release.draft; assets = $release.assets }
           }
 
