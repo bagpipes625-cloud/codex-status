@@ -4,6 +4,19 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-08-07
+
+- Add one-page mouse-wheel navigation to the natural-week chart and monthly
+  calendar, including high-resolution wheel accumulation, a 400 ms momentum
+  guard, future-period limits, and immediate recovery from boundary gestures.
+- Map Windows browser-back, mouse XBUTTON1, and browser-back app commands to the
+  history page's existing Back action without changing main-card behavior.
+- Harden Win32 reentrancy and message-loop teardown, account-scoped refresh
+  failures, atomic settings writes, and self-update rollback with startup health
+  confirmation.
+- Make CI and release publication fail closed with pinned tools and Actions,
+  exact bundle manifests, commit-bound tag checks, and immutable release reruns.
+
 ## [0.6.0] - 2026-08-07
 
 - Add local Token activity history sourced exclusively from the official
