@@ -101,9 +101,12 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           choco install innosetup --version=6.7.1 --allow-downgrade --no-progress -y
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          $isccVersion = (Get-Item -LiteralPath $iscc).VersionInfo.ProductVersion
-          if ($isccVersion -notmatch '^6\.7\.1(?:\.|$)') {
-            throw "Expected Inno Setup 6.7.1, found '$isccVersion'."
+          if (-not (Test-Path -LiteralPath $iscc -PathType Leaf)) {
+            throw "Inno Setup compiler was not installed at '$iscc'."
+          }
+          $installedPackages = @(& choco list --exact innosetup --limit-output)
+          if ($installedPackages -notcontains 'innosetup|6.7.1') {
+            throw "Expected Chocolatey package innosetup 6.7.1, found '$($installedPackages -join ', ')'."
           }
           $version = $env:RELEASE_TAG.TrimStart("v")
           & $iscc "/DAppVersion=$version" installer/CodexStatus.iss
