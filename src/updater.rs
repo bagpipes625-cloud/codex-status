@@ -2,7 +2,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, c_void};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
@@ -22,7 +22,7 @@ use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
     GetFileInformationByHandle, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    OPEN_EXISTING,
+    OPEN_EXISTING, REPLACEFILE_WRITE_THROUGH, ReplaceFileW,
 };
 use windows::Win32::System::Threading::{
     CREATE_NO_WINDOW, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
@@ -37,6 +37,7 @@ const RELEASE_ASSET_PREFIX: &str =
 const MAX_METADATA_BYTES: usize = 512 * 1024;
 const MAX_EXECUTABLE_BYTES: usize = 32 * 1024 * 1024;
 const UPDATE_WAIT_MS: u32 = 30_000;
+const UPDATE_STARTUP_CONFIRMATION: Duration = Duration::from_secs(3);
 const HTTP_REQUEST_DEADLINE: Duration = Duration::from_secs(60);
 const STALE_PENDING_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -226,7 +227,7 @@ pub fn check_and_stage(updates_directory: &Path) -> Result<Option<StagedUpdate>,
     let channel = update_asset_channel().ok_or(UpdateError::UnsupportedChannel)?;
     let target = std::env::current_exe()?;
     validate_target_for_update(&target)?;
-    cleanup_stale_pending_updates(&target);
+    cleanup_stale_update_files(&target);
     let staging = StagingTree::open(updates_directory)?;
     staging.cleanup();
 
@@ -660,35 +661,58 @@ fn apply_update(parent_pid: u32, target: &Path) -> Result<(), UpdateError> {
     if staged == target {
         return Err(UpdateError::UnsafeTarget);
     }
-    cleanup_stale_pending_updates(target);
+    cleanup_stale_update_files(target);
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     let pending = target.with_extension(format!("update-{}-{nonce}", std::process::id()));
+    let backup = target.with_extension(format!("backup-{}-{nonce}", std::process::id()));
     copy_to_new_file(&staged, &pending)?;
     let pending_wide = wide0(pending.as_os_str());
     let target_wide = wide0(target.as_os_str());
+    let backup_wide = wide0(backup.as_os_str());
     let replacement = unsafe {
-        MoveFileExW(
-            PCWSTR(pending_wide.as_ptr()),
+        ReplaceFileW(
             PCWSTR(target_wide.as_ptr()),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            PCWSTR(pending_wide.as_ptr()),
+            PCWSTR(backup_wide.as_ptr()),
+            REPLACEFILE_WRITE_THROUGH,
+            None,
+            None,
         )
     };
     if let Err(error) = replacement {
         let _ = fs::remove_file(&pending);
         return Err(error.into());
     }
-    launch_target(target)?;
-    Ok(())
+    match launch_target_confirmed(target) {
+        Ok(()) => {
+            let _ = fs::remove_file(backup);
+            Ok(())
+        }
+        Err(launch_error) => {
+            let backup_wide = wide0(backup.as_os_str());
+            unsafe {
+                MoveFileExW(
+                    PCWSTR(backup_wide.as_ptr()),
+                    PCWSTR(target_wide.as_ptr()),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )?;
+            }
+            Err(launch_error.into())
+        }
+    }
 }
 
-fn cleanup_stale_pending_updates(target: &Path) {
+fn cleanup_stale_update_files(target: &Path) {
     let Some(parent) = target.parent() else { return };
     let Some(stem) = target.file_stem().and_then(OsStr::to_str) else { return };
-    let prefix = format!("{stem}.update-");
+    let prefixes = [format!("{stem}.update-"), format!("{stem}.backup-")];
     let Ok(entries) = fs::read_dir(parent) else { return };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let Some(suffix) = name.to_str().and_then(|name| name.strip_prefix(&prefix)) else {
+        let Some(suffix) = name
+            .to_str()
+            .and_then(|name| prefixes.iter().find_map(|prefix| name.strip_prefix(prefix)))
+        else {
             continue;
         };
         if suffix.is_empty()
@@ -728,6 +752,28 @@ fn copy_to_new_file(source: &Path, destination: &Path) -> std::io::Result<()> {
 
 fn launch_target(target: &Path) -> Result<(), std::io::Error> {
     Command::new(target).arg("--background").creation_flags(CREATE_NO_WINDOW.0).spawn().map(|_| ())
+}
+
+fn launch_target_confirmed(target: &Path) -> Result<(), std::io::Error> {
+    let mut child =
+        Command::new(target).arg("--background").creation_flags(CREATE_NO_WINDOW.0).spawn()?;
+    confirm_child_startup(&mut child, UPDATE_STARTUP_CONFIRMATION)
+}
+
+fn confirm_child_startup(child: &mut std::process::Child, duration: Duration) -> io::Result<()> {
+    let deadline = Instant::now() + duration;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Err(io::Error::other(format!(
+                "updated process exited during startup ({status})"
+            )));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(());
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(50)));
+    }
 }
 
 fn validate_target_for_update(target: &Path) -> Result<(), UpdateError> {
@@ -903,6 +949,16 @@ mod tests {
             sha256_hex(b"CodexStatus"),
             "1348bd7daee4282c641059f8cdd9fe96ae24f501c0cd32fbdabb8c1e60eea85c"
         );
+    }
+
+    #[test]
+    fn update_startup_confirmation_rejects_an_early_exit() {
+        let mut child = Command::new("cmd")
+            .args(["/D", "/C", "exit", "7"])
+            .creation_flags(CREATE_NO_WINDOW.0)
+            .spawn()
+            .unwrap();
+        assert!(confirm_child_startup(&mut child, Duration::from_secs(1)).is_err());
     }
 
     #[test]

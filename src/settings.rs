@@ -6,7 +6,7 @@ use std::io::{self, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use windows::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, REPLACEFILE_WRITE_THROUGH,
     ReplaceFileW,
@@ -163,15 +163,11 @@ fn is_state_temporary_name(name: &str) -> bool {
         .into_iter()
         .find_map(|prefix| name.strip_prefix(prefix))
         .is_some_and(|suffix| {
-            let mut parts = suffix.split('-');
-            matches!(
-                (parts.next(), parts.next(), parts.next()),
-                (Some(pid), Some(sequence), None)
-                    if !pid.is_empty()
-                        && !sequence.is_empty()
-                        && pid.bytes().all(|byte| byte.is_ascii_digit())
-                        && sequence.bytes().all(|byte| byte.is_ascii_digit())
-            )
+            let part_count = suffix.split('-').count();
+            matches!(part_count, 2 | 3)
+                && suffix
+                    .split('-')
+                    .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
         })
 }
 
@@ -188,7 +184,8 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     let sequence = TEMPORARY_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temporary = path.with_extension(format!("tmp-{}-{sequence}", std::process::id()));
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let temporary = path.with_extension(format!("tmp-{}-{nonce}-{sequence}", std::process::id()));
     let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
     let result = (|| {
         let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
@@ -352,6 +349,7 @@ mod tests {
     #[test]
     fn stale_cleanup_matches_only_our_exact_temporary_names() {
         assert!(is_state_temporary_name("settings.tmp-123-0"));
+        assert!(is_state_temporary_name("settings.tmp-123-456789-0"));
         assert!(is_state_temporary_name("snapshot.tmp-7-42"));
         assert!(is_state_temporary_name("usage-history.tmp-1-9"));
         assert!(!is_state_temporary_name("notes.tmp-backup"));

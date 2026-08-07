@@ -29,6 +29,7 @@ use windows::Win32::System::Threading::{
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+const OPTIONAL_USAGE_GRACE: Duration = Duration::from_millis(300);
 const READER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 const ERROR_LIMIT: usize = 240;
 const STDOUT_LINE_LIMIT: usize = 256 * 1024;
@@ -75,25 +76,40 @@ pub struct AppServerSnapshot {
     pub account_key: Option<String>,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
+pub struct AppServerFailure {
+    #[source]
+    pub error: AppServerError,
+    pub account_key: Option<String>,
+}
+
+impl AppServerFailure {
+    fn unscoped(error: AppServerError) -> Self {
+        Self { error, account_key: None }
+    }
+}
+
 impl AppServerClient {
     pub fn new() -> Self {
         Self { commands: resolve_commands().map_err(|error| error.to_string()) }
     }
 
-    pub fn fetch(&self) -> Result<AppServerSnapshot, AppServerError> {
+    pub fn fetch(&self) -> Result<AppServerSnapshot, AppServerFailure> {
         let commands = self.commands.as_ref().map_err(|message| {
-            if message.contains("Node.js") {
+            let error = if message.contains("Node.js") {
                 AppServerError::NodeNotFound
             } else if message.contains("wrapper") {
                 AppServerError::UnsupportedWrapper(message.clone())
             } else {
                 AppServerError::CodexNotFound
-            }
+            };
+            AppServerFailure::unscoped(error)
         })?;
         let mut last_spawn_error = None;
         for command in commands {
             match fetch_with_command(command) {
-                Err(AppServerError::Spawn(source))
+                Err(AppServerFailure { error: AppServerError::Spawn(source), .. })
                     if matches!(
                         source.kind(),
                         std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
@@ -104,7 +120,7 @@ impl AppServerClient {
                 result => return result,
             }
         }
-        Err(last_spawn_error.unwrap_or(AppServerError::CodexNotFound))
+        Err(AppServerFailure::unscoped(last_spawn_error.unwrap_or(AppServerError::CodexNotFound)))
     }
 }
 
@@ -114,7 +130,16 @@ impl Default for AppServerClient {
     }
 }
 
-fn fetch_with_command(command: &CommandSpec) -> Result<AppServerSnapshot, AppServerError> {
+fn fetch_with_command(command: &CommandSpec) -> Result<AppServerSnapshot, AppServerFailure> {
+    let mut verified_account_key = None;
+    fetch_with_command_scoped(command, &mut verified_account_key)
+        .map_err(|error| AppServerFailure { error, account_key: verified_account_key })
+}
+
+fn fetch_with_command_scoped(
+    command: &CommandSpec,
+    verified_account_key: &mut Option<String>,
+) -> Result<AppServerSnapshot, AppServerError> {
     let (mut child, suspended_thread) = spawn_suspended(command)?;
     let job = match JobGuard::assign(&child) {
         Ok(job) => job,
@@ -171,19 +196,11 @@ fn fetch_with_command(command: &CommandSpec) -> Result<AppServerSnapshot, AppSer
         write_json(&mut stdin, &json!({"method": "account/rateLimits/read", "id": 2}))?;
         write_json(&mut stdin, &json!({"method": "account/usage/read", "id": 3}))?;
 
-        let responses = receive_account_responses(&receiver, REQUEST_TIMEOUT)?;
-        let account =
-            response_result(responses.get(&1).ok_or(AppServerError::Closed)?, "account/read")?;
-        let limits = response_result(
-            responses.get(&2).ok_or(AppServerError::Closed)?,
-            "account/rateLimits/read",
-        )?;
-        let quota = parse_snapshot(account, limits, chrono::Utc::now().timestamp())?;
-        let token_usage = responses
-            .get(&3)
-            .and_then(|response| response_result(response, "account/usage/read").ok())
-            .map(parse_token_usage);
-        Ok(AppServerSnapshot { quota, token_usage, account_key: account_key(account) })
+        let responses =
+            receive_account_responses(&receiver, REQUEST_TIMEOUT, verified_account_key)?;
+        let (snapshot, account_key) = parse_account_responses(&responses);
+        *verified_account_key = account_key;
+        snapshot
     })();
 
     drop(stdin);
@@ -206,6 +223,33 @@ fn fetch_with_command(command: &CommandSpec) -> Result<AppServerSnapshot, AppSer
         }
         other => other,
     }
+}
+
+fn parse_account_responses(
+    responses: &HashMap<u64, RpcResponse>,
+) -> (Result<AppServerSnapshot, AppServerError>, Option<String>) {
+    let account = match responses
+        .get(&1)
+        .ok_or(AppServerError::Closed)
+        .and_then(|response| response_result(response, "account/read"))
+    {
+        Ok(account) => account,
+        Err(error) => return (Err(error), None),
+    };
+    let account_key = account_key(account);
+    let snapshot = (|| {
+        let limits = response_result(
+            responses.get(&2).ok_or(AppServerError::Closed)?,
+            "account/rateLimits/read",
+        )?;
+        let quota = parse_snapshot(account, limits, chrono::Utc::now().timestamp())?;
+        let token_usage = responses
+            .get(&3)
+            .and_then(|response| response_result(response, "account/usage/read").ok())
+            .map(parse_token_usage);
+        Ok(AppServerSnapshot { quota, token_usage, account_key: account_key.clone() })
+    })();
+    (snapshot, account_key)
 }
 
 fn spawn_suspended(spec: &CommandSpec) -> Result<(Child, SuspendedThread), AppServerError> {
@@ -264,11 +308,22 @@ fn receive_response(
     }
 }
 
+#[cfg(test)]
 fn receive_required(
     receiver: &mpsc::Receiver<String>,
     required_ids: &[u64],
     optional_ids: &[u64],
     timeout: Duration,
+) -> Result<HashMap<u64, RpcResponse>, AppServerError> {
+    receive_required_with(receiver, required_ids, optional_ids, timeout, |_| {})
+}
+
+fn receive_required_with(
+    receiver: &mpsc::Receiver<String>,
+    required_ids: &[u64],
+    optional_ids: &[u64],
+    timeout: Duration,
+    mut observe: impl FnMut(&RpcResponse),
 ) -> Result<HashMap<u64, RpcResponse>, AppServerError> {
     let deadline = Instant::now() + timeout;
     let mut responses = HashMap::new();
@@ -285,6 +340,7 @@ fn receive_required(
             if let Some(id) =
                 response.id.filter(|id| required_ids.contains(id) || optional_ids.contains(id))
             {
+                observe(&response);
                 responses.insert(id, response);
             }
         }
@@ -295,11 +351,19 @@ fn receive_required(
 fn receive_account_responses(
     receiver: &mpsc::Receiver<String>,
     timeout: Duration,
+    verified_account_key: &mut Option<String>,
 ) -> Result<HashMap<u64, RpcResponse>, AppServerError> {
     let deadline = Instant::now() + timeout;
-    let mut responses = receive_required(receiver, &[1, 2], &[3], timeout)?;
+    let mut responses = receive_required_with(receiver, &[1, 2], &[3], timeout, |response| {
+        if response.id == Some(1)
+            && let Ok(account) = response_result(response, "account/read")
+        {
+            *verified_account_key = account_key(account);
+        }
+    })?;
     if let Entry::Vacant(entry) = responses.entry(3) {
-        let remaining = deadline.saturating_duration_since(Instant::now());
+        let remaining =
+            deadline.saturating_duration_since(Instant::now()).min(OPTIONAL_USAGE_GRACE);
         if !remaining.is_zero()
             && let Ok(response) = receive_response(receiver, 3, "account/usage/read", remaining)
         {
@@ -668,6 +732,31 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_failure_preserves_the_verified_account_identity() {
+        let responses = HashMap::from([
+            (
+                1,
+                serde_json::from_value(json!({
+                    "id": 1,
+                    "result": {"account": {"type": "chatgpt", "email": "user@example.com"}}
+                }))
+                .unwrap(),
+            ),
+            (
+                2,
+                serde_json::from_value(json!({
+                    "id": 2,
+                    "error": {"message": "rate limits unavailable"}
+                }))
+                .unwrap(),
+            ),
+        ]);
+        let (snapshot, verified_account) = parse_account_responses(&responses);
+        assert!(snapshot.is_err());
+        assert_eq!(verified_account.as_deref().map(str::len), Some(64));
+    }
+
+    #[test]
     fn puts_inaccessible_store_candidates_after_npm() {
         let directory = root("path with spaces");
         let npm = directory.join("npm");
@@ -734,7 +823,7 @@ mod tests {
     }
 
     #[test]
-    fn account_response_collection_waits_for_late_usage_within_the_shared_deadline() {
+    fn account_response_collection_waits_for_late_usage_within_the_grace_period() {
         let (sender, receiver) = mpsc::channel();
         sender.send(r#"{"id":1,"result":{}}"#.to_owned()).unwrap();
         sender.send(r#"{"id":2,"result":{}}"#.to_owned()).unwrap();
@@ -743,9 +832,43 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
             late_sender.send(r#"{"id":3,"result":{}}"#.to_owned()).unwrap();
         });
-        let responses = receive_account_responses(&receiver, Duration::from_millis(200)).unwrap();
+        let responses =
+            receive_account_responses(&receiver, Duration::from_millis(200), &mut None).unwrap();
         late.join().unwrap();
         assert!(responses.contains_key(&3));
+    }
+
+    #[test]
+    fn account_response_collection_rejects_usage_after_the_grace_period() {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(r#"{"id":1,"result":{}}"#.to_owned()).unwrap();
+        sender.send(r#"{"id":2,"result":{}}"#.to_owned()).unwrap();
+        let late_sender = sender.clone();
+        let late = thread::spawn(move || {
+            thread::sleep(OPTIONAL_USAGE_GRACE + Duration::from_millis(100));
+            late_sender.send(r#"{"id":3,"result":{}}"#.to_owned()).unwrap();
+        });
+        let responses =
+            receive_account_responses(&receiver, Duration::from_secs(2), &mut None).unwrap();
+        late.join().unwrap();
+        assert!(!responses.contains_key(&3));
+    }
+
+    #[test]
+    fn account_identity_survives_a_later_required_response_failure() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(
+                r#"{"id":1,"result":{"account":{"type":"chatgpt","email":"user@example.com"}}}"#
+                    .to_owned(),
+            )
+            .unwrap();
+        drop(sender);
+        let mut verified_account = None;
+        let result =
+            receive_account_responses(&receiver, Duration::from_secs(1), &mut verified_account);
+        assert!(matches!(result, Err(AppServerError::Closed)));
+        assert_eq!(verified_account.as_deref().map(str::len), Some(64));
     }
 
     #[test]

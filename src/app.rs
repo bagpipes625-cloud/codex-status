@@ -1,4 +1,4 @@
-use crate::app_server::{AppServerClient, AppServerSnapshot};
+use crate::app_server::{AppServerClient, AppServerFailure, AppServerSnapshot};
 use crate::history::UsageLedger;
 use crate::icon::{OwnedIcon, create_icon, tone_for};
 #[cfg(test)]
@@ -106,6 +106,9 @@ const WM_SHOW_EXISTING: u32 = WM_APP + 3;
 const WM_TOGGLE_FLYOUT: u32 = WM_APP + 4;
 const WM_UPDATE_COMPLETE: u32 = WM_APP + 5;
 const WM_PREWARM_FLYOUT: u32 = WM_APP + 6;
+const WM_RESTORE_TRAY: u32 = WM_APP + 7;
+const WM_RECONCILE_DISPLAY: u32 = WM_APP + 8;
+const WM_RECONCILE_FLYOUT: u32 = WM_APP + 9;
 
 const TIMER_REFRESH: usize = 1;
 const TIMER_STARTUP: usize = 2;
@@ -142,6 +145,28 @@ const USAGE_URL: &str = "https://chatgpt.com/codex/settings/usage";
 
 thread_local! {
     static STATE: Cell<*mut AppState> = const { Cell::new(ptr::null_mut()) };
+    static STATE_BORROWED: Cell<bool> = const { Cell::new(false) };
+    static TASKBAR_CREATED_MESSAGE: Cell<u32> = const { Cell::new(0) };
+}
+
+struct StateBorrow;
+
+impl StateBorrow {
+    fn acquire(state_ptr: *mut AppState) -> Option<Self> {
+        // Win32 APIs can synchronously re-enter either window procedure. A nested
+        // callback must fall back to default handling instead of aliasing AppState.
+        if state_ptr.is_null() || STATE_BORROWED.with(|borrowed| borrowed.replace(true)) {
+            None
+        } else {
+            Some(Self)
+        }
+    }
+}
+
+impl Drop for StateBorrow {
+    fn drop(&mut self) {
+        STATE_BORROWED.with(|borrowed| borrowed.set(false));
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -182,6 +207,24 @@ impl Drop for MenuHandle {
 
 struct RefreshOutcome {
     result: Result<AppServerSnapshot, String>,
+    account_key: Option<String>,
+}
+
+impl RefreshOutcome {
+    fn from_fetch(result: Result<AppServerSnapshot, AppServerFailure>) -> Self {
+        match result {
+            Ok(snapshot) => {
+                Self { account_key: snapshot.account_key.clone(), result: Ok(snapshot) }
+            }
+            Err(failure) => {
+                Self { account_key: failure.account_key, result: Err(failure.error.to_string()) }
+            }
+        }
+    }
+
+    fn unscoped_error(error: String) -> Self {
+        Self { result: Err(error), account_key: None }
+    }
 }
 
 struct UpdateOutcome {
@@ -223,6 +266,10 @@ fn quota_switching_available(display: &DisplayState) -> bool {
     !matches!(display.quota_availability(), QuotaAvailability::Single(_))
 }
 
+fn same_verified_account(active: Option<&str>, observed: Option<&str>) -> bool {
+    observed.is_some() && active == observed
+}
+
 fn quota_alert_state(display: &DisplayState, preferred: QuotaKind) -> Option<LowQuotaAlert> {
     let kind = display.resolved_quota_kind(preferred);
     let window = display.quota_window(kind)?;
@@ -240,6 +287,21 @@ enum LaunchMode {
     Normal,
     Background,
     ApplyUpdate { parent_pid: u32, target: PathBuf },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessageLoopAction {
+    Dispatch,
+    Exit,
+    Error,
+}
+
+fn classify_get_message(result: i32) -> MessageLoopAction {
+    match result {
+        value if value > 0 => MessageLoopAction::Dispatch,
+        0 => MessageLoopAction::Exit,
+        _ => MessageLoopAction::Error,
+    }
 }
 
 struct AppState {
@@ -367,6 +429,7 @@ pub fn run() -> Result<(), AppError> {
     // latest account-verified live snapshot through DisplayState::after_error.
     let display = DisplayState::loading(None);
     let taskbar_created = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
+    TASKBAR_CREATED_MESSAGE.with(|slot| slot.set(taskbar_created));
     let (refresh_results_tx, refresh_results) = sync_channel(1);
     let (update_results_tx, update_results) = sync_channel(1);
     let state = Box::new(AppState {
@@ -414,6 +477,7 @@ pub fn run() -> Result<(), AppError> {
     diagnostic("run:state");
 
     let tray_ready = unsafe {
+        let _state_borrow = StateBorrow::acquire(raw).expect("startup owns AppState");
         let state = &mut *raw;
         ui::configure_flyout(state.flyout, state.theme);
         diagnostic("run:dwm");
@@ -424,6 +488,7 @@ pub fn run() -> Result<(), AppError> {
     diagnostic("run:tray-returned");
 
     unsafe {
+        let _state_borrow = StateBorrow::acquire(raw).expect("startup owns AppState");
         let state = &mut *raw;
         state.reset_refresh_timer(state.settings.refresh_minutes.saturating_mul(60_000));
         let _ = SetTimer(Some(hwnd), TIMER_CARD, 30_000, None);
@@ -442,20 +507,44 @@ pub fn run() -> Result<(), AppError> {
     diagnostic("run:message-loop");
 
     let mut message = MSG::default();
+    let mut message_loop_error = None;
     unsafe {
-        while GetMessageW(&mut message, None, 0, 0).as_bool() {
-            let _ = TranslateMessage(&message);
-            DispatchMessageW(&message);
+        loop {
+            match classify_get_message(GetMessageW(&mut message, None, 0, 0).0) {
+                MessageLoopAction::Dispatch => {
+                    let _ = TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+                MessageLoopAction::Exit => break,
+                MessageLoopAction::Error => {
+                    message_loop_error = Some(windows::core::Error::from_thread());
+                    break;
+                }
+            }
+        }
+    }
+
+    if message_loop_error.is_some() {
+        // GetMessageW errors bypass the normal WM_CLOSE path. Destroy both
+        // windows while STATE is still valid so WM_DESTROY releases the D2D
+        // renderer and no unowned window survives into fatal-error reporting.
+        unsafe {
+            let _ = DestroyWindow(flyout);
+            let _ = DestroyWindow(hwnd);
         }
     }
 
     STATE.with(|slot| slot.set(ptr::null_mut()));
+    TASKBAR_CREATED_MESSAGE.with(|slot| slot.set(0));
     unsafe {
         (&mut *raw).persist_usage_history(true);
         drop(Box::from_raw(raw));
     }
     drop(mutex);
-    Ok(())
+    match message_loop_error {
+        Some(error) => Err(error.into()),
+        None => Ok(()),
+    }
 }
 
 fn parse_arguments() -> Result<LaunchMode, AppError> {
@@ -523,8 +612,44 @@ unsafe extern "system" fn main_window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     unsafe {
+        // These messages synchronously re-enter the window procedure. Handle them
+        // before borrowing AppState from the thread-local pointer.
+        match message {
+            WM_QUERYENDSESSION => return LRESULT(1),
+            WM_ENDSESSION if wparam.0 != 0 => {
+                let _ = DestroyWindow(hwnd);
+                return LRESULT(0);
+            }
+            WM_CLOSE => {
+                let _ = DestroyWindow(hwnd);
+                return LRESULT(0);
+            }
+            WM_DESTROY => {
+                ui::release_card_renderer();
+                PostQuitMessage(0);
+                return LRESULT(0);
+            }
+            _ => {}
+        }
+
         let state_ptr = STATE.with(Cell::get);
         if !state_ptr.is_null() {
+            if message == WM_TRAY {
+                let event = lparam.0 as u32 & 0xffff;
+                if matches!(event, WM_RBUTTONUP | WM_CONTEXTMENU) {
+                    show_context_menu(state_ptr);
+                    return LRESULT(0);
+                }
+            }
+
+            let Some(_state_borrow) = StateBorrow::acquire(state_ptr) else {
+                let taskbar_created = TASKBAR_CREATED_MESSAGE.with(Cell::get);
+                if let Some(deferred) = deferred_main_message(message, taskbar_created) {
+                    let _ = PostMessageW(Some(hwnd), deferred, WPARAM(0), LPARAM(0));
+                }
+                return DefWindowProcW(hwnd, message, wparam, lparam);
+            };
+
             let state = &mut *state_ptr;
             if state.taskbar_created != 0 && message == state.taskbar_created {
                 state.tray_added = false;
@@ -538,7 +663,6 @@ unsafe extern "system" fn main_window_proc(
                         WM_LBUTTONUP | WM_LBUTTONDBLCLK | NIN_SELECT => {
                             state.request_toggle_flyout()
                         }
-                        WM_RBUTTONUP | WM_CONTEXTMENU => state.show_menu(),
                         _ => {}
                     }
                     return LRESULT(0);
@@ -567,6 +691,18 @@ unsafe extern "system" fn main_window_proc(
                             },
                         },
                     );
+                    return LRESULT(0);
+                }
+                WM_RESTORE_TRAY => {
+                    state.tray_added = false;
+                    let _ = state.update_tray(true);
+                    return LRESULT(0);
+                }
+                WM_RECONCILE_DISPLAY => {
+                    state.theme = ui::detect_theme(&state.settings.theme);
+                    ui::configure_flyout(state.flyout, state.theme);
+                    let _ = state.update_tray(false);
+                    let _ = InvalidateRect(Some(state.flyout), None, true);
                     return LRESULT(0);
                 }
                 WM_REFRESH_COMPLETE => {
@@ -611,24 +747,48 @@ unsafe extern "system" fn main_window_proc(
                     let _ = InvalidateRect(Some(state.flyout), None, true);
                     return LRESULT(0);
                 }
-                WM_QUERYENDSESSION => return LRESULT(1),
-                WM_ENDSESSION if wparam.0 != 0 => {
-                    let _ = DestroyWindow(hwnd);
-                    return LRESULT(0);
-                }
-                WM_CLOSE => {
-                    let _ = DestroyWindow(hwnd);
-                    return LRESULT(0);
-                }
-                WM_DESTROY => {
-                    ui::release_card_renderer();
-                    PostQuitMessage(0);
-                    return LRESULT(0);
-                }
                 _ => {}
             }
         }
         DefWindowProcW(hwnd, message, wparam, lparam)
+    }
+}
+
+unsafe fn show_context_menu(state_ptr: *mut AppState) {
+    // TrackPopupMenu runs a nested message loop, so no AppState reference may live
+    // across it. Build first, then reacquire the state only after the menu closes.
+    let (menu, hwnd) = {
+        let Some(_state_borrow) = StateBorrow::acquire(state_ptr) else {
+            return;
+        };
+        let state = unsafe { &*state_ptr };
+        let Ok(menu) = state.build_menu() else {
+            return;
+        };
+        (menu, state.hwnd)
+    };
+
+    let mut point = POINT::default();
+    let command = unsafe {
+        let _ = GetCursorPos(&mut point);
+        let _ = SetForegroundWindow(hwnd);
+        let command = TrackPopupMenu(
+            menu,
+            TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
+            point.x,
+            point.y,
+            None,
+            hwnd,
+            None,
+        )
+        .0 as u32;
+        let _ = DestroyMenu(menu);
+        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+        command
+    };
+
+    if let Some(_state_borrow) = StateBorrow::acquire(state_ptr) {
+        unsafe { (&mut *state_ptr).handle_command(command) };
     }
 }
 
@@ -640,6 +800,25 @@ unsafe extern "system" fn flyout_window_proc(
 ) -> LRESULT {
     unsafe {
         let state_ptr = STATE.with(Cell::get);
+        let _state_borrow = if state_ptr.is_null() {
+            None
+        } else if let Some(state_borrow) = StateBorrow::acquire(state_ptr) {
+            Some(state_borrow)
+        } else {
+            return match message {
+                WM_ERASEBKGND => LRESULT(1),
+                WM_CLOSE => {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                    let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                    LRESULT(0)
+                }
+                WM_DPICHANGED => {
+                    let _ = PostMessageW(Some(hwnd), WM_RECONCILE_FLYOUT, WPARAM(0), LPARAM(0));
+                    DefWindowProcW(hwnd, message, wparam, lparam)
+                }
+                _ => DefWindowProcW(hwnd, message, wparam, lparam),
+            };
+        };
         match message {
             WM_PAINT if !state_ptr.is_null() => {
                 let state = &mut *state_ptr;
@@ -830,6 +1009,12 @@ unsafe extern "system" fn flyout_window_proc(
                 }
                 return LRESULT(0);
             }
+            WM_RECONCILE_FLYOUT if !state_ptr.is_null() => {
+                let state = &mut *state_ptr;
+                state.position_flyout(IsWindowVisible(hwnd).as_bool());
+                let _ = InvalidateRect(Some(hwnd), None, true);
+                return LRESULT(0);
+            }
             WM_DPICHANGED => {
                 let suggested = &*(lparam.0 as *const RECT);
                 let _ = SetWindowPos(
@@ -847,6 +1032,16 @@ unsafe extern "system" fn flyout_window_proc(
             _ => {}
         }
         DefWindowProcW(hwnd, message, wparam, lparam)
+    }
+}
+
+fn deferred_main_message(message: u32, taskbar_created: u32) -> Option<u32> {
+    if taskbar_created != 0 && message == taskbar_created {
+        Some(WM_RESTORE_TRAY)
+    } else if matches!(message, WM_SETTINGCHANGE | WM_DISPLAYCHANGE) {
+        Some(WM_RECONCILE_DISPLAY)
+    } else {
+        None
     }
 }
 
@@ -978,8 +1173,7 @@ impl AppState {
             .spawn(move || {
                 let hwnd = HWND(hwnd_value as *mut std::ffi::c_void);
                 diagnostic("refresh:worker");
-                let outcome =
-                    RefreshOutcome { result: client.fetch().map_err(|error| error.to_string()) };
+                let outcome = RefreshOutcome::from_fetch(client.fetch());
                 diagnostic(if outcome.result.is_ok() {
                     "refresh:success"
                 } else {
@@ -992,9 +1186,9 @@ impl AppState {
                 }
             });
         if let Err(error) = spawn_result {
-            self.finish_refresh(RefreshOutcome {
-                result: Err(format!("Could not start refresh: {error}")),
-            });
+            self.finish_refresh(RefreshOutcome::unscoped_error(format!(
+                "Could not start refresh: {error}"
+            )));
         }
     }
 
@@ -1020,7 +1214,19 @@ impl AppState {
             Err(error) => {
                 self.failures = self.failures.saturating_add(1);
                 let now = Utc::now().timestamp();
-                let snapshot = self.display.snapshot.take();
+                let same_verified_account = same_verified_account(
+                    self.active_account_key.as_deref(),
+                    outcome.account_key.as_deref(),
+                );
+                let snapshot =
+                    if same_verified_account { self.display.snapshot.take() } else { None };
+                if !same_verified_account {
+                    // A partial refresh may identify a different account, but its
+                    // persisted history is not activated until the full snapshot
+                    // succeeds. This prevents stale cross-account UI on failure.
+                    self.active_account_key = None;
+                    self.history_view_cache = None;
+                }
                 self.display =
                     DisplayState::after_error(snapshot, friendly_error(&error, self.locale), now);
                 let backoff = match self.failures {
@@ -1029,7 +1235,9 @@ impl AppState {
                     _ => 15 * 60_000,
                 };
                 self.reset_refresh_timer(backoff);
-                self.refresh_history_view_cache();
+                if same_verified_account {
+                    self.refresh_history_view_cache();
+                }
             }
         }
         let _ = self.update_tray(false);
@@ -1153,7 +1361,7 @@ impl AppState {
                 );
                 match updater::launch_staged_update(&update) {
                     Ok(()) => unsafe {
-                        let _ = DestroyWindow(self.hwnd);
+                        let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
                     },
                     Err(error) => self.show_update_failure(&error.to_string()),
                 }
@@ -1564,30 +1772,6 @@ impl AppState {
         unsafe { Shell_NotifyIconGetRect(&identifier).ok() }
     }
 
-    fn show_menu(&mut self) {
-        let Ok(menu) = self.build_menu() else {
-            return;
-        };
-        let mut point = POINT::default();
-        unsafe {
-            let _ = GetCursorPos(&mut point);
-            let _ = SetForegroundWindow(self.hwnd);
-            let command = TrackPopupMenu(
-                menu,
-                TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
-                point.x,
-                point.y,
-                None,
-                self.hwnd,
-                None,
-            )
-            .0 as u32;
-            let _ = DestroyMenu(menu);
-            let _ = PostMessageW(Some(self.hwnd), WM_NULL, WPARAM(0), LPARAM(0));
-            self.handle_command(command);
-        }
-    }
-
     fn build_menu(&self) -> windows::core::Result<HMENU> {
         let owned_menu = MenuHandle(unsafe { CreatePopupMenu()? });
         let menu = owned_menu.0;
@@ -1749,7 +1933,7 @@ impl AppState {
                     let _ = InvalidateRect(Some(self.flyout), None, true);
                 }
                 CMD_EXIT => {
-                    let _ = DestroyWindow(self.hwnd);
+                    let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
                 }
                 _ => {}
             }
@@ -1932,6 +2116,45 @@ mod tests {
     fn pointer_coordinates_sign_extend_both_axes() {
         let packed = u32::from(0xfffe_u16) | (u32::from(0xfffd_u16) << 16);
         assert_eq!(pointer_coordinates(LPARAM(packed as isize)), (-2, -3));
+    }
+
+    #[test]
+    fn state_borrow_blocks_reentrant_aliasing_and_recovers_after_return() {
+        let state_ptr = ptr::dangling_mut::<AppState>();
+        let borrow = StateBorrow::acquire(state_ptr).expect("first callback owns the state");
+        assert!(StateBorrow::acquire(state_ptr).is_none());
+        drop(borrow);
+        assert!(StateBorrow::acquire(state_ptr).is_some());
+    }
+
+    #[test]
+    fn reentrant_system_changes_are_deferred_without_pointer_payloads() {
+        let taskbar_created = 0xc123;
+        assert_eq!(deferred_main_message(taskbar_created, taskbar_created), Some(WM_RESTORE_TRAY));
+        assert_eq!(
+            deferred_main_message(WM_SETTINGCHANGE, taskbar_created),
+            Some(WM_RECONCILE_DISPLAY)
+        );
+        assert_eq!(
+            deferred_main_message(WM_DISPLAYCHANGE, taskbar_created),
+            Some(WM_RECONCILE_DISPLAY)
+        );
+        assert_eq!(deferred_main_message(WM_TIMER, taskbar_created), None);
+    }
+
+    #[test]
+    fn failed_refresh_reuses_data_only_for_the_same_verified_account() {
+        assert!(same_verified_account(Some("account-a"), Some("account-a")));
+        assert!(!same_verified_account(Some("account-a"), Some("account-b")));
+        assert!(!same_verified_account(Some("account-a"), None));
+        assert!(!same_verified_account(None, None));
+    }
+
+    #[test]
+    fn message_loop_distinguishes_dispatch_exit_and_error() {
+        assert_eq!(classify_get_message(1), MessageLoopAction::Dispatch);
+        assert_eq!(classify_get_message(0), MessageLoopAction::Exit);
+        assert_eq!(classify_get_message(-1), MessageLoopAction::Error);
     }
 
     #[test]

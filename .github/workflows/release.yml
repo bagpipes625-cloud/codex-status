@@ -5,21 +5,34 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  release:
-    runs-on: windows-latest
+  build:
+    runs-on: windows-2025
+    outputs:
+      bundle-manifest-digest: ${{ steps.bundle_manifest.outputs.digest }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.97.1
           targets: x86_64-pc-windows-msvc
           components: rustfmt, clippy
       - name: Verify release version
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          $tag = "${{ github.ref_name }}"
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $tag = $env:RELEASE_TAG
           if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+)$') {
             throw "Release tag '$tag' must use the exact form vX.Y.Z."
           }
@@ -31,6 +44,8 @@ jobs:
           }
       - name: Verify
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           cargo fmt --check
           cargo clippy --locked --all-targets --target x86_64-pc-windows-msvc -- -D warnings
           cargo test --locked --all-targets --target x86_64-pc-windows-msvc
@@ -38,6 +53,8 @@ jobs:
         env:
           CODEX_STATUS_CHANNEL: portable
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           cargo build --locked --release --target x86_64-pc-windows-msvc
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           Copy-Item target/x86_64-pc-windows-msvc/release/codex-status.exe dist/CodexStatus-portable.exe
@@ -45,28 +62,61 @@ jobs:
         env:
           CODEX_STATUS_CHANNEL: stable
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           cargo build --locked --release --target x86_64-pc-windows-msvc
           Copy-Item target/x86_64-pc-windows-msvc/release/codex-status.exe dist/CodexStatus.exe
       - name: Stage portable build
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          $version = "${{ github.ref_name }}".TrimStart("v")
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $version = $env:RELEASE_TAG.TrimStart("v")
           New-Item -ItemType Directory -Path dist/portable -Force | Out-Null
           Copy-Item dist/CodexStatus.exe "dist/CodexStatus-v$version-windows-x64.exe"
           Copy-Item dist/CodexStatus-portable.exe "dist/CodexStatus-v$version-windows-x64-portable.exe"
           Copy-Item dist/CodexStatus-portable.exe dist/portable/CodexStatus.exe
           Copy-Item LICENSE, README.md, README.zh-CN.md dist/portable/
           Compress-Archive -Path dist/portable/* -DestinationPath "dist/CodexStatus-v$version-windows-x64.zip" -CompressionLevel Optimal
+          $archive = [IO.Compression.ZipFile]::OpenRead(
+            "dist/CodexStatus-v$version-windows-x64.zip"
+          )
+          try {
+            $entries = @($archive.Entries.FullName | Sort-Object)
+            $required = @('CodexStatus.exe', 'LICENSE', 'README.md', 'README.zh-CN.md')
+            if (($entries -join "`n") -cne (($required | Sort-Object) -join "`n")) {
+              throw "Portable ZIP contents are incomplete or unexpected."
+            }
+          } finally {
+            $archive.Dispose()
+          }
       - name: Build installer
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          choco install innosetup --no-progress -y
-          $version = "${{ github.ref_name }}".TrimStart("v")
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" installer/CodexStatus.iss
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          choco install innosetup --version=6.7.1 --allow-downgrade --no-progress -y
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          $isccVersion = (Get-Item -LiteralPath $iscc).VersionInfo.ProductVersion
+          if ($isccVersion -notmatch '^6\.7\.1(?:\.|$)') {
+            throw "Expected Inno Setup 6.7.1, found '$isccVersion'."
+          }
+          $version = $env:RELEASE_TAG.TrimStart("v")
+          & $iscc "/DAppVersion=$version" installer/CodexStatus.iss
       - name: Checksums
+        id: bundle_manifest
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
         run: |
-          $version = "${{ github.ref_name }}".TrimStart("v")
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $version = $env:RELEASE_TAG.TrimStart("v")
           $assets = @(
             "dist/CodexStatus-v$version-windows-x64.exe",
             "dist/CodexStatus-v$version-windows-x64-portable.exe",
@@ -78,16 +128,242 @@ jobs:
             "$hash  $([IO.Path]::GetFileName($asset))"
           }
           $lines | Set-Content -Encoding ascii "dist/CodexStatus-v$version-SHA256SUMS.txt"
+          $env:SOURCE_SHA | Set-Content -Encoding ascii dist/RELEASE_SOURCE_SHA.txt
+          $bundleFiles = @(
+            $assets
+            "dist/CodexStatus-v$version-SHA256SUMS.txt"
+            "dist/RELEASE_SOURCE_SHA.txt"
+            "CHANGELOG.md"
+          )
+          $manifest = foreach ($file in $bundleFiles) {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant()
+            "$hash  $file"
+          }
+          $manifest | Set-Content -Encoding ascii dist/RELEASE_BUNDLE_MANIFEST.txt
+          $manifestDigest = (Get-FileHash -Algorithm SHA256 `
+            -LiteralPath dist/RELEASE_BUNDLE_MANIFEST.txt).Hash.ToLowerInvariant()
+          "digest=$manifestDigest" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - name: Stage verified release bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-bundle
+          if-no-files-found: error
+          retention-days: 1
+          path: |
+            dist/CodexStatus-${{ github.ref_name }}-windows-x64.exe
+            dist/CodexStatus-${{ github.ref_name }}-windows-x64-portable.exe
+            dist/CodexStatus-${{ github.ref_name }}-windows-x64.zip
+            dist/CodexStatus-${{ github.ref_name }}-Setup-x64.exe
+            dist/CodexStatus-${{ github.ref_name }}-SHA256SUMS.txt
+            dist/RELEASE_SOURCE_SHA.txt
+            dist/RELEASE_BUNDLE_MANIFEST.txt
+            CHANGELOG.md
+
+  publish:
+    needs: build
+    runs-on: windows-2025
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified release bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-bundle
+          path: bundle
       - name: Publish GitHub release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          EXPECTED_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+          EXPECTED_MANIFEST_DIGEST: ${{ needs.build.outputs.bundle-manifest-digest }}
         run: |
-          $version = "${{ github.ref_name }}".TrimStart("v")
-          gh release create "${{ github.ref_name }}" `
-            "dist/CodexStatus-v$version-windows-x64.exe" `
-            "dist/CodexStatus-v$version-windows-x64-portable.exe" `
-            "dist/CodexStatus-v$version-windows-x64.zip" `
-            "dist/CodexStatus-v$version-Setup-x64.exe" `
-            "dist/CodexStatus-v$version-SHA256SUMS.txt" `
-            --verify-tag --title "CodexStatus ${{ github.ref_name }}" --notes-file CHANGELOG.md
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $version = $env:RELEASE_TAG.TrimStart("v")
+          $tag = $env:RELEASE_TAG
+          $manifestPath = "bundle/dist/RELEASE_BUNDLE_MANIFEST.txt"
+          $manifestDigest = (Get-FileHash -Algorithm SHA256 `
+            -LiteralPath $manifestPath).Hash.ToLowerInvariant()
+          if ($manifestDigest -cne $env:EXPECTED_MANIFEST_DIGEST) {
+            throw "Downloaded release bundle does not match the tested build output."
+          }
+          $bundlePaths = @(
+            "dist/CodexStatus-v$version-windows-x64.exe",
+            "dist/CodexStatus-v$version-windows-x64-portable.exe",
+            "dist/CodexStatus-v$version-windows-x64.zip",
+            "dist/CodexStatus-v$version-Setup-x64.exe",
+            "dist/CodexStatus-v$version-SHA256SUMS.txt",
+            "dist/RELEASE_SOURCE_SHA.txt",
+            "CHANGELOG.md"
+          )
+          $manifestHashes = [Collections.Generic.Dictionary[string,string]]::new(
+            [StringComparer]::Ordinal
+          )
+          Get-Content -LiteralPath $manifestPath | ForEach-Object {
+            if ($_ -notmatch '^(?<hash>[0-9a-f]{64})  (?<name>.+)$') {
+              throw "Release bundle manifest is malformed."
+            }
+            if (!$manifestHashes.TryAdd($Matches.name, $Matches.hash)) {
+              throw "Release bundle manifest contains duplicate paths."
+            }
+          }
+          if ($manifestHashes.Count -ne $bundlePaths.Count) {
+            throw "Release bundle manifest has an unexpected file count."
+          }
+          foreach ($relativePath in $bundlePaths) {
+            $path = "bundle/$relativePath"
+            if (!(Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Release bundle is missing '$relativePath'."
+            }
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
+            if ($manifestHashes[$relativePath] -cne $actual) {
+              throw "Release bundle file '$relativePath' failed manifest verification."
+            }
+          }
+          $sourceSha = (Get-Content -LiteralPath bundle/dist/RELEASE_SOURCE_SHA.txt -Raw).Trim()
+          if ($sourceSha -cne $env:EXPECTED_SHA -or $sourceSha -notmatch '^[0-9a-f]{40}$') {
+            throw "Release bundle source SHA does not match the triggering commit."
+          }
+          $assets = @(
+            "bundle/dist/CodexStatus-v$version-windows-x64.exe",
+            "bundle/dist/CodexStatus-v$version-windows-x64-portable.exe",
+            "bundle/dist/CodexStatus-v$version-windows-x64.zip",
+            "bundle/dist/CodexStatus-v$version-Setup-x64.exe",
+            "bundle/dist/CodexStatus-v$version-SHA256SUMS.txt"
+          )
+
+          $expected = [Collections.Generic.Dictionary[string,string]]::new(
+            [StringComparer]::Ordinal
+          )
+          foreach ($asset in $assets) {
+            if (!(Test-Path -LiteralPath $asset -PathType Leaf)) {
+              throw "Missing verified release asset '$asset'."
+            }
+            $expected[[IO.Path]::GetFileName($asset)] =
+              "sha256:$((Get-FileHash -Algorithm SHA256 -LiteralPath $asset).Hash.ToLowerInvariant())"
+          }
+
+          function Read-Release {
+            # A missing release is an expected first-publish state. Disable native
+            # error promotion only for this probe and accept only an explicit 404.
+            $PSNativeCommandUseErrorActionPreference = $false
+            $response = gh api "repos/$env:REPOSITORY/releases/tags/$tag" 2>&1
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -ne 0) {
+              $message = ($response | Out-String).Trim()
+              if ($message -match '\bHTTP 404\b') { return $null }
+              throw "Could not inspect release '$tag': $message"
+            }
+            $release = (($response -join "`n") | ConvertFrom-Json)
+            [pscustomobject]@{ isDraft = [bool]$release.draft; assets = $release.assets }
+          }
+
+          function Resolve-TagCommit {
+            $object = (gh api "repos/$env:REPOSITORY/git/ref/tags/$tag" | ConvertFrom-Json).object
+            foreach ($depth in 0..4) {
+              if ($object.type -eq 'commit') { return $object.sha }
+              if ($object.type -ne 'tag') {
+                throw "Release tag resolves to unsupported object type '$($object.type)'."
+              }
+              $object = (gh api "repos/$env:REPOSITORY/git/tags/$($object.sha)" |
+                ConvertFrom-Json).object
+            }
+            throw "Release tag annotation chain is too deep."
+          }
+
+          function Assert-ExactAssets($release, $hashes) {
+            if ($release.assets.Count -ne $hashes.Count) {
+              throw "Release asset count does not match the verified bundle."
+            }
+            foreach ($asset in $release.assets) {
+              $digest = $hashes[$asset.name]
+              if ($null -eq $digest -or $asset.digest -ne $digest) {
+                throw "Release asset '$($asset.name)' does not match the verified bundle."
+              }
+            }
+          }
+
+          function Assert-TagCommit {
+            if ((Resolve-TagCommit) -cne $sourceSha) {
+              throw "Release tag moved after this workflow was triggered."
+            }
+          }
+
+          Assert-TagCommit
+
+          $release = Read-Release
+          if ($null -eq $release) {
+            gh release create $tag --draft --verify-tag `
+              --title "CodexStatus $tag" --notes-file "bundle/CHANGELOG.md"
+            if ($LASTEXITCODE -ne 0) { throw "Could not create draft release '$tag'." }
+            $release = Read-Release
+            if ($null -eq $release -or !$release.isDraft) {
+              throw "Draft release '$tag' was not created safely."
+            }
+            Assert-TagCommit
+          }
+
+          if (!$release.isDraft) {
+            # A published release is immutable. A rerun succeeds only when its
+            # assets exactly match this run's verified bundle.
+            Assert-ExactAssets $release $expected
+            $published = [Collections.Generic.Dictionary[string,string]]::new(
+              [StringComparer]::Ordinal
+            )
+            New-Item -ItemType Directory -Path published-check -Force | Out-Null
+            gh release download $tag `
+              --pattern "CodexStatus-v$version-SHA256SUMS.txt" --dir published-check
+            if ($LASTEXITCODE -ne 0) { throw "Could not verify published checksums." }
+            Get-Content -LiteralPath "published-check/CodexStatus-v$version-SHA256SUMS.txt" |
+              ForEach-Object {
+                if ($_ -notmatch '^(?<hash>[0-9a-fA-F]{64})\s+\*?(?<name>.+)$') {
+                  throw "Published checksum file is malformed."
+                }
+                $published[$Matches.name] = "sha256:$($Matches.hash.ToLowerInvariant())"
+              }
+            if ($release.assets.Count -ne 5 -or $published.Count -ne 4) {
+              throw "Published release is incomplete."
+            }
+            foreach ($asset in $release.assets) {
+              if (!$expected.ContainsKey($asset.name)) {
+                throw "Published release contains unexpected asset '$($asset.name)'."
+              }
+              if ($asset.name -eq "CodexStatus-v$version-SHA256SUMS.txt") {
+                $downloadedDigest = "sha256:$((Get-FileHash -Algorithm SHA256 `
+                  -LiteralPath "published-check/$($asset.name)").Hash.ToLowerInvariant())"
+                if ($downloadedDigest -ne $asset.digest) {
+                  throw "Published checksum asset digest is inconsistent."
+                }
+                continue
+              }
+              if ($published[$asset.name] -ne $asset.digest) {
+                throw "Published asset '$($asset.name)' does not match its checksum."
+              }
+            }
+            Assert-TagCommit
+          } else {
+            Assert-TagCommit
+            $unknown = @($release.assets | Where-Object { !$expected.ContainsKey($_.name) })
+            if ($unknown.Count -ne 0) {
+              throw "Draft release contains unexpected assets; refusing destructive recovery."
+            }
+            foreach ($asset in $release.assets) {
+              gh release delete-asset $tag $asset.name --yes
+              if ($LASTEXITCODE -ne 0) {
+                throw "Could not remove stale draft asset '$($asset.name)'."
+              }
+            }
+            gh release upload $tag $assets
+            if ($LASTEXITCODE -ne 0) { throw "Could not upload the verified release bundle." }
+            $staged = Read-Release
+            if ($null -eq $staged -or !$staged.isDraft) {
+              throw "Release left draft state before verification completed."
+            }
+            Assert-ExactAssets $staged $expected
+            Assert-TagCommit
+            gh release edit $tag --draft=false `
+              --title "CodexStatus $tag" --notes-file "bundle/CHANGELOG.md"
+            if ($LASTEXITCODE -ne 0) { throw "Could not publish verified release '$tag'." }
+          }
