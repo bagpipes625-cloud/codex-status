@@ -68,6 +68,33 @@ impl HistoryNavigation {
     pub fn shift_week(&mut self, delta: i64) {
         self.selected_week += Duration::days(delta.saturating_mul(7));
     }
+
+    pub fn shift_visible_period(&mut self, delta: i32, today: NaiveDate) -> bool {
+        if delta == 0 {
+            return false;
+        }
+        match self.page {
+            HistoryPage::Month => {
+                let latest = today.with_day(1).expect("first day of current month");
+                if delta > 0 && self.month >= latest {
+                    return false;
+                }
+                let previous = self.month;
+                self.shift_month(delta.signum());
+                self.month != previous
+            }
+            HistoryPage::Week => {
+                let latest = monday_of(today);
+                if delta > 0 && self.selected_week >= latest {
+                    return false;
+                }
+                let previous = self.selected_week;
+                self.shift_week(i64::from(delta.signum()));
+                self.selected_week != previous
+            }
+            HistoryPage::Main => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,6 +290,27 @@ mod tests {
             ..HistoryNavigation::default()
         };
         assert_eq!(hit_test(&navigation, Some(&view), true, 280, 60, 96, true), None);
+    }
+
+    #[test]
+    fn visible_period_shift_moves_one_page_and_stops_at_today() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 7).unwrap();
+        let mut navigation = HistoryNavigation {
+            page: HistoryPage::Week,
+            selected_week: monday_of(today),
+            ..Default::default()
+        };
+        assert!(!navigation.shift_visible_period(1, today));
+        assert!(navigation.shift_visible_period(-4, today));
+        assert_eq!(navigation.selected_week, NaiveDate::from_ymd_opt(2026, 7, 27).unwrap());
+        assert!(navigation.shift_visible_period(8, today));
+        assert_eq!(navigation.selected_week, monday_of(today));
+
+        navigation.page = HistoryPage::Month;
+        navigation.month = today.with_day(1).unwrap();
+        assert!(!navigation.shift_visible_period(1, today));
+        assert!(navigation.shift_visible_period(-1, today));
+        assert_eq!(navigation.month, NaiveDate::from_ymd_opt(2026, 7, 1).unwrap());
     }
 
     #[test]

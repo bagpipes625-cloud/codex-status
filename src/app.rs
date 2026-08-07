@@ -29,7 +29,9 @@ use windows::Win32::UI::HiDpi::{
     GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::Ime::ImmDisableIME;
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_ESCAPE};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, VK_BROWSER_BACK, VK_ESCAPE,
+};
 #[cfg(any(codex_status_channel = "stable", codex_status_channel = "beta"))]
 use windows::Win32::UI::Shell::NIF_GUID;
 use windows::Win32::UI::Shell::{
@@ -46,11 +48,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     RegisterWindowMessageW, SM_CXSMICON, SW_HIDE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER,
     SWP_SHOWWINDOW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TPM_BOTTOMALIGN,
     TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WA_INACTIVE,
-    WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY,
-    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NULL, WM_PAINT, WM_QUERYENDSESSION,
-    WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_OVERLAPPED, WS_POPUP,
+    WHEEL_DELTA, WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_APPCOMMAND, WM_CAPTURECHANGED, WM_CLOSE,
+    WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND,
+    WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NULL, WM_PAINT, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WM_XBUTTONUP,
+    WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP, XBUTTON1,
 };
 #[cfg(any(codex_status_channel = "stable", codex_status_channel = "beta"))]
 use windows::core::GUID;
@@ -122,6 +124,8 @@ const FLYOUT_ACTIVATION_GUARD: Duration = Duration::from_millis(220);
 const TRAY_CLOSE_COALESCE: Duration = Duration::from_millis(250);
 const REFRESH_ANIMATION_DURATION: Duration = Duration::from_millis(600);
 const HISTORY_SAVE_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const HISTORY_WHEEL_THROTTLE: Duration = Duration::from_millis(400);
+const APPCOMMAND_BROWSER_BACKWARD_ID: u32 = 1;
 
 const CMD_REFRESH: u32 = 100;
 const CMD_USAGE: u32 = 101;
@@ -208,6 +212,45 @@ impl Drop for MenuHandle {
 struct RefreshOutcome {
     result: Result<AppServerSnapshot, String>,
     account_key: Option<String>,
+}
+
+#[derive(Default)]
+struct HistoryWheelState {
+    remainder: i32,
+    last_triggered: Option<Instant>,
+}
+
+impl HistoryWheelState {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn push(&mut self, delta: i32, now: Instant) -> Option<i32> {
+        if delta == 0 {
+            return None;
+        }
+        if self.remainder != 0 && self.remainder.signum() != delta.signum() {
+            self.remainder = 0;
+        }
+        if self
+            .last_triggered
+            .is_some_and(|last| now.saturating_duration_since(last) < HISTORY_WHEEL_THROTTLE)
+        {
+            self.remainder = 0;
+            return None;
+        }
+        self.remainder = self.remainder.saturating_add(delta);
+        if self.remainder.unsigned_abs() < WHEEL_DELTA {
+            return None;
+        }
+        let direction = if self.remainder > 0 { -1 } else { 1 };
+        self.remainder = 0;
+        Some(direction)
+    }
+
+    fn commit(&mut self, now: Instant) {
+        self.last_triggered = Some(now);
+    }
 }
 
 impl RefreshOutcome {
@@ -343,6 +386,7 @@ struct AppState {
     hovered_history_day: Option<ui::HoveredHistoryDay>,
     hovered_history_values: bool,
     refresh_button_pressed: bool,
+    history_wheel: HistoryWheelState,
 }
 
 pub fn run() -> Result<(), AppError> {
@@ -471,6 +515,7 @@ pub fn run() -> Result<(), AppError> {
         hovered_history_day: None,
         hovered_history_values: false,
         refresh_button_pressed: false,
+        history_wheel: HistoryWheelState::default(),
     });
     let raw = Box::into_raw(state);
     STATE.with(|slot| slot.set(raw));
@@ -566,6 +611,19 @@ fn pointer_coordinates(lparam: LPARAM) -> (i32, i32) {
     let x = i32::from(packed as u16 as i16);
     let y = i32::from((packed >> 16) as u16 as i16);
     (x, y)
+}
+
+fn standard_back_message(message: u32, wparam: WPARAM, lparam: LPARAM) -> bool {
+    match message {
+        WM_KEYDOWN => wparam.0 as u16 == VK_BROWSER_BACK.0,
+        WM_XBUTTONUP => ((wparam.0 >> 16) & 0xffff) as u16 == XBUTTON1,
+        WM_APPCOMMAND => ((lparam.0 as u32 >> 16) & 0x0fff) == APPCOMMAND_BROWSER_BACKWARD_ID,
+        _ => false,
+    }
+}
+
+fn wheel_delta(wparam: WPARAM) -> i32 {
+    i32::from(((wparam.0 >> 16) as u16) as i16)
 }
 
 fn refresh_rotation_degrees(elapsed: Duration) -> f32 {
@@ -844,6 +902,23 @@ unsafe extern "system" fn flyout_window_proc(
                 state.full_history_render = full_history_render;
                 return LRESULT(0);
             }
+            value if !state_ptr.is_null() && standard_back_message(value, wparam, lparam) => {
+                let state = &mut *state_ptr;
+                if state.history_navigation.page != ui::HistoryPage::Main {
+                    state.activate_history_hit(ui::HistoryHit::Back);
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                    return if value == WM_KEYDOWN { LRESULT(0) } else { LRESULT(1) };
+                }
+            }
+            WM_MOUSEWHEEL if !state_ptr.is_null() => {
+                let state = &mut *state_ptr;
+                if let Some(changed) = state.handle_history_wheel(wheel_delta(wparam)) {
+                    if changed {
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    }
+                    return LRESULT(0);
+                }
+            }
             WM_LBUTTONDOWN if !state_ptr.is_null() => {
                 let state = &mut *state_ptr;
                 let (x, y) = pointer_coordinates(lparam);
@@ -1051,6 +1126,7 @@ impl AppState {
     }
 
     fn activate_history_hit(&mut self, hit: ui::HistoryHit) {
+        self.history_wheel.reset();
         match hit {
             ui::HistoryHit::Back => {
                 self.history_navigation.page = ui::HistoryPage::Main;
@@ -1064,8 +1140,12 @@ impl AppState {
                 self.history_navigation.open_current_week(self.history_view_cache.as_ref());
                 self.hovered_history_day = None;
             }
-            ui::HistoryHit::PreviousMonth => self.history_navigation.shift_month(-1),
-            ui::HistoryHit::NextMonth => self.history_navigation.shift_month(1),
+            ui::HistoryHit::PreviousMonth | ui::HistoryHit::PreviousWeek => {
+                self.history_navigation.shift_visible_period(-1, Local::now().date_naive());
+            }
+            ui::HistoryHit::NextMonth | ui::HistoryHit::NextWeek => {
+                self.history_navigation.shift_visible_period(1, Local::now().date_naive());
+            }
             ui::HistoryHit::MonthTab => {
                 self.history_navigation.month =
                     self.history_navigation.selected_week.with_day(1).expect("week month start");
@@ -1074,18 +1154,34 @@ impl AppState {
             ui::HistoryHit::WeekTab => {
                 self.history_navigation.open_selected_week();
             }
-            ui::HistoryHit::PreviousWeek => {
-                self.history_navigation.shift_week(-1);
-            }
-            ui::HistoryHit::NextWeek => {
-                self.history_navigation.shift_week(1);
-            }
             ui::HistoryHit::Week(start) => {
                 self.history_navigation.selected_week = start;
                 self.history_navigation.page = ui::HistoryPage::Week;
                 self.hovered_history_day = None;
             }
         }
+    }
+
+    fn handle_history_wheel(&mut self, delta: i32) -> Option<bool> {
+        if self.history_navigation.page == ui::HistoryPage::Main || !self.full_history_render {
+            self.history_wheel.reset();
+            return None;
+        }
+        let now = Instant::now();
+        let Some(direction) = self.history_wheel.push(delta, now) else {
+            return Some(false);
+        };
+        let today = self
+            .history_view_cache
+            .as_ref()
+            .map(|view| view.today)
+            .unwrap_or_else(|| Local::now().date_naive());
+        let changed = self.history_navigation.shift_visible_period(direction, today);
+        if changed {
+            self.history_wheel.commit(now);
+            self.hovered_history_day = None;
+        }
+        Some(changed)
     }
 
     fn start_refresh_animation(&mut self) {
@@ -1625,6 +1721,7 @@ impl AppState {
         self.pressed_history = None;
         self.hovered_history_day = None;
         self.hovered_history_values = false;
+        self.history_wheel.reset();
         self.history_navigation.page = ui::HistoryPage::Main;
         self.history_navigation.selected_week =
             crate::history::monday_of(Local::now().date_naive());
@@ -2155,6 +2252,56 @@ mod tests {
         assert_eq!(classify_get_message(1), MessageLoopAction::Dispatch);
         assert_eq!(classify_get_message(0), MessageLoopAction::Exit);
         assert_eq!(classify_get_message(-1), MessageLoopAction::Error);
+    }
+
+    #[test]
+    fn history_wheel_accumulates_a_notch_and_throttles_momentum() {
+        let start = Instant::now();
+        let mut wheel = HistoryWheelState::default();
+        assert_eq!(wheel.push(60, start), None);
+        assert_eq!(wheel.push(60, start), Some(-1));
+        wheel.commit(start);
+        assert_eq!(wheel.push(-120, start + Duration::from_millis(399)), None);
+        assert_eq!(wheel.push(-120, start + Duration::from_millis(400)), Some(1));
+    }
+
+    #[test]
+    fn history_wheel_discards_partial_motion_when_direction_changes() {
+        let start = Instant::now();
+        let mut wheel = HistoryWheelState::default();
+        assert_eq!(wheel.push(80, start), None);
+        assert_eq!(wheel.push(-80, start), None);
+        assert_eq!(wheel.push(-40, start), Some(1));
+    }
+
+    #[test]
+    fn uncommitted_boundary_motion_does_not_throttle_the_reverse_direction() {
+        let start = Instant::now();
+        let mut wheel = HistoryWheelState::default();
+        assert_eq!(wheel.push(-120, start), Some(1));
+        assert_eq!(wheel.push(120, start + Duration::from_millis(1)), Some(-1));
+    }
+
+    #[test]
+    fn standard_windows_back_inputs_are_recognized() {
+        assert!(standard_back_message(WM_KEYDOWN, WPARAM(VK_BROWSER_BACK.0 as usize), LPARAM(0)));
+        assert!(standard_back_message(
+            WM_XBUTTONUP,
+            WPARAM(usize::from(XBUTTON1) << 16),
+            LPARAM(0)
+        ));
+        assert!(standard_back_message(
+            WM_APPCOMMAND,
+            WPARAM(0),
+            LPARAM((APPCOMMAND_BROWSER_BACKWARD_ID as isize) << 16)
+        ));
+        assert!(!standard_back_message(WM_KEYDOWN, WPARAM(VK_ESCAPE.0 as usize), LPARAM(0)));
+    }
+
+    #[test]
+    fn mouse_wheel_delta_is_sign_extended() {
+        assert_eq!(wheel_delta(WPARAM(120_usize << 16)), 120);
+        assert_eq!(wheel_delta(WPARAM((u16::MAX as usize - 119) << 16)), -120);
     }
 
     #[test]
