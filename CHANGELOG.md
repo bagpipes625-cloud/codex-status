@@ -4,6 +4,14 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-08-20
+
+- Refresh once when the existing 30-second card timer observes that either
+  quota window crossed a new reset boundary, without concurrent or repeated
+  requests and without changing the established failure backoff policy.
+- Align the dual-quota current-week navigation arrow with the Token value's
+  left edge so it no longer overlaps the heading.
+
 ## [0.6.1] - 2026-08-07
 
 - Add one-page mouse-wheel navigation to the natural-week chart and monthly

@@ -347,6 +347,36 @@ fn classify_get_message(result: i32) -> MessageLoopAction {
     }
 }
 
+#[derive(Default)]
+struct ResetRefreshState {
+    last_boundary: Option<i64>,
+}
+
+impl ResetRefreshState {
+    fn begin_if_due(&mut self, display: &DisplayState, now: i64, refreshing: bool) -> bool {
+        if refreshing {
+            return false;
+        }
+        let Some(boundary) = display
+            .snapshot
+            .as_ref()
+            .into_iter()
+            .flat_map(|snapshot| [snapshot.session.as_ref(), snapshot.weekly.as_ref()])
+            .flatten()
+            .filter_map(|window| window.resets_at)
+            .filter(|reset| *reset <= now)
+            .max()
+        else {
+            return false;
+        };
+        if self.last_boundary.is_some_and(|last| boundary <= last) {
+            return false;
+        }
+        self.last_boundary = Some(boundary);
+        true
+    }
+}
+
 struct AppState {
     hwnd: HWND,
     flyout: HWND,
@@ -387,6 +417,7 @@ struct AppState {
     hovered_history_values: bool,
     refresh_button_pressed: bool,
     history_wheel: HistoryWheelState,
+    reset_refresh: ResetRefreshState,
 }
 
 pub fn run() -> Result<(), AppError> {
@@ -516,6 +547,7 @@ pub fn run() -> Result<(), AppError> {
         hovered_history_values: false,
         refresh_button_pressed: false,
         history_wheel: HistoryWheelState::default(),
+        reset_refresh: ResetRefreshState::default(),
     });
     let raw = Box::into_raw(state);
     STATE.with(|slot| slot.set(raw));
@@ -1378,6 +1410,9 @@ impl AppState {
 
     fn refresh_time_sensitive_state(&mut self) {
         let now = Utc::now().timestamp();
+        if self.reset_refresh.begin_if_due(&self.display, now, self.refreshing) {
+            self.start_refresh(false);
+        }
         if self
             .history_view_cache
             .as_ref()
@@ -2192,6 +2227,43 @@ mod tests {
             account: AccountSummary::default(),
             fetched_at: 0,
         })
+    }
+
+    fn display_with_reset_times(weekly: Option<i64>, five_hour: Option<i64>) -> DisplayState {
+        let window = |resets_at, window_minutes| QuotaWindow {
+            used_percent: 0.0,
+            remaining_percent: 100.0,
+            window_minutes,
+            resets_at: Some(resets_at),
+        };
+        DisplayState::live(QuotaSnapshot {
+            weekly: weekly.map(|reset| window(reset, WEEK_MINUTES)),
+            session: five_hour.map(|reset| window(reset, SESSION_MINUTES)),
+            account: AccountSummary::default(),
+            fetched_at: 0,
+        })
+    }
+
+    #[test]
+    fn reset_refresh_triggers_once_for_each_crossed_boundary() {
+        let display = display_with_reset_times(Some(200), Some(100));
+        let mut state = ResetRefreshState::default();
+
+        assert!(!state.begin_if_due(&display, 99, false));
+        assert!(state.begin_if_due(&display, 100, false));
+        assert!(!state.begin_if_due(&display, 150, false));
+        assert!(state.begin_if_due(&display, 200, false));
+        assert!(!state.begin_if_due(&display, 300, false));
+    }
+
+    #[test]
+    fn reset_refresh_does_not_consume_a_boundary_while_refreshing() {
+        let display = display_with_reset_times(Some(100), Some(100));
+        let mut state = ResetRefreshState::default();
+
+        assert!(!state.begin_if_due(&display, 100, true));
+        assert!(state.begin_if_due(&display, 100, false));
+        assert!(!state.begin_if_due(&display, 100, false));
     }
 
     #[test]
