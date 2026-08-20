@@ -249,22 +249,30 @@ jobs:
               "sha256:$((Get-FileHash -Algorithm SHA256 -LiteralPath $asset).Hash.ToLowerInvariant())"
           }
 
-          function Read-Release {
+          function Read-Release([int]$attempts = 1) {
             # GitHub's release-by-tag endpoint excludes drafts. Enumerate the
             # authenticated release list so first-publish drafts remain visible.
-            $response = gh api --paginate --slurp `
-              "repos/$env:REPOSITORY/releases?per_page=100"
-            $pages = (($response -join "`n") | ConvertFrom-Json)
-            $matches = @(
-              $pages | ForEach-Object { $_ } |
-                Where-Object { $_.tag_name -ceq $tag }
-            )
-            if ($matches.Count -eq 0) { return $null }
-            if ($matches.Count -ne 1) {
-              throw "More than one release exists for tag '$tag'."
+            for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+              $response = gh api --paginate --slurp `
+                "repos/$env:REPOSITORY/releases?per_page=100"
+              $pages = (($response -join "`n") | ConvertFrom-Json)
+              $matches = @(
+                $pages | ForEach-Object { $_ } |
+                  Where-Object { $_.tag_name -ceq $tag }
+              )
+              if ($matches.Count -eq 1) {
+                $release = $matches[0]
+                return [pscustomobject]@{
+                  isDraft = [bool]$release.draft
+                  assets = $release.assets
+                }
+              }
+              if ($matches.Count -ne 0) {
+                throw "More than one release exists for tag '$tag'."
+              }
+              if ($attempt -lt $attempts) { Start-Sleep -Seconds 2 }
             }
-            $release = $matches[0]
-            [pscustomobject]@{ isDraft = [bool]$release.draft; assets = $release.assets }
+            return $null
           }
 
           function Resolve-TagCommit {
@@ -305,7 +313,9 @@ jobs:
             gh release create $tag --draft --verify-tag `
               --title "CodexStatus $tag" --notes-file "bundle/CHANGELOG.md"
             if ($LASTEXITCODE -ne 0) { throw "Could not create draft release '$tag'." }
-            $release = Read-Release
+            # A newly created draft can take a few seconds to appear in the
+            # release list. Bound the wait instead of weakening verification.
+            $release = Read-Release 6
             if ($null -eq $release -or !$release.isDraft) {
               throw "Draft release '$tag' was not created safely."
             }
