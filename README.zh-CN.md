@@ -26,8 +26,9 @@ CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标显示�
 - 使用 Direct2D/DirectWrite 绘制抗锯齿圆环和一致文字，保留 GDI
   兜底，并适配浅色、深色、高对比度、多显示器 DPI 和 Windows 10 圆角。
 - 可从托盘菜单选择跟随系统、浅色或深色界面主题。
-- 只使用官方 Codex app-server RPC `account/rateLimits/read` 与
-  `account/usage/read`，不抓取登录凭据，不访问私有接口。
+- 使用官方 Codex app-server RPC `account/rateLimits/read`、`account/usage/read`
+  以及用户确认后才调用的 `account/rateLimitResetCredit/consume`，不抓取登录凭据。
+- 点击重置机会的数量可查看按到期时间排序的券列表；点击使用并二次确认后执行重置，成功后返回主面板并刷新。服务端可能只返回部分明细，缺失 ID 的券不可使用；GDI 兜底模式不提供重置操作。
 - 按账户在本地保存官方每日 Token 日桶，用于自然周合计、周柱状图和月历热力图；缺失日期不推算，也不保存 OAuth Token、提示词或项目内容。
 - 纯 Win32 事件驱动；没有 Electron、WebView、WPF、WinUI、本地 HTTP 服务或常驻异步运行时。
 - 启动时先对隐藏面板绘制一帧，预热窗口尺寸相关的渲染器；之后隐藏时继续缓存，
@@ -64,10 +65,11 @@ CodexStatus 是一个小巧的原生 Windows 工具。通知区域图标显示�
 
 CodexStatus 不读取或保存 OAuth Token、邮箱、项目内容、提示词和 app-server 原始响应，也不收集遥测。只有用户选择 **检查更新** 后才会访问 GitHub，不设置后台更新定时器。
 
-`%LOCALAPPDATA%\CodexStatus` 下通常有两个状态文件：
+`%LOCALAPPDATA%\CodexStatus` 下的状态文件：
 
 - `settings.json`：刷新间隔、界面语言、主题、提醒阈值、首次引导和提醒去重状态。
 - `usage-history.json`：官方每日 Token 日桶，以不可逆账户摘要隔离，最多保留 8 个账户各 730 天。
+- `reset-attempt.json`：使用重置券前保存账户摘要、券标识和幂等请求编号；确定结果后清空。超时等不确定结果不会自动重试，手动查询时复用原请求编号，避免重复操作。不保存认证凭据。
 
 额度失败兜底只保留当前进程中已经过账户确认的最近一次实时结果。程序启动时不会复用磁盘额度快照，因为 CodexStatus 关闭期间当前 Codex 账户可能已经切换。
 
@@ -79,7 +81,7 @@ stable 通道继续使用上述兼容位置；development、beta 和 portable �
 
 ## 性能
 
-0.6.2 仍是事件驱动的原生 Win32 程序，在设定的刷新定时器之间不做持续
+0.6.3 仍是事件驱动的原生 Win32 程序，在设定的刷新定时器之间不做持续
 动画或轮询。启动后会通过一条排队的 UI 消息对隐藏面板绘制一帧，预热
 Direct2D、文字资源和 HWND 绘制表面；这些有界资源随后在隐藏状态下保持缓存，
 因此首次与后续展开共享同一份稳定占用，不会持续后台绘制。Windows 仍可按需

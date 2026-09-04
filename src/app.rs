@@ -377,7 +377,13 @@ impl ResetRefreshState {
     }
 }
 
+mod reset_panel;
+
 struct AppState {
+    reset_panel: crate::reset::ResetPanel,
+    reset_results: Receiver<Result<crate::reset::ResetOutcome, crate::app_server::ResetFailure>>,
+    reset_results_tx:
+        SyncSender<Result<crate::reset::ResetOutcome, crate::app_server::ResetFailure>>,
     hwnd: HWND,
     flyout: HWND,
     taskbar_created: u32,
@@ -507,7 +513,17 @@ pub fn run() -> Result<(), AppError> {
     TASKBAR_CREATED_MESSAGE.with(|slot| slot.set(taskbar_created));
     let (refresh_results_tx, refresh_results) = sync_channel(1);
     let (update_results_tx, update_results) = sync_channel(1);
+    let (reset_results_tx, reset_results) = sync_channel(1);
+    let reset_record = store.load_reset_attempt();
+    let reset_panel = crate::reset::ResetPanel {
+        storage_blocked: reset_record.is_err(),
+        pending: reset_record.ok().flatten(),
+        ..Default::default()
+    };
     let state = Box::new(AppState {
+        reset_panel,
+        reset_results,
+        reset_results_tx,
         hwnd,
         flyout,
         taskbar_created,
@@ -770,6 +786,7 @@ unsafe extern "system" fn main_window_proc(
                         state.locale,
                         state.theme,
                         ui::CardView {
+                            reset: Some(&state.reset_panel),
                             history,
                             navigation: &state.history_navigation,
                             interaction: ui::CardInteraction {
@@ -920,6 +937,7 @@ unsafe extern "system" fn flyout_window_proc(
                     state.locale,
                     state.theme,
                     ui::CardView {
+                        reset: Some(&state.reset_panel),
                         history,
                         navigation: &state.history_navigation,
                         interaction: ui::CardInteraction {
@@ -932,10 +950,18 @@ unsafe extern "system" fn flyout_window_proc(
                     },
                 );
                 state.full_history_render = full_history_render;
+                if !full_history_render && state.reset_panel.open {
+                    state.reset_panel.close();
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
                 return LRESULT(0);
             }
             value if !state_ptr.is_null() && standard_back_message(value, wparam, lparam) => {
                 let state = &mut *state_ptr;
+                if state.reset_panel.open {
+                    state.reset_back();
+                    return LRESULT(1);
+                }
                 if state.history_navigation.page != ui::HistoryPage::Main {
                     state.activate_history_hit(ui::HistoryHit::Back);
                     let _ = InvalidateRect(Some(hwnd), None, false);
@@ -944,6 +970,10 @@ unsafe extern "system" fn flyout_window_proc(
             }
             WM_MOUSEWHEEL if !state_ptr.is_null() => {
                 let state = &mut *state_ptr;
+                if state.reset_panel.open {
+                    state.scroll_reset(wheel_delta(wparam));
+                    return LRESULT(0);
+                }
                 if let Some(changed) = state.handle_history_wheel(wheel_delta(wparam)) {
                     if changed {
                         let _ = InvalidateRect(Some(hwnd), None, false);
@@ -953,6 +983,9 @@ unsafe extern "system" fn flyout_window_proc(
             }
             WM_LBUTTONDOWN if !state_ptr.is_null() => {
                 let state = &mut *state_ptr;
+                if state.reset_pointer_down(lparam) {
+                    return LRESULT(0);
+                }
                 let (x, y) = pointer_coordinates(lparam);
                 let dpi = GetDpiForWindow(hwnd).max(96);
                 if (state.history_navigation.page == ui::HistoryPage::Main
@@ -992,6 +1025,9 @@ unsafe extern "system" fn flyout_window_proc(
             }
             WM_LBUTTONUP if !state_ptr.is_null() => {
                 let state = &mut *state_ptr;
+                if state.reset_pointer_up(lparam) {
+                    return LRESULT(0);
+                }
                 if state.refresh_button_pressed {
                     let (x, y) = pointer_coordinates(lparam);
                     let dpi = GetDpiForWindow(hwnd).max(96);
@@ -1042,6 +1078,9 @@ unsafe extern "system" fn flyout_window_proc(
             }
             WM_MOUSEMOVE if !state_ptr.is_null() => {
                 let state = &mut *state_ptr;
+                if state.reset_pointer_move(lparam) {
+                    return LRESULT(0);
+                }
                 let (x, y) = pointer_coordinates(lparam);
                 let dpi = GetDpiForWindow(hwnd).max(96);
                 let history = state.history_view();
@@ -1079,6 +1118,7 @@ unsafe extern "system" fn flyout_window_proc(
             }
             WM_CAPTURECHANGED if !state_ptr.is_null() => {
                 let state = &mut *state_ptr;
+                state.reset_panel.pressed = None;
                 let had_capture = state.pressed_quota.take().is_some()
                     || state.pressed_history.take().is_some()
                     || state.refresh_button_pressed;
@@ -1264,6 +1304,10 @@ impl AppState {
     }
 
     fn start_refresh(&mut self, force: bool) {
+        if self.reset_panel.busy {
+            self.refresh_pending = true;
+            return;
+        }
         diagnostic("refresh:start");
         if force {
             self.refresh_feedback = true;
@@ -1321,6 +1365,8 @@ impl AppState {
     }
 
     fn finish_refresh(&mut self, outcome: RefreshOutcome) {
+        self.reset_panel.pressed = None;
+        self.reset_panel.hovered = None;
         self.refreshing = false;
         self.stop_refresh_feedback();
         match outcome.result {
@@ -1370,6 +1416,15 @@ impl AppState {
         }
         let _ = self.update_tray(false);
         self.sync_visible_flyout_layout();
+        self.reset_panel.scroll =
+            self.reset_panel.scroll.min(crate::reset::ResetPanel::max_scroll(
+                self.display
+                    .snapshot
+                    .as_ref()
+                    .and_then(|s| s.account.reset_credit_details.as_ref())
+                    .map_or(0, Vec::len),
+                ui::flyout_dimensions(&self.display).height as f32,
+            ));
         unsafe {
             let _ = InvalidateRect(Some(self.flyout), None, false);
         }
@@ -1400,6 +1455,7 @@ impl AppState {
     }
 
     fn finish_ready_background_work(&mut self) {
+        self.finish_reset_if_ready();
         if let Ok(outcome) = self.refresh_results.try_recv() {
             self.finish_refresh(outcome);
         }
@@ -1750,6 +1806,7 @@ impl AppState {
     }
 
     fn hide_flyout(&mut self) {
+        self.reset_panel.close();
         self.flyout_ignore_inactive_until = None;
         self.flyout_hidden_for_tray_activation = None;
         self.pressed_quota = None;

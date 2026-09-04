@@ -1,6 +1,6 @@
 [package]
 name = "codex-status"
-version = "0.6.2"
+version = "0.6.3"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -11,6 +11,10 @@ build = "build.rs"
 
 [features]
 diagnostics = []
+
+[[example]]
+name = "fake-codex"
+path = "tests/support/fake_codex.rs"
 
 [dependencies]
 chrono = { version = "0.4.41", default-features = false, features = ["clock", "serde"] }
@@ -31,6 +35,7 @@ windows = { version = "0.62.0", features = [
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_JobObjects",
+    "Win32_System_Com",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",

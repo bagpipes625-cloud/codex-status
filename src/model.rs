@@ -57,6 +57,71 @@ pub struct AccountSummary {
     pub plan_type: Option<String>,
     pub reset_credits: Option<u64>,
     pub reset_credit_expires_at: Option<i64>,
+    #[serde(default)]
+    pub reset_credit_details: Option<Vec<ResetCredit>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResetCredit {
+    pub id: Option<String>,
+    pub expires_at: Option<i64>,
+}
+
+pub fn parse_reset_credits(value: &Value) -> Option<Vec<ResetCredit>> {
+    let entries = value.pointer("/rateLimitResetCredits/credits")?.as_array()?;
+    let mut seen = std::collections::HashSet::new();
+    let mut credits: Vec<_> = entries
+        .iter()
+        .take(256)
+        .filter(|entry| {
+            entry
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| status.eq_ignore_ascii_case("available"))
+        })
+        .filter_map(|entry| {
+            let id = entry
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty() && id.len() <= 512)
+                .map(str::to_owned);
+            if id.as_ref().is_some_and(|id| !seen.insert(id.clone())) {
+                return None;
+            }
+            Some(ResetCredit {
+                id,
+                expires_at: entry.get("expiresAt").and_then(Value::as_i64).filter(|time| *time > 0),
+            })
+        })
+        .collect();
+    credits.sort_by_key(|credit| credit.expires_at.unwrap_or(i64::MAX));
+    Some(credits)
+}
+
+#[cfg(test)]
+mod reset_credit_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn missing_empty_partial_and_sorted_credit_details() {
+        assert!(parse_reset_credits(&json!({})).is_none());
+        assert_eq!(
+            parse_reset_credits(&json!({"rateLimitResetCredits":{"credits":[]}})),
+            Some(vec![])
+        );
+        let parsed = parse_reset_credits(&json!({"rateLimitResetCredits":{"credits":[
+            {"id":"b","status":"available","expiresAt":200},
+            {"id":"a","status":"available","expiresAt":100},
+            {"id":"a","status":"available","expiresAt":100},
+            {"id":"spent","status":"redeemed","expiresAt":50},
+            {"status":"available"}
+        ]}}))
+        .unwrap();
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].id.as_deref(), Some("a"));
+        assert_eq!(parsed[1].id.as_deref(), Some("b"));
+        assert_eq!(parsed[2].id, None);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -236,7 +301,12 @@ pub fn parse_snapshot(
     Ok(QuotaSnapshot {
         weekly,
         session,
-        account: AccountSummary { plan_type, reset_credits, reset_credit_expires_at },
+        account: AccountSummary {
+            plan_type,
+            reset_credits,
+            reset_credit_expires_at,
+            reset_credit_details: parse_reset_credits(rate_result),
+        },
         fetched_at,
     })
 }

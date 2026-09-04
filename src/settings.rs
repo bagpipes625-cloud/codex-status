@@ -70,6 +70,32 @@ pub struct AppStore {
 }
 
 impl AppStore {
+    pub fn load_reset_attempt(&self) -> io::Result<Option<crate::reset::ResetAttempt>> {
+        let path = self.directory.join("reset-attempt.json");
+        match fs::metadata(&path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+            Ok(metadata) if metadata.len() > SMALL_STATE_LIMIT => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Reset request record too large",
+                ));
+            }
+            Ok(_) => {}
+        }
+        let attempt: Option<crate::reset::ResetAttempt> = serde_json::from_slice(&fs::read(path)?)?;
+        if attempt.as_ref().is_some_and(|a| !a.valid()) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid reset request record"));
+        }
+        Ok(attempt)
+    }
+
+    pub fn save_reset_attempt(
+        &self,
+        attempt: Option<&crate::reset::ResetAttempt>,
+    ) -> io::Result<()> {
+        write_json_atomic(&self.directory.join("reset-attempt.json"), &attempt)
+    }
     pub fn discover() -> Self {
         let base =
             std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
@@ -159,7 +185,7 @@ impl AppStore {
 }
 
 fn is_state_temporary_name(name: &str) -> bool {
-    ["settings.tmp-", "snapshot.tmp-", "usage-history.tmp-"]
+    ["settings.tmp-", "snapshot.tmp-", "usage-history.tmp-", "reset-attempt.tmp-"]
         .into_iter()
         .find_map(|prefix| name.strip_prefix(prefix))
         .is_some_and(|suffix| {
@@ -276,6 +302,26 @@ mod tests {
     }
 
     #[test]
+    fn reset_attempt_survives_restart_and_corruption_fails_closed() {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let directory = std::env::temp_dir().join(format!("codex-status-reset-record-{suffix}"));
+        let store = AppStore::at(directory.clone());
+        assert_eq!(store.load_reset_attempt().unwrap(), None);
+        let attempt = crate::reset::ResetAttempt::new(
+            "a".repeat(64),
+            crate::model::ResetCredit { id: Some("fixture".into()), expires_at: None },
+        )
+        .unwrap();
+        store.save_reset_attempt(Some(&attempt)).unwrap();
+        assert_eq!(AppStore::at(directory.clone()).load_reset_attempt().unwrap(), Some(attempt));
+        store.save_reset_attempt(None).unwrap();
+        assert_eq!(store.load_reset_attempt().unwrap(), None);
+        fs::write(directory.join("reset-attempt.json"), b"invalid").unwrap();
+        assert!(store.load_reset_attempt().is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn round_trips_usage_history_atomically() {
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         let directory = std::env::temp_dir().join(format!("codex-status-history-{suffix}"));
@@ -352,6 +398,8 @@ mod tests {
         assert!(is_state_temporary_name("settings.tmp-123-456789-0"));
         assert!(is_state_temporary_name("snapshot.tmp-7-42"));
         assert!(is_state_temporary_name("usage-history.tmp-1-9"));
+        assert!(is_state_temporary_name("reset-attempt.tmp-1-9"));
+        assert!(!is_state_temporary_name("reset-attempt.json"));
         assert!(!is_state_temporary_name("notes.tmp-backup"));
         assert!(!is_state_temporary_name("settings.tmp-old-0"));
         assert!(!is_state_temporary_name("settings.tmp-1-2-extra"));

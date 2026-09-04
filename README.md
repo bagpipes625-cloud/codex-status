@@ -31,8 +31,11 @@ line and product decisions.
 - Direct2D/DirectWrite rounded flyout with antialiased gauges, consistent text,
   GDI fallback, and light, dark, high-contrast, and per-monitor DPI support.
 - System, light, and dark flyout themes selectable from the tray menu.
-- Official Codex app-server RPCs: `account/rateLimits/read` and
-  `account/usage/read`; no credential scraping and no private endpoints.
+- Official Codex app-server RPCs: `account/rateLimits/read`, `account/usage/read`,
+  and explicitly confirmed `account/rateLimitResetCredit/consume`; no credential scraping.
+- Click the reset-credit value for an expiration-sorted list and in-panel confirmation.
+  Success returns to the main card and refreshes quota. Partial details are labeled;
+  credits without IDs cannot be used. GDI fallback does not offer reset actions.
 - Official daily Token buckets are kept locally per account for natural-week
   totals, a weekly bar chart, and a monthly heatmap. Missing days are never
   estimated, and no OAuth token, prompt, or project content is stored.
@@ -76,7 +79,7 @@ network request.
 
 CodexStatus never reads or stores your OAuth token, email address, project content, prompts, or raw app-server response. It sends no telemetry. It contacts GitHub only after you choose **Check for updates**; there is no background update timer.
 
-Two normal state files are stored under `%LOCALAPPDATA%\CodexStatus`:
+State files are stored under `%LOCALAPPDATA%\CodexStatus`:
 
 - `settings.json`: refresh interval, UI language, theme, alert threshold, onboarding state, and alert deduplication state.
 - `usage-history.json`: official per-day Token buckets, isolated by a non-reversible
@@ -94,7 +97,12 @@ Normal builds do not write activity logs. If Windows rejects a notification icon
 
 ## Performance
 
-Version 0.6.2 remains an event-driven native Win32 process. It performs no
+`reset-attempt.json` stores the account digest, credit ID and idempotency key before
+redemption, and is cleared on a definite result. Uncertain results are never retried
+automatically; explicit retries reuse the original key, including after restart.
+No credentials are stored in this record.
+
+Version 0.6.3 remains an event-driven native Win32 process. It performs no
 continuous animation or polling between configured refresh timers. One queued
 UI message draws a hidden startup frame to prewarm Direct2D, text resources, and
 the HWND surface before normal flyout use. Those bounded resources remain cached

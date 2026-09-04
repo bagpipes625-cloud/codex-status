@@ -90,7 +90,52 @@ impl AppServerFailure {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
+pub struct ResetFailure {
+    pub error: AppServerError,
+    pub may_have_sent: bool,
+}
+
 impl AppServerClient {
+    pub fn consume_reset_credit(
+        &self,
+        attempt: &crate::reset::ResetAttempt,
+    ) -> Result<crate::reset::ResetOutcome, ResetFailure> {
+        if !attempt.valid() {
+            return Err(ResetFailure {
+                may_have_sent: false,
+                error: AppServerError::Rpc {
+                    method: "reset",
+                    message: "Invalid reset attempt".into(),
+                },
+            });
+        }
+        let commands = self.commands.as_ref().map_err(|_| ResetFailure {
+            error: AppServerError::CodexNotFound,
+            may_have_sent: false,
+        })?;
+        for (index, command) in commands.iter().enumerate() {
+            let mut may_have_sent = false;
+            let result = with_session(command, |stdin, receiver| {
+                consume_in_session(stdin, receiver, attempt, &mut may_have_sent)
+            });
+            match result {
+                Err(AppServerError::Spawn(ref e))
+                    if index + 1 < commands.len()
+                        && matches!(
+                            e.kind(),
+                            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+                        ) =>
+                {
+                    continue;
+                }
+                other => return other.map_err(|error| ResetFailure { error, may_have_sent }),
+            }
+        }
+        Err(ResetFailure { error: AppServerError::CodexNotFound, may_have_sent: false })
+    }
+
     pub fn new() -> Self {
         Self { commands: resolve_commands().map_err(|error| error.to_string()) }
     }
@@ -140,6 +185,27 @@ fn fetch_with_command_scoped(
     command: &CommandSpec,
     verified_account_key: &mut Option<String>,
 ) -> Result<AppServerSnapshot, AppServerError> {
+    with_session(command, |stdin, receiver| {
+        write_json(
+            stdin,
+            &json!({"method":"account/read","id":1,"params":{"refreshToken":false}}),
+        )?;
+        write_json(stdin, &json!({"method":"account/rateLimits/read","id":2}))?;
+        write_json(stdin, &json!({"method":"account/usage/read","id":3}))?;
+        let responses = receive_account_responses(receiver, REQUEST_TIMEOUT, verified_account_key)?;
+        let (snapshot, account_key) = parse_account_responses(&responses);
+        *verified_account_key = account_key;
+        snapshot
+    })
+}
+
+fn with_session<T>(
+    command: &CommandSpec,
+    operation: impl FnOnce(
+        &mut std::process::ChildStdin,
+        &mpsc::Receiver<String>,
+    ) -> Result<T, AppServerError>,
+) -> Result<T, AppServerError> {
     let (mut child, suspended_thread) = spawn_suspended(command)?;
     let job = match JobGuard::assign(&child) {
         Ok(job) => job,
@@ -189,18 +255,7 @@ fn fetch_with_command_scoped(
         response_result(&initialize, "initialize")?;
 
         write_json(&mut stdin, &json!({"method": "initialized", "params": {}}))?;
-        write_json(
-            &mut stdin,
-            &json!({"method": "account/read", "id": 1, "params": {"refreshToken": false}}),
-        )?;
-        write_json(&mut stdin, &json!({"method": "account/rateLimits/read", "id": 2}))?;
-        write_json(&mut stdin, &json!({"method": "account/usage/read", "id": 3}))?;
-
-        let responses =
-            receive_account_responses(&receiver, REQUEST_TIMEOUT, verified_account_key)?;
-        let (snapshot, account_key) = parse_account_responses(&responses);
-        *verified_account_key = account_key;
-        snapshot
+        operation(&mut stdin, &receiver)
     })();
 
     drop(stdin);
@@ -222,6 +277,124 @@ fn fetch_with_command_scoped(
             Err(AppServerError::Rpc { method: "app-server", message: sanitize(&stderr) })
         }
         other => other,
+    }
+}
+
+fn consume_in_session(
+    writer: &mut impl Write,
+    receiver: &mpsc::Receiver<String>,
+    attempt: &crate::reset::ResetAttempt,
+    may_have_sent: &mut bool,
+) -> Result<crate::reset::ResetOutcome, AppServerError> {
+    // Verify identity in this same isolated session before the only mutating RPC.
+    write_json(writer, &json!({"method":"account/read","id":1,"params":{"refreshToken":false}}))?;
+    let response = receive_response(receiver, 1, "account/read", REQUEST_TIMEOUT)?;
+    if account_key(response_result(&response, "account/read")?).as_ref()
+        != Some(&attempt.account_key)
+    {
+        return Err(AppServerError::Rpc {
+            method: "reset",
+            message: "Account changed; reset cancelled".into(),
+        });
+    }
+    const METHOD: &str = "account/rateLimitResetCredit/consume";
+    // A failed write can still have delivered part/all of the request.
+    *may_have_sent = true;
+    write_json(
+        writer,
+        &json!({"method":METHOD,"id":2,"params":{
+            "idempotencyKey":attempt.idempotency_key,"creditId":attempt.credit.id
+        }}),
+    )?;
+    let response = receive_response(receiver, 2, METHOD, REQUEST_TIMEOUT)?;
+    let result = response_result(&response, METHOD)?;
+    use crate::reset::ResetOutcome;
+    match result.get("outcome").and_then(Value::as_str) {
+        Some("reset") => Ok(ResetOutcome::Reset),
+        Some("alreadyRedeemed") => Ok(ResetOutcome::AlreadyRedeemed),
+        Some("nothingToReset") => Ok(ResetOutcome::NothingToReset),
+        Some("noCredit") => Ok(ResetOutcome::NoCredit),
+        _ => {
+            Err(AppServerError::Rpc { method: METHOD, message: "Unrecognized reset result".into() })
+        }
+    }
+}
+
+#[cfg(test)]
+mod reset_tests {
+    use super::*;
+    use crate::reset::{ResetAttempt, ResetOutcome};
+    fn fixture() -> (Value, ResetAttempt) {
+        let account = json!({"account":{"type":"chatgpt","email":"fixture@example.invalid"}});
+        let attempt = ResetAttempt::new(
+            account_key(&account).unwrap(),
+            crate::model::ResetCredit { id: Some("fixture-credit".into()), expires_at: None },
+        )
+        .unwrap();
+        (account, attempt)
+    }
+    #[test]
+    fn consume_only_after_identity_check_and_reuses_exact_key() {
+        for (wire, expected) in [
+            ("reset", ResetOutcome::Reset),
+            ("alreadyRedeemed", ResetOutcome::AlreadyRedeemed),
+            ("nothingToReset", ResetOutcome::NothingToReset),
+            ("noCredit", ResetOutcome::NoCredit),
+        ] {
+            let (account, attempt) = fixture();
+            for _ in 0..2 {
+                let (tx, rx) = mpsc::channel();
+                tx.send(json!({"id":1,"result":account}).to_string()).unwrap();
+                tx.send(json!({"id":2,"result":{"outcome":wire}}).to_string()).unwrap();
+                let mut buffer = Vec::new();
+                let mut sent = false;
+                assert_eq!(
+                    consume_in_session(&mut buffer, &rx, &attempt, &mut sent).unwrap(),
+                    expected
+                );
+                assert!(sent);
+                let lines: Vec<Value> = String::from_utf8(buffer)
+                    .unwrap()
+                    .lines()
+                    .map(|l| serde_json::from_str(l).unwrap())
+                    .collect();
+                assert_eq!(lines.len(), 2);
+                assert_eq!(lines[0]["method"], "account/read");
+                assert_eq!(lines[1]["params"]["creditId"], "fixture-credit");
+                assert_eq!(lines[1]["params"]["idempotencyKey"], attempt.idempotency_key);
+            }
+        }
+    }
+    #[test]
+    fn changed_or_missing_account_never_sends_mutation() {
+        let (_, attempt) = fixture();
+        for account in [
+            json!({"account":null}),
+            json!({"account":{"type":"chatgpt","email":"other@example.invalid"}}),
+        ] {
+            let (tx, rx) = mpsc::channel();
+            tx.send(json!({"id":1,"result":account}).to_string()).unwrap();
+            let mut buffer = Vec::new();
+            let mut sent = false;
+            assert!(consume_in_session(&mut buffer, &rx, &attempt, &mut sent).is_err());
+            assert!(!sent);
+            assert!(!String::from_utf8(buffer).unwrap().contains("consume"));
+        }
+    }
+    #[test]
+    fn unsupported_or_unknown_result_stays_uncertain() {
+        let (account, attempt) = fixture();
+        for response in [
+            json!({"id":2,"error":{"code":-32601,"message":"unsupported"}}),
+            json!({"id":2,"result":{"outcome":"future"}}),
+        ] {
+            let (tx, rx) = mpsc::channel();
+            tx.send(json!({"id":1,"result":account}).to_string()).unwrap();
+            tx.send(response.to_string()).unwrap();
+            let mut sent = false;
+            assert!(consume_in_session(&mut Vec::new(), &rx, &attempt, &mut sent).is_err());
+            assert!(sent);
+        }
     }
 }
 

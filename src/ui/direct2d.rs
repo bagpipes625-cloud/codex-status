@@ -56,6 +56,7 @@ thread_local! {
 }
 
 pub(super) struct PaintInput<'a> {
+    pub reset: Option<&'a crate::reset::ResetPanel>,
     pub hwnd: HWND,
     pub pixel_size: (i32, i32),
     pub dpi: u32,
@@ -623,6 +624,8 @@ const fn locale_name(locale: Locale) -> PCWSTR {
     }
 }
 
+mod reset_panel;
+
 #[allow(clippy::too_many_arguments)]
 fn draw_frame(
     target: &ID2D1HwndRenderTarget,
@@ -635,6 +638,9 @@ fn draw_frame(
     input: &PaintInput<'_>,
 ) -> Result<()> {
     let dimensions = flyout_dimensions(input.state);
+    if let Some(panel) = input.reset.filter(|panel| panel.open) {
+        return reset_panel::draw(target, factory, formats, brushes, input, panel);
+    }
     let width = dimensions.width as f32;
     let height = dimensions.height as f32;
     unsafe {
@@ -1434,7 +1440,11 @@ fn draw_stacked_metrics(
         &account.credits,
         rect(200.0, 198.0, 312.0, 236.0),
         &formats.stacked_value,
-        &brushes.text,
+        if input.reset.is_some_and(|p| p.hovered == Some(crate::reset::ResetHit::Open)) {
+            &brushes.interactive
+        } else {
+            &brushes.text
+        },
     );
     if let Some(detail) = account.credit_detail.as_deref() {
         draw_text(
@@ -1514,7 +1524,11 @@ fn draw_bottom_metrics(
         &account.credits,
         rect(203.0, 296.0, 350.0, 332.0),
         &formats.metric_value,
-        &brushes.text,
+        if input.reset.is_some_and(|p| p.hovered == Some(crate::reset::ResetHit::Open)) {
+            &brushes.interactive
+        } else {
+            &brushes.text
+        },
     );
     if let Some(detail) = account.credit_detail.as_deref() {
         let value_width = measure_text(dwrite, &account.credits, &formats.metric_value)

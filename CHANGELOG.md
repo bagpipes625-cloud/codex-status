@@ -4,6 +4,18 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-09-04
+
+- Open reset credits from the main flyout, sorted by expiration, with in-panel
+  confirmation, overflow scrolling, and an automatic quota refresh after success.
+- Use the official reset-credit RPC only after explicit confirmation and a
+  same-session account check. Serialize with refresh and persist the original
+  idempotency key for uncertain results, including process restarts.
+- Distinguish missing/partial details from zero credits; disable credits without
+  IDs and avoid inventing expiration dates. GDI fallback remains read-only.
+- Verify with network-free RPC fixtures and Direct2D renders. No real credit
+  was consumed during release testing.
+
 ## [0.6.2] - 2026-08-20
 
 - Refresh once when the existing 30-second card timer observes that either

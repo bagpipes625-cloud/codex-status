@@ -72,6 +72,7 @@ pub struct CardInteraction {
 
 #[derive(Debug, Clone, Copy)]
 pub struct CardView<'a> {
+    pub reset: Option<&'a crate::reset::ResetPanel>,
     pub history: Option<&'a UsageHistoryView>,
     pub navigation: &'a HistoryNavigation,
     pub interaction: CardInteraction,
@@ -426,6 +427,7 @@ pub fn paint_card(
             locale,
             theme,
             history: view.history,
+            reset: view.reset,
             navigation: view.navigation,
             interaction: view.interaction,
         });
@@ -472,6 +474,7 @@ pub fn prewarm_card_renderer(
             locale,
             theme,
             history: view.history,
+            reset: view.reset,
             navigation: view.navigation,
             interaction: view.interaction,
         });
