@@ -2,9 +2,9 @@
 
 All notable changes to CodexStatus are documented here.
 
-## [Unreleased]
+## [0.6.4] - 2026-09-04
 
-- Development-only: repair missing quota, credit details, and daily Token buckets
+- Repair missing quota, credit details, and daily Token buckets
   with bounded read-only HTTPS GETs after the primary app-server query. Keep valid
   primary quota visible while supplementary work finishes; retain successful
   Token reads when quota fails rather than querying them again.
