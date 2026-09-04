@@ -74,6 +74,7 @@ pub struct AppServerSnapshot {
     pub quota: QuotaSnapshot,
     pub token_usage: Option<TokenUsageSnapshot>,
     pub account_key: Option<String>,
+    pub(crate) supplement_allowed: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -82,11 +83,12 @@ pub struct AppServerFailure {
     #[source]
     pub error: AppServerError,
     pub account_key: Option<String>,
+    pub(crate) token_usage: Option<TokenUsageSnapshot>,
 }
 
 impl AppServerFailure {
     fn unscoped(error: AppServerError) -> Self {
-        Self { error, account_key: None }
+        Self { error, account_key: None, token_usage: None }
     }
 }
 
@@ -177,26 +179,52 @@ impl Default for AppServerClient {
 
 fn fetch_with_command(command: &CommandSpec) -> Result<AppServerSnapshot, AppServerFailure> {
     let mut verified_account_key = None;
-    fetch_with_command_scoped(command, &mut verified_account_key)
-        .map_err(|error| AppServerFailure { error, account_key: verified_account_key })
+    let mut token_usage = None;
+    fetch_with_command_scoped(command, &mut verified_account_key, &mut token_usage)
+        .map_err(|error| AppServerFailure { error, account_key: verified_account_key, token_usage })
 }
 
 fn fetch_with_command_scoped(
     command: &CommandSpec,
     verified_account_key: &mut Option<String>,
+    token_usage: &mut Option<TokenUsageSnapshot>,
 ) -> Result<AppServerSnapshot, AppServerError> {
-    with_session(command, |stdin, receiver| {
-        write_json(
-            stdin,
-            &json!({"method":"account/read","id":1,"params":{"refreshToken":false}}),
-        )?;
-        write_json(stdin, &json!({"method":"account/rateLimits/read","id":2}))?;
-        write_json(stdin, &json!({"method":"account/usage/read","id":3}))?;
-        let responses = receive_account_responses(receiver, REQUEST_TIMEOUT, verified_account_key)?;
-        let (snapshot, account_key) = parse_account_responses(&responses);
-        *verified_account_key = account_key;
-        snapshot
-    })
+    let mut supplement_allowed = true;
+    let mut rpc_allowed = true;
+    let result = with_session_observed(
+        command,
+        |stdin, receiver| {
+            write_json(
+                stdin,
+                &json!({"method":"account/read","id":1,"params":{"refreshToken":false}}),
+            )?;
+            write_json(stdin, &json!({"method":"account/rateLimits/read","id":2}))?;
+            write_json(stdin, &json!({"method":"account/usage/read","id":3}))?;
+            let responses = receive_account_responses(
+                receiver,
+                REQUEST_TIMEOUT,
+                verified_account_key,
+                &mut rpc_allowed,
+                token_usage,
+            )?;
+            let (snapshot, account_key) = parse_account_responses(&responses);
+            *verified_account_key = account_key;
+            snapshot
+        },
+        &mut supplement_allowed,
+    );
+    supplement_allowed &= rpc_allowed;
+    match result {
+        Ok(mut snapshot) => {
+            snapshot.supplement_allowed &= supplement_allowed;
+            Ok(snapshot)
+        }
+        Err(_) if !supplement_allowed => Err(AppServerError::Rpc {
+            method: "account/rateLimits/read",
+            message: "Authentication or rate limit response; fallback suppressed".into(),
+        }),
+        Err(error) => Err(error),
+    }
 }
 
 fn with_session<T>(
@@ -205,6 +233,17 @@ fn with_session<T>(
         &mut std::process::ChildStdin,
         &mpsc::Receiver<String>,
     ) -> Result<T, AppServerError>,
+) -> Result<T, AppServerError> {
+    with_session_observed(command, operation, &mut true)
+}
+
+fn with_session_observed<T>(
+    command: &CommandSpec,
+    operation: impl FnOnce(
+        &mut std::process::ChildStdin,
+        &mpsc::Receiver<String>,
+    ) -> Result<T, AppServerError>,
+    supplement_allowed: &mut bool,
 ) -> Result<T, AppServerError> {
     let (mut child, suspended_thread) = spawn_suspended(command)?;
     let job = match JobGuard::assign(&child) {
@@ -265,6 +304,7 @@ fn with_session<T>(
     drop(job);
     terminate(&mut child);
     let stderr = error_receiver.recv_timeout(READER_CLEANUP_TIMEOUT).unwrap_or_default();
+    *supplement_allowed = !crate::refresh::blocked_error(&stderr);
     // Dropping a JoinHandle detaches it. The job close normally makes both
     // readers finish immediately; the bounded receive also protects the rare
     // case where assigning the process to a job was rejected by Windows.
@@ -416,11 +456,18 @@ fn parse_account_responses(
             "account/rateLimits/read",
         )?;
         let quota = parse_snapshot(account, limits, chrono::Utc::now().timestamp())?;
-        let token_usage = responses
-            .get(&3)
-            .and_then(|response| response_result(response, "account/usage/read").ok())
-            .map(parse_token_usage);
-        Ok(AppServerSnapshot { quota, token_usage, account_key: account_key.clone() })
+        let token_usage = responses.get(&3).and_then(token_usage_response);
+        Ok(AppServerSnapshot {
+            quota,
+            token_usage,
+            account_key: account_key.clone(),
+            supplement_allowed: !responses.values().any(|response| {
+                response
+                    .error
+                    .as_ref()
+                    .is_some_and(|error| crate::refresh::blocked_error(&error.message))
+            }),
+        })
     })();
     (snapshot, account_key)
 }
@@ -525,9 +572,21 @@ fn receive_account_responses(
     receiver: &mpsc::Receiver<String>,
     timeout: Duration,
     verified_account_key: &mut Option<String>,
+    supplement_allowed: &mut bool,
+    token_usage: &mut Option<TokenUsageSnapshot>,
 ) -> Result<HashMap<u64, RpcResponse>, AppServerError> {
     let deadline = Instant::now() + timeout;
     let mut responses = receive_required_with(receiver, &[1, 2], &[3], timeout, |response| {
+        if response.id == Some(3) {
+            *token_usage = token_usage_response(response);
+        }
+        if response
+            .error
+            .as_ref()
+            .is_some_and(|error| crate::refresh::blocked_error(&error.message))
+        {
+            *supplement_allowed = false;
+        }
         if response.id == Some(1)
             && let Ok(account) = response_result(response, "account/read")
         {
@@ -540,10 +599,25 @@ fn receive_account_responses(
         if !remaining.is_zero()
             && let Ok(response) = receive_response(receiver, 3, "account/usage/read", remaining)
         {
+            if response
+                .error
+                .as_ref()
+                .is_some_and(|error| crate::refresh::blocked_error(&error.message))
+            {
+                *supplement_allowed = false;
+            }
+            *token_usage = token_usage_response(&response);
             entry.insert(response);
         }
     }
     Ok(responses)
+}
+
+fn token_usage_response(response: &RpcResponse) -> Option<TokenUsageSnapshot> {
+    response_result(response, "account/usage/read")
+        .ok()
+        .filter(|value| value.get("dailyUsageBuckets").is_some_and(Value::is_array))
+        .map(parse_token_usage)
 }
 
 fn response_result<'a>(
@@ -564,7 +638,7 @@ fn sanitize(value: &str) -> String {
         .collect()
 }
 
-fn account_key(account_result: &Value) -> Option<String> {
+pub(crate) fn account_key(account_result: &Value) -> Option<String> {
     let account = account_result.get("account")?;
     let identity = account
         .get("email")
@@ -905,6 +979,71 @@ mod tests {
     }
 
     #[test]
+    fn optional_auth_errors_suppress_fallback_even_before_required_timeout() {
+        for status in [401, 403, 429] {
+            let (sender, receiver) = mpsc::channel();
+            sender.send(json!({"id":1,"result":{"account":{"type":"chatgpt","email":"fixture@example.invalid"}}}).to_string()).unwrap();
+            sender
+                .send(
+                    json!({"id":3,"error":{"code":-32603,"message":format!("HTTP {status}")}})
+                        .to_string(),
+                )
+                .unwrap();
+            drop(sender);
+            let mut allowed = true;
+            assert!(
+                receive_account_responses(
+                    &receiver,
+                    Duration::from_millis(20),
+                    &mut None,
+                    &mut allowed,
+                    &mut None
+                )
+                .is_err()
+            );
+            assert!(!allowed);
+        }
+    }
+
+    #[test]
+    fn token_buckets_distinguish_missing_from_explicit_empty() {
+        for (value, present) in [
+            (json!({}), false),
+            (json!({"dailyUsageBuckets":null}), false),
+            (json!({"dailyUsageBuckets":[]}), true),
+        ] {
+            let response: RpcResponse =
+                serde_json::from_value(json!({"id":3,"result":value})).unwrap();
+            assert_eq!(token_usage_response(&response).is_some(), present);
+        }
+    }
+
+    #[test]
+    fn grace_period_retains_tokens_when_quota_rpc_failed() {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(json!({"id":1,"result":{"account":{"type":"chatgpt","email":"fixture@example.invalid"}}}).to_string()).unwrap();
+        sender
+            .send(json!({"id":2,"error":{"code":-32603,"message":"temporary failure"}}).to_string())
+            .unwrap();
+        let late = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            sender.send(json!({"id":3,"result":{"dailyUsageBuckets":[{"startDate":"2026-09-04","tokens":42}]}}).to_string()).unwrap();
+        });
+        let mut retained = None;
+        let responses = receive_account_responses(
+            &receiver,
+            Duration::from_secs(1),
+            &mut None,
+            &mut true,
+            &mut retained,
+        )
+        .unwrap();
+        late.join().unwrap();
+        assert!(parse_account_responses(&responses).0.is_err());
+        assert_eq!(retained.unwrap().daily_buckets[0].tokens, 42);
+    }
+
+    #[test]
     fn rate_limit_failure_preserves_the_verified_account_identity() {
         let responses = HashMap::from([
             (
@@ -1005,8 +1144,14 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
             late_sender.send(r#"{"id":3,"result":{}}"#.to_owned()).unwrap();
         });
-        let responses =
-            receive_account_responses(&receiver, Duration::from_millis(200), &mut None).unwrap();
+        let responses = receive_account_responses(
+            &receiver,
+            Duration::from_millis(200),
+            &mut None,
+            &mut true,
+            &mut None,
+        )
+        .unwrap();
         late.join().unwrap();
         assert!(responses.contains_key(&3));
     }
@@ -1021,8 +1166,14 @@ mod tests {
             thread::sleep(OPTIONAL_USAGE_GRACE + Duration::from_millis(100));
             late_sender.send(r#"{"id":3,"result":{}}"#.to_owned()).unwrap();
         });
-        let responses =
-            receive_account_responses(&receiver, Duration::from_secs(2), &mut None).unwrap();
+        let responses = receive_account_responses(
+            &receiver,
+            Duration::from_secs(2),
+            &mut None,
+            &mut true,
+            &mut None,
+        )
+        .unwrap();
         late.join().unwrap();
         assert!(!responses.contains_key(&3));
     }
@@ -1038,8 +1189,13 @@ mod tests {
             .unwrap();
         drop(sender);
         let mut verified_account = None;
-        let result =
-            receive_account_responses(&receiver, Duration::from_secs(1), &mut verified_account);
+        let result = receive_account_responses(
+            &receiver,
+            Duration::from_secs(1),
+            &mut verified_account,
+            &mut true,
+            &mut None,
+        );
         assert!(matches!(result, Err(AppServerError::Closed)));
         assert_eq!(verified_account.as_deref().map(str::len), Some(64));
     }

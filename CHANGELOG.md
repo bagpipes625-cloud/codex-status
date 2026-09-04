@@ -4,6 +4,15 @@ All notable changes to CodexStatus are documented here.
 
 ## [Unreleased]
 
+- Development-only: repair missing quota, credit details, and daily Token buckets
+  with bounded read-only HTTPS GETs after the primary app-server query. Keep valid
+  primary quota visible while supplementary work finishes; retain successful
+  Token reads when quota fails rather than querying them again.
+- Bind fallback to the current account, disable redirects, cap response sizes,
+  suppress authentication/rate-limit retries, and reuse a bounded same-account
+  credit cache during cooldown. Reset-credit confirmation and consumption rules
+  are unchanged. No real credit was consumed during validation.
+
 ## [0.6.3] - 2026-09-04
 
 - Open reset credits from the main flyout, sorted by expiration, with in-panel

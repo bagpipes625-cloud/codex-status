@@ -68,7 +68,9 @@ The installer is not yet code-signed, so Microsoft Defender SmartScreen may show
 - **Right-click:** refresh now, open the Codex usage page, choose a 1/5/15-minute interval, configure a low-quota alert, select a theme, toggle startup, check for updates, or exit.
 - **Tray label:** the selected five-hour or weekly remaining percentage, rounded to the nearest whole number. With two windows, the status rule tracks the non-selected quota; with one window, both the label and rule follow the available quota.
 
-CodexStatus only calls the locally installed `codex app-server`. Each refresh performs `initialize → account/read → account/rateLimits/read + account/usage/read`, then closes the process tree using a Windows Job Object. It selects an exact 10,080-minute window first and only accepts a 6–8 day fallback; a short window is never mislabeled as weekly quota. Official daily usage buckets are mirrored locally for the natural-week and calendar Token views; missing days are not estimated.
+CodexStatus first calls the locally installed `codex app-server`. Each refresh performs `initialize → account/read → account/rateLimits/read + account/usage/read`, then closes the process tree using a Windows Job Object. This development branch can repair missing quota, reset-credit details, or daily Token buckets using fixed, read-only HTTPS GET endpoints on `chatgpt.com`. Valid primary quota is shown before supplementary reads finish. Missing fields are distinct from explicit zero/empty results. Each supplementary endpoint is attempted at most once per refresh, with a 60-second cooldown; authentication/rate-limit failures suppress further fallback. No supplementary request can redeem a credit.
+
+It selects an exact 10,080-minute window first and only accepts a 6–8 day fallback; a short window is never mislabeled as weekly quota. Official daily usage buckets are mirrored locally for the natural-week and calendar Token views; missing days are not estimated. Credit count and rows from a successful supplementary response are applied together. A memory-only credit cache lasts at most five minutes and is reused only for the same account and unchanged available count; expired rows, zero/count changes, and account changes invalidate it.
 
 Each quota card draws its actual remaining percentage on the outer gauge. The
 inner gauge shows the percentage of cycle time remaining, calculated locally
@@ -77,7 +79,7 @@ network request.
 
 ## Privacy
 
-CodexStatus never reads or stores your OAuth token, email address, project content, prompts, or raw app-server response. It sends no telemetry. It contacts GitHub only after you choose **Check for updates**; there is no background update timer.
+The read-only fallback uses an existing, valid access token from the current Codex `auth.json` in memory, after matching its account to the primary response. It never persists or logs credentials, email addresses, or raw responses, and does not refresh tokens, read browser cookies, or change login state. Unsupported credential storage or an explicit `CODEX_STATUS_CODEX` executable override leaves fallback disabled. Requests do not follow redirects and retain normal TLS certificate validation. Account changes discard late results; same-account credential rotation skips fallback without discarding valid primary data. These internal endpoints may change; app-server remains the primary path. No project content or prompts are read. It sends no telemetry. It contacts GitHub only after you choose **Check for updates**; there is no background update timer.
 
 State files are stored under `%LOCALAPPDATA%\CodexStatus`:
 

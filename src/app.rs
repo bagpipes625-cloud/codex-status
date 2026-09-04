@@ -212,6 +212,7 @@ impl Drop for MenuHandle {
 struct RefreshOutcome {
     result: Result<AppServerSnapshot, String>,
     account_key: Option<String>,
+    complete: bool,
 }
 
 #[derive(Default)]
@@ -256,17 +257,21 @@ impl HistoryWheelState {
 impl RefreshOutcome {
     fn from_fetch(result: Result<AppServerSnapshot, AppServerFailure>) -> Self {
         match result {
-            Ok(snapshot) => {
-                Self { account_key: snapshot.account_key.clone(), result: Ok(snapshot) }
-            }
-            Err(failure) => {
-                Self { account_key: failure.account_key, result: Err(failure.error.to_string()) }
-            }
+            Ok(snapshot) => Self {
+                account_key: snapshot.account_key.clone(),
+                result: Ok(snapshot),
+                complete: true,
+            },
+            Err(failure) => Self {
+                account_key: failure.account_key,
+                result: Err(failure.error.to_string()),
+                complete: true,
+            },
         }
     }
 
     fn unscoped_error(error: String) -> Self {
-        Self { result: Err(error), account_key: None }
+        Self { result: Err(error), account_key: None, complete: true }
     }
 }
 
@@ -400,6 +405,7 @@ struct AppState {
     theme: ui::Theme,
     display: DisplayState,
     client: AppServerClient,
+    fallback: std::sync::Arc<std::sync::Mutex<crate::refresh::FallbackState>>,
     refresh_results: Receiver<RefreshOutcome>,
     refresh_results_tx: SyncSender<RefreshOutcome>,
     update_results: Receiver<UpdateOutcome>,
@@ -540,6 +546,7 @@ pub fn run() -> Result<(), AppError> {
         theme,
         display,
         client: AppServerClient::new(),
+        fallback: Default::default(),
         refresh_results,
         refresh_results_tx,
         update_results,
@@ -1338,6 +1345,7 @@ impl AppState {
 
         let hwnd_value = self.hwnd.0 as isize;
         let client = self.client.clone();
+        let fallback = self.fallback.clone();
         let results = self.refresh_results_tx.clone();
         let spawn_result = thread::Builder::new()
             .name("codex-status-refresh".to_owned())
@@ -1345,7 +1353,24 @@ impl AppState {
             .spawn(move || {
                 let hwnd = HWND(hwnd_value as *mut std::ffi::c_void);
                 diagnostic("refresh:worker");
-                let outcome = RefreshOutcome::from_fetch(client.fetch());
+                let outcome = RefreshOutcome::from_fetch(crate::refresh::fetch(
+                    &client,
+                    &fallback,
+                    |snapshot| {
+                        let mut interim = RefreshOutcome::from_fetch(Ok(snapshot));
+                        interim.complete = false;
+                        if results.send(interim).is_ok() {
+                            unsafe {
+                                let _ = PostMessageW(
+                                    Some(hwnd),
+                                    WM_REFRESH_COMPLETE,
+                                    WPARAM(0),
+                                    LPARAM(0),
+                                );
+                            }
+                        }
+                    },
+                ));
                 diagnostic(if outcome.result.is_ok() {
                     "refresh:success"
                 } else {
@@ -1367,8 +1392,10 @@ impl AppState {
     fn finish_refresh(&mut self, outcome: RefreshOutcome) {
         self.reset_panel.pressed = None;
         self.reset_panel.hovered = None;
-        self.refreshing = false;
-        self.stop_refresh_feedback();
+        self.refreshing = !outcome.complete;
+        if outcome.complete {
+            self.stop_refresh_feedback();
+        }
         match outcome.result {
             Ok(snapshot) => {
                 self.failures = 0;
@@ -1382,7 +1409,9 @@ impl AppState {
                 self.refresh_history_view_cache();
                 self.persist_usage_history(false);
                 self.display = DisplayState::live(snapshot.quota);
-                self.reset_refresh_timer(self.settings.refresh_minutes.saturating_mul(60_000));
+                if outcome.complete {
+                    self.reset_refresh_timer(self.settings.refresh_minutes.saturating_mul(60_000));
+                }
                 self.maybe_alert();
             }
             Err(error) => {
@@ -1428,7 +1457,7 @@ impl AppState {
         unsafe {
             let _ = InvalidateRect(Some(self.flyout), None, false);
         }
-        if self.refresh_pending {
+        if outcome.complete && self.refresh_pending {
             self.refresh_pending = false;
             self.start_refresh(true);
         }

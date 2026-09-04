@@ -5,6 +5,7 @@ pub mod app_server;
 pub mod history;
 mod icon;
 pub mod model;
+pub mod refresh;
 pub mod reset;
 pub mod settings;
 pub mod startup;
