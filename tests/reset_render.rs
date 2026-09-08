@@ -17,14 +17,17 @@ fn render_reset_credit_states() {
         let now = chrono::Utc::now().timestamp();
         let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("dist/reset-render");
         std::fs::create_dir_all(&output).unwrap();
-        for (name, compact, dark, count, confirm) in [
-            ("dual-list", false, false, 2, false),
-            ("dual-confirm", false, false, 2, true),
-            ("compact-list", true, false, 2, false),
-            ("compact-confirm", true, false, 2, true),
-            ("dark-list", false, true, 8, false),
-            ("dark-confirm", true, true, 2, true),
-            ("empty", true, false, 0, false),
+        for (name, compact, dark, count, confirm, success) in [
+            ("dual-list", false, false, 2, false, false),
+            ("dual-confirm", false, false, 2, true, false),
+            ("dual-success", false, false, 2, false, true),
+            ("compact-list", true, false, 2, false, false),
+            ("compact-confirm", true, false, 2, true, false),
+            ("compact-success", true, false, 2, false, true),
+            ("dark-list", false, true, 8, false, false),
+            ("dark-confirm", true, true, 2, true, false),
+            ("dark-success", true, true, 2, false, true),
+            ("empty", true, false, 0, false, false),
         ] {
             let quota = |minutes| QuotaWindow {
                 used_percent: 35.0,
@@ -41,6 +44,7 @@ fn render_reset_credit_states() {
             let panel = ResetPanel {
                 open: true,
                 confirmation: confirm.then(|| credits[0].clone()),
+                success,
                 ..Default::default()
             };
             let state = DisplayState::live(QuotaSnapshot {

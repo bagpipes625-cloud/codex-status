@@ -117,7 +117,9 @@ const TIMER_STARTUP: usize = 2;
 const TIMER_CARD: usize = 3;
 const TIMER_FLYOUT_ACTIVATE: usize = 4;
 const TIMER_REFRESH_ANIMATION: usize = 5;
+const TIMER_RESET_RESULT: usize = 6;
 const REFRESH_ANIMATION_INTERVAL_MS: u32 = 16;
+const RESET_RESULT_POLL_INTERVAL_MS: u32 = 250;
 
 const TRAY_ACTIVATION_DEBOUNCE: Duration = Duration::from_millis(300);
 const FLYOUT_ACTIVATION_GUARD: Duration = Duration::from_millis(220);
@@ -957,7 +959,11 @@ unsafe extern "system" fn flyout_window_proc(
                     },
                 );
                 state.full_history_render = full_history_render;
-                if !full_history_render && state.reset_panel.open {
+                if !full_history_render
+                    && state.reset_panel.open
+                    && !state.reset_panel.busy
+                    && !state.reset_panel.success
+                {
                     state.reset_panel.close();
                     let _ = InvalidateRect(Some(hwnd), None, false);
                 }
@@ -1835,7 +1841,9 @@ impl AppState {
     }
 
     fn hide_flyout(&mut self) {
-        self.reset_panel.close();
+        if !self.reset_panel.busy && !self.reset_panel.success {
+            self.reset_panel.close();
+        }
         self.flyout_ignore_inactive_until = None;
         self.flyout_hidden_for_tray_activation = None;
         self.pressed_quota = None;
@@ -2211,6 +2219,7 @@ impl Drop for AppState {
             let _ = KillTimer(Some(self.hwnd), TIMER_CARD);
             let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
             let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_ANIMATION);
+            let _ = KillTimer(Some(self.hwnd), TIMER_RESET_RESULT);
             if self.tray_added {
                 let data = self.notify_data();
                 let _ = Shell_NotifyIconW(NIM_DELETE, &data);

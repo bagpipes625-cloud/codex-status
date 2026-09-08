@@ -156,6 +156,43 @@ pub(super) fn draw(
             );
         }
     }
+    if panel.success {
+        let overlay = alpha_brush(target, if input.theme.dark { 0.58 } else { 0.25 })?;
+        let top = (h - 126.0) / 2.0;
+        unsafe {
+            target.FillRectangle(&rect(0.0, 0.0, w, h), &overlay);
+            target.FillRoundedRectangle(
+                &rounded_rect(34.0, top, w - 34.0, top + 126.0, 10.0),
+                &b.metrics_surface,
+            );
+            target.DrawRoundedRectangle(
+                &rounded_rect(34.0, top, w - 34.0, top + 126.0, 10.0),
+                &b.line,
+                1.0,
+                None::<&ID2D1StrokeStyle>,
+            );
+        }
+        draw_text(
+            target,
+            locale.text("Reset successful", "重置成功"),
+            rect(44.0, top + 18.0, w - 44.0, top + 52.0),
+            &f.title,
+            &b.text,
+        );
+        draw_text(
+            target,
+            locale.text("The reset request completed successfully.", "重置操作已成功完成。"),
+            rect(44.0, top + 49.0, w - 44.0, top + 75.0),
+            &f.date,
+            &b.muted,
+        );
+        let button = rounded_rect(60.0, top + 76.0, w - 60.0, top + 108.0, 6.0);
+        unsafe {
+            target.DrawRoundedRectangle(&button, &b.line, 1.0, None::<&ID2D1StrokeStyle>);
+        }
+        draw_text(target, locale.text("OK", "知道了"), button.rect, &f.date, &b.text);
+        return Ok(());
+    }
     if let Some(credit) = &panel.confirmation {
         let overlay = alpha_brush(target, if input.theme.dark { 0.58 } else { 0.25 })?;
         let top = (h - 166.0) / 2.0;

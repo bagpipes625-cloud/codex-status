@@ -36,6 +36,12 @@ fn main() {
                 json!({"dailyUsageBuckets":[{"startDate":chrono::Local::now().format("%Y-%m-%d").to_string(),"tokens":480000000}]})
             }
             "account/rateLimitResetCredit/consume" => {
+                if let Some(delay) = std::env::var("CODEX_STATUS_FIXTURE_RESET_DELAY_MS")
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok())
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(delay.min(5_000)));
+                }
                 assert_eq!(request["params"]["creditId"], "fixture-1");
                 if consumed {
                     let old: Value =

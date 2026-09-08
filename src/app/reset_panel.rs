@@ -119,6 +119,7 @@ impl AppState {
                 }
             }
             ResetHit::Confirm => self.start_reset(),
+            ResetHit::DismissSuccess => self.reset_back(),
         }
     }
 
@@ -206,10 +207,15 @@ impl AppState {
             attempt
         };
         self.reset_panel.busy = true;
+        self.reset_panel.success = false;
         self.reset_panel.message = None;
         let client = self.client.clone();
         let sender = self.reset_results_tx.clone();
         let hwnd_value = self.hwnd.0 as isize;
+        unsafe {
+            let _ =
+                SetTimer(Some(self.hwnd), TIMER_RESET_RESULT, RESET_RESULT_POLL_INTERVAL_MS, None);
+        }
         let worker = thread::Builder::new()
             .name("codex-status-reset".into())
             .stack_size(512 * 1024)
@@ -227,6 +233,9 @@ impl AppState {
                 }
             });
         if worker.is_err() {
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER_RESET_RESULT);
+            }
             self.reset_panel.busy = false;
             if !self.reset_panel.retrying && self.store.save_reset_attempt(None).is_ok() {
                 self.reset_panel.pending = None;
@@ -241,6 +250,9 @@ impl AppState {
         let Ok(result) = self.reset_results.try_recv() else {
             return;
         };
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_RESET_RESULT);
+        }
         self.reset_panel.busy = false;
         let not_sent = result
             .as_ref()
@@ -253,8 +265,21 @@ impl AppState {
         }
         match result {
             Ok(ResetOutcome::Reset | ResetOutcome::AlreadyRedeemed) => {
-                self.reset_panel.close();
+                self.reset_panel.confirmation = None;
+                self.reset_panel.confirmation_account = None;
+                self.reset_panel.message = None;
+                self.reset_panel.success = true;
+                self.reset_panel.open = true;
                 self.history_navigation.page = ui::HistoryPage::Main;
+                if !unsafe { IsWindowVisible(self.flyout) }.as_bool() {
+                    self.show_balloon(
+                        self.locale.text("Reset successful", "重置成功"),
+                        self.locale.text(
+                            "The reset request completed successfully.",
+                            "重置操作已成功完成。",
+                        ),
+                    );
+                }
             }
             Ok(ResetOutcome::NothingToReset) => {
                 self.reset_panel.message =

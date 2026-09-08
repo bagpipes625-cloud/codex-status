@@ -42,6 +42,7 @@ pub enum ResetHit {
     Cancel,
     Confirm,
     Retry,
+    DismissSuccess,
 }
 
 #[derive(Debug, Default)]
@@ -57,6 +58,7 @@ pub struct ResetPanel {
     pub pending: Option<ResetAttempt>,
     pub storage_blocked: bool,
     pub retrying: bool,
+    pub success: bool,
 }
 
 impl ResetPanel {
@@ -69,6 +71,7 @@ impl ResetPanel {
         self.confirmation_account = None;
         self.pressed = None;
         self.hovered = None;
+        self.success = false;
     }
 
     pub fn max_scroll(count: usize, height: f32) -> f32 {
@@ -84,6 +87,11 @@ impl ResetPanel {
                 inside(x, y, 203.0, 298.0, 350.0, 335.0)
             })
             .then_some(ResetHit::Open);
+        }
+        if self.success {
+            let top = (h - 126.0) / 2.0;
+            return inside(x, y, 60.0, top + 76.0, w - 60.0, top + 108.0)
+                .then_some(ResetHit::DismissSuccess);
         }
         if self.busy {
             return None;
@@ -149,5 +157,10 @@ mod tests {
         assert_eq!(panel.hit(false, 2, 280.0, 228.0), Some(ResetHit::Confirm));
         panel.busy = true;
         assert_eq!(panel.hit(false, 2, 280.0, 228.0), None);
+        panel.busy = false;
+        panel.confirmation = None;
+        panel.success = true;
+        assert_eq!(panel.hit(false, 2, 188.0, 205.0), Some(ResetHit::DismissSuccess));
+        assert_eq!(panel.hit(false, 2, 30.0, 30.0), None);
     }
 }
