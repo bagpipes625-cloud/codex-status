@@ -60,6 +60,7 @@ pub struct ResetPanel {
     pub retrying: bool,
     pub success: bool,
     pub success_notified: bool,
+    pub success_interactive: bool,
 }
 
 impl ResetPanel {
@@ -74,6 +75,11 @@ impl ResetPanel {
         self.hovered = None;
         self.success = false;
         self.success_notified = false;
+        self.success_interactive = false;
+    }
+
+    pub fn captures_pointer(&self) -> bool {
+        self.open && (!self.success || self.success_interactive)
     }
 
     pub fn max_scroll(count: usize, height: f32) -> f32 {
@@ -91,6 +97,9 @@ impl ResetPanel {
             .then_some(ResetHit::Open);
         }
         if self.success {
+            if !self.success_interactive {
+                return None;
+            }
             let top = (h - 126.0) / 2.0;
             return inside(x, y, 60.0, top + 76.0, w - 60.0, top + 108.0)
                 .then_some(ResetHit::DismissSuccess);
@@ -163,10 +172,14 @@ mod tests {
         panel.confirmation = None;
         panel.success = true;
         panel.success_notified = true;
+        assert!(!panel.captures_pointer());
+        panel.success_interactive = true;
+        assert!(panel.captures_pointer());
         assert_eq!(panel.hit(false, 2, 188.0, 205.0), Some(ResetHit::DismissSuccess));
         assert_eq!(panel.hit(false, 2, 30.0, 30.0), None);
         panel.close();
         assert!(!panel.success);
         assert!(!panel.success_notified);
+        assert!(!panel.success_interactive);
     }
 }

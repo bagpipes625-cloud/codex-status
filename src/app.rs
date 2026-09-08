@@ -959,6 +959,9 @@ unsafe extern "system" fn flyout_window_proc(
                     },
                 );
                 state.full_history_render = full_history_render;
+                if full_history_render && state.reset_panel.success {
+                    state.reset_panel.success_interactive = true;
+                }
                 if !full_history_render && state.reset_panel.open {
                     let announce_success =
                         state.reset_panel.success && !state.reset_panel.success_notified;
@@ -984,7 +987,7 @@ unsafe extern "system" fn flyout_window_proc(
             }
             WM_MOUSEWHEEL if !state_ptr.is_null() => {
                 let state = &mut *state_ptr;
-                if state.reset_panel.open {
+                if state.reset_panel.captures_pointer() {
                     state.scroll_reset(wheel_delta(wparam));
                     return LRESULT(0);
                 }
@@ -1844,6 +1847,8 @@ impl AppState {
     fn hide_flyout(&mut self) {
         if !self.reset_panel.busy && !self.reset_panel.success {
             self.reset_panel.close();
+        } else if self.reset_panel.success {
+            self.reset_panel.success_interactive = false;
         }
         self.flyout_ignore_inactive_until = None;
         self.flyout_hidden_for_tray_activation = None;

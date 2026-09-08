@@ -41,7 +41,7 @@ impl AppState {
             }
             return true;
         }
-        self.reset_panel.open
+        self.reset_panel.captures_pointer()
     }
 
     pub(super) fn reset_pointer_up(&mut self, lparam: LPARAM) -> bool {
@@ -56,7 +56,7 @@ impl AppState {
             self.reset_invalidate();
             return true;
         }
-        self.reset_panel.open
+        self.reset_panel.captures_pointer()
     }
 
     pub(super) fn reset_pointer_move(&mut self, lparam: LPARAM) -> bool {
@@ -65,7 +65,7 @@ impl AppState {
             self.reset_panel.hovered = hit;
             self.reset_invalidate();
         }
-        self.reset_panel.open
+        self.reset_panel.captures_pointer()
     }
 
     pub(super) fn reset_back(&mut self) {
@@ -209,6 +209,7 @@ impl AppState {
         self.reset_panel.busy = true;
         self.reset_panel.success = false;
         self.reset_panel.success_notified = false;
+        self.reset_panel.success_interactive = false;
         self.reset_panel.message = None;
         let client = self.client.clone();
         let sender = self.reset_results_tx.clone();
@@ -271,6 +272,7 @@ impl AppState {
                 self.reset_panel.message = None;
                 self.reset_panel.success = true;
                 self.reset_panel.success_notified = false;
+                self.reset_panel.success_interactive = false;
                 self.reset_panel.open = true;
                 self.history_navigation.page = ui::HistoryPage::Main;
                 if !unsafe { IsWindowVisible(self.flyout) }.as_bool() || !self.full_history_render {
