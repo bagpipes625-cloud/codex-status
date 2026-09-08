@@ -271,7 +271,7 @@ impl AppState {
                 self.reset_panel.success = true;
                 self.reset_panel.open = true;
                 self.history_navigation.page = ui::HistoryPage::Main;
-                if !unsafe { IsWindowVisible(self.flyout) }.as_bool() {
+                if !unsafe { IsWindowVisible(self.flyout) }.as_bool() || !self.full_history_render {
                     self.show_balloon(
                         self.locale.text("Reset successful", "重置成功"),
                         self.locale.text(
@@ -309,6 +309,13 @@ impl AppState {
                             .into(),
                     )
                 };
+            }
+        }
+        if !self.full_history_render {
+            let notice = self.reset_panel.message.clone();
+            self.reset_panel.close();
+            if let Some(message) = notice {
+                self.show_balloon(self.locale.text("Reset not completed", "重置未完成"), &message);
             }
         }
         self.refresh_pending = false;

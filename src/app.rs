@@ -959,11 +959,7 @@ unsafe extern "system" fn flyout_window_proc(
                     },
                 );
                 state.full_history_render = full_history_render;
-                if !full_history_render
-                    && state.reset_panel.open
-                    && !state.reset_panel.busy
-                    && !state.reset_panel.success
-                {
+                if !full_history_render && state.reset_panel.open {
                     state.reset_panel.close();
                     let _ = InvalidateRect(Some(hwnd), None, false);
                 }
