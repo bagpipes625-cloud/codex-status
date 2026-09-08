@@ -208,6 +208,7 @@ impl AppState {
         };
         self.reset_panel.busy = true;
         self.reset_panel.success = false;
+        self.reset_panel.success_notified = false;
         self.reset_panel.message = None;
         let client = self.client.clone();
         let sender = self.reset_results_tx.clone();
@@ -269,16 +270,12 @@ impl AppState {
                 self.reset_panel.confirmation_account = None;
                 self.reset_panel.message = None;
                 self.reset_panel.success = true;
+                self.reset_panel.success_notified = false;
                 self.reset_panel.open = true;
                 self.history_navigation.page = ui::HistoryPage::Main;
                 if !unsafe { IsWindowVisible(self.flyout) }.as_bool() || !self.full_history_render {
-                    self.show_balloon(
-                        self.locale.text("Reset successful", "重置成功"),
-                        self.locale.text(
-                            "The reset request completed successfully.",
-                            "重置操作已成功完成。",
-                        ),
-                    );
+                    self.show_reset_success_balloon();
+                    self.reset_panel.success_notified = true;
                 }
             }
             Ok(ResetOutcome::NothingToReset) => {
@@ -321,5 +318,12 @@ impl AppState {
         self.refresh_pending = false;
         self.start_refresh(true);
         self.reset_invalidate();
+    }
+
+    pub(super) fn show_reset_success_balloon(&self) {
+        self.show_balloon(
+            self.locale.text("Reset successful", "重置成功"),
+            self.locale.text("The reset request completed successfully.", "重置操作已成功完成。"),
+        );
     }
 }

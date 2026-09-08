@@ -59,6 +59,7 @@ pub struct ResetPanel {
     pub storage_blocked: bool,
     pub retrying: bool,
     pub success: bool,
+    pub success_notified: bool,
 }
 
 impl ResetPanel {
@@ -72,6 +73,7 @@ impl ResetPanel {
         self.pressed = None;
         self.hovered = None;
         self.success = false;
+        self.success_notified = false;
     }
 
     pub fn max_scroll(count: usize, height: f32) -> f32 {
@@ -160,7 +162,11 @@ mod tests {
         panel.busy = false;
         panel.confirmation = None;
         panel.success = true;
+        panel.success_notified = true;
         assert_eq!(panel.hit(false, 2, 188.0, 205.0), Some(ResetHit::DismissSuccess));
         assert_eq!(panel.hit(false, 2, 30.0, 30.0), None);
+        panel.close();
+        assert!(!panel.success);
+        assert!(!panel.success_notified);
     }
 }

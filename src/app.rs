@@ -960,7 +960,12 @@ unsafe extern "system" fn flyout_window_proc(
                 );
                 state.full_history_render = full_history_render;
                 if !full_history_render && state.reset_panel.open {
+                    let announce_success =
+                        state.reset_panel.success && !state.reset_panel.success_notified;
                     state.reset_panel.close();
+                    if announce_success {
+                        state.show_reset_success_balloon();
+                    }
                     let _ = InvalidateRect(Some(hwnd), None, false);
                 }
                 return LRESULT(0);
