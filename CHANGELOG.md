@@ -2,6 +2,19 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.6.5] - 2026-09-08
+
+- Keep reset operations coherent when the flyout is hidden, and show a clear
+  in-panel success acknowledgement when it is reopened. Subsequent quota
+  refresh success or failure does not alter the reset result.
+- Poll reset completion only while an operation is active so network failures
+  reliably leave the processing state even if a window message is missed.
+- Preserve usable fallback behavior if Direct2D becomes unavailable, using a
+  single tray notification without leaving an invisible modal state.
+- Keep the verified reset-credit RPC, account check, credit ID, and persistent
+  idempotency behavior unchanged. Validation used only isolated fake credits;
+  no real reset credit was consumed.
+
 ## [0.6.4] - 2026-09-04
 
 - Repair missing quota, credit details, and daily Token buckets
