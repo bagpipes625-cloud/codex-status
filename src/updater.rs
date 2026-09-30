@@ -10,7 +10,10 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::ptr;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, ERROR_LOCK_VIOLATION,
+    ERROR_SHARING_VIOLATION, HANDLE, WAIT_OBJECT_0,
+};
 use windows::Win32::Networking::WinHttp::{
     INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
     WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE, WinHttpCloseHandle, WinHttpConnect,
@@ -38,6 +41,7 @@ const MAX_METADATA_BYTES: usize = 512 * 1024;
 const MAX_EXECUTABLE_BYTES: usize = 32 * 1024 * 1024;
 const UPDATE_WAIT_MS: u32 = 30_000;
 const UPDATE_STARTUP_CONFIRMATION: Duration = Duration::from_secs(3);
+const UPDATE_FILE_RETRY_BUDGET: Duration = Duration::from_secs(5);
 const HTTP_REQUEST_DEADLINE: Duration = Duration::from_secs(60);
 const STALE_PENDING_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -669,7 +673,7 @@ fn apply_update(parent_pid: u32, target: &Path) -> Result<(), UpdateError> {
     let pending_wide = wide0(pending.as_os_str());
     let target_wide = wide0(target.as_os_str());
     let backup_wide = wide0(backup.as_os_str());
-    let replacement = unsafe {
+    let replacement = retry_update_file_operation(|| unsafe {
         ReplaceFileW(
             PCWSTR(target_wide.as_ptr()),
             PCWSTR(pending_wide.as_ptr()),
@@ -678,7 +682,7 @@ fn apply_update(parent_pid: u32, target: &Path) -> Result<(), UpdateError> {
             None,
             None,
         )
-    };
+    });
     if let Err(error) = replacement {
         let _ = fs::remove_file(&pending);
         return Err(error.into());
@@ -690,14 +694,39 @@ fn apply_update(parent_pid: u32, target: &Path) -> Result<(), UpdateError> {
         }
         Err(launch_error) => {
             let backup_wide = wide0(backup.as_os_str());
-            unsafe {
+            retry_update_file_operation(|| unsafe {
                 MoveFileExW(
                     PCWSTR(backup_wide.as_ptr()),
                     PCWSTR(target_wide.as_ptr()),
                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-                )?;
-            }
+                )
+            })?;
             Err(launch_error.into())
+        }
+    }
+}
+
+fn retry_update_file_operation(
+    mut operation: impl FnMut() -> windows::core::Result<()>,
+) -> windows::core::Result<()> {
+    let deadline = Instant::now() + UPDATE_FILE_RETRY_BUDGET;
+    loop {
+        match operation() {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let transient =
+                    [ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION]
+                        .iter()
+                        .any(|code| error.code() == HRESULT::from_win32(code.0));
+                if !transient || Instant::now() >= deadline {
+                    return Err(error);
+                }
+                std::thread::sleep(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(100)),
+                );
+            }
         }
     }
 }
@@ -845,6 +874,58 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn rollback_waits_for_a_real_windows_file_lock_before_restoring_old_bytes() {
+        let root = temporary_directory("rollback-lock");
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("CodexStatus.exe");
+        let backup = root.join("CodexStatus.backup");
+        fs::write(&target, b"new").unwrap();
+        fs::write(&backup, b"old").unwrap();
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0)
+            .open(&target)
+            .unwrap();
+        let source = wide0(backup.as_os_str());
+        let destination = wide0(target.as_os_str());
+        let blocked = unsafe {
+            MoveFileExW(
+                PCWSTR(source.as_ptr()),
+                PCWSTR(destination.as_ptr()),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        assert!(blocked.is_err(), "fixture must actually prevent replacement");
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                std::thread::sleep(Duration::from_millis(250));
+                drop(held);
+            });
+            retry_update_file_operation(|| unsafe {
+                MoveFileExW(
+                    PCWSTR(source.as_ptr()),
+                    PCWSTR(destination.as_ptr()),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            })
+            .unwrap();
+        });
+        assert_eq!(fs::read(&target).unwrap(), b"old");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn update_file_retry_does_not_repeat_permanent_errors() {
+        let mut attempts = 0;
+        let result = retry_update_file_operation(|| {
+            attempts += 1;
+            Err(windows::core::Error::from_hresult(HRESULT::from_win32(ERROR_INVALID_PARAMETER.0)))
+        });
+        assert!(result.is_err());
+        assert_eq!(attempts, 1);
+    }
 
     fn temporary_directory(name: &str) -> PathBuf {
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();

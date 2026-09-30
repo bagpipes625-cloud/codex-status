@@ -109,7 +109,7 @@ redemption, and is cleared on a definite result. Uncertain results are never ret
 automatically; explicit retries reuse the original key, including after restart.
 No credentials are stored in this record.
 
-Version 0.6.6 remains an event-driven native Win32 process. It performs no
+Version 0.6.7 remains an event-driven native Win32 process. It performs no
 continuous animation or polling between configured refresh timers. One queued
 UI message draws a hidden startup frame to prewarm Direct2D, text resources, and
 the HWND surface before normal flyout use. Those bounded resources remain cached

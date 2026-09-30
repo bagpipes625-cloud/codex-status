@@ -2,6 +2,15 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.6.7] - 2026-09-30
+
+- Retry atomic update replacement and rollback for up to five seconds when
+  Windows briefly denies file access or retains an image/file lock after exit.
+  Other errors fail immediately. Preserve the old-version backup throughout
+  failed startup recovery; normal updates do not add delays or background work.
+- Retain the read-only Credits paging introduced in 0.6.6. Verify recovery with a
+  real Windows sharing lock and isolated cross-version update fixtures.
+
 ## [0.6.6] - 2026-09-30
 
 - Add a read-only Credits balance view in the existing reset-credit area, with
