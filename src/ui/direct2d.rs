@@ -10,11 +10,11 @@ use super::{
     HEADER_TEXT_BOTTOM, HEADER_TEXT_TOP, HEADER_VERSION_BOTTOM, HEADER_VERSION_TOP,
     HistoryNavigation, HistoryPage, Locale, QuotaPanelGeometry, QuotaPanelSlot,
     REFRESH_ARC_START_DEGREES, REFRESH_ARC_SWEEP_DEGREES, REFRESH_BUTTON_GAP,
-    REFRESH_BUTTON_RADIUS, REFRESH_BUTTON_RIGHT, Theme, UsageSummaryWeek, accent_for,
+    REFRESH_BUTTON_RADIUS, REFRESH_BUTTON_RIGHT, ResourcePage, Theme, UsageSummaryWeek, accent_for,
     account_metrics, flyout_dimensions, format_tokens, inner_track_color, interactive_text_color,
     outer_track_color, quota_bar_color, quota_card_colors, quota_label, quota_panel_geometry,
-    refresh_icon_color, reset_details, theoretical_color, theoretical_remaining_percent,
-    updated_text, version_text, weekly_usage_metrics,
+    refresh_icon_color, reset_details, resource_label, theoretical_color,
+    theoretical_remaining_percent, updated_text, version_text, weekly_usage_metrics,
 };
 use crate::history::UsageHistoryView;
 use crate::model::{DisplayState, QuotaAvailability, QuotaKind, QuotaWindow};
@@ -455,6 +455,7 @@ struct FormatSet {
     date: IDWriteTextFormat,
     metric_label: IDWriteTextFormat,
     metric_value: IDWriteTextFormat,
+    metric_small_value: IDWriteTextFormat,
     detail: IDWriteTextFormat,
     stacked_label: IDWriteTextFormat,
     stacked_value: IDWriteTextFormat,
@@ -527,6 +528,14 @@ impl FormatSet {
                 factory,
                 locale,
                 20.0,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_TEXT_ALIGNMENT_LEADING,
+                true,
+            )?,
+            metric_small_value: make_format(
+                factory,
+                locale,
+                16.0,
                 DWRITE_FONT_WEIGHT_SEMI_BOLD,
                 DWRITE_TEXT_ALIGNMENT_LEADING,
                 true,
@@ -753,7 +762,7 @@ fn draw_frame(
         stroke_style,
     );
 
-    let account = account_metrics(input.state, input.locale);
+    let account = account_metrics(input.state, input.locale, input.navigation.resource_page);
     match input.state.quota_availability() {
         QuotaAvailability::Single(kind) => {
             draw_quota_panel(
@@ -767,7 +776,7 @@ fn draw_frame(
                 kind,
                 QuotaPanelSlot::Left,
             )?;
-            draw_stacked_metrics(target, factory, formats, brushes, input, &account);
+            draw_stacked_metrics(target, factory, dwrite, formats, brushes, input, &account);
         }
         QuotaAvailability::None | QuotaAvailability::Both => {
             draw_quota_panel(
@@ -1377,6 +1386,7 @@ fn draw_quota_panel(
 fn draw_stacked_metrics(
     target: &ID2D1HwndRenderTarget,
     factory: &ID2D1Factory,
+    dwrite: &IDWriteFactory,
     formats: &FormatSet,
     brushes: &Brushes,
     input: &PaintInput<'_>,
@@ -1408,6 +1418,7 @@ fn draw_stacked_metrics(
     draw_usage_heading(
         target,
         factory,
+        dwrite,
         formats,
         brushes,
         input.locale,
@@ -1428,19 +1439,24 @@ fn draw_stacked_metrics(
         &formats.stacked_detail,
         detail_brush,
     );
-    draw_text(
+    draw_paged_heading(
         target,
-        input.locale.text("Reset credits", "重置机会"),
-        rect(200.0, 173.0, 312.0, 197.0),
-        &formats.stacked_label,
-        &brushes.muted,
+        factory,
+        dwrite,
+        formats,
+        brushes,
+        resource_label(account.page, input.locale),
+        rect(197.0, 173.0, 315.0, 197.0),
+        account.page == ResourcePage::Resets,
     );
     draw_text(
         target,
         &account.credits,
         rect(200.0, 198.0, 312.0, 236.0),
         &formats.stacked_value,
-        if input.reset.is_some_and(|p| p.hovered == Some(crate::reset::ResetHit::Open)) {
+        if account.page == ResourcePage::Resets
+            && input.reset.is_some_and(|p| p.hovered == Some(crate::reset::ResetHit::Open))
+        {
             &brushes.interactive
         } else {
             &brushes.text
@@ -1492,89 +1508,148 @@ fn draw_bottom_metrics(
     draw_usage_heading(
         target,
         factory,
+        dwrite,
         formats,
         brushes,
         input.locale,
         input.navigation.summary_week,
         false,
     );
-    draw_text(
+    draw_inline_metrics(
         target,
+        dwrite,
+        formats,
         &weekly.tokens,
+        Some(&weekly.range),
         rect(30.0, 298.0, 178.0, 334.0),
-        &formats.metric_value,
         value_brush,
-    );
-    draw_text(
-        target,
-        &weekly.range,
-        rect(30.0, 303.0, 178.0, 335.0),
-        &formats.detail,
         detail_brush,
+        false,
     );
-    draw_text(
+    draw_paged_heading(
         target,
-        input.locale.text("Reset credits", "重置机会"),
-        rect(203.0, 278.0, 350.0, 303.0),
-        &formats.metric_label,
-        &brushes.muted,
+        factory,
+        dwrite,
+        formats,
+        brushes,
+        resource_label(account.page, input.locale),
+        rect(203.0, 278.0, 345.0, 303.0),
+        account.page == ResourcePage::Resets,
     );
-    draw_text(
+    let value_brush = if account.page == ResourcePage::Resets
+        && input.reset.is_some_and(|p| p.hovered == Some(crate::reset::ResetHit::Open))
+    {
+        &brushes.interactive
+    } else {
+        &brushes.text
+    };
+    draw_inline_metrics(
         target,
+        dwrite,
+        formats,
         &account.credits,
+        account.credit_detail.as_deref(),
         rect(203.0, 296.0, 350.0, 332.0),
-        &formats.metric_value,
-        if input.reset.is_some_and(|p| p.hovered == Some(crate::reset::ResetHit::Open)) {
-            &brushes.interactive
-        } else {
-            &brushes.text
-        },
+        value_brush,
+        &brushes.muted,
+        true,
     );
-    if let Some(detail) = account.credit_detail.as_deref() {
-        let value_width = measure_text(dwrite, &account.credits, &formats.metric_value)
-            .map(|metrics| metrics.widthIncludingTrailingWhitespace)
-            .unwrap_or(45.0);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_inline_metrics(
+    target: &ID2D1HwndRenderTarget,
+    dwrite: &IDWriteFactory,
+    formats: &FormatSet,
+    value: &str,
+    detail: Option<&str>,
+    area: D2D_RECT_F,
+    value_brush: &ID2D1SolidColorBrush,
+    detail_brush: &ID2D1SolidColorBrush,
+    compact_when_needed: bool,
+) {
+    let mut format = &formats.metric_value;
+    let mut width = measure_text(dwrite, value, format)
+        .map(|m| m.widthIncludingTrailingWhitespace)
+        .unwrap_or(60.0);
+    let detail_width = detail
+        .and_then(|text| measure_text(dwrite, text, &formats.detail).ok())
+        .map_or(0.0, |m| m.widthIncludingTrailingWhitespace);
+    if compact_when_needed && width + detail_width + 4.0 > area.right - area.left {
+        format = &formats.metric_small_value;
+        width = measure_text(dwrite, value, format)
+            .map(|m| m.widthIncludingTrailingWhitespace)
+            .unwrap_or(width);
+    }
+    let end =
+        if detail.is_some() { (area.left + width).min(area.right - 24.0) } else { area.right };
+    draw_text(target, value, rect(area.left, area.top, end, area.bottom), format, value_brush);
+    if let Some(detail) = detail {
         draw_text(
             target,
             detail,
-            rect((203.0 + value_width + 10.0).min(300.0), 303.0, 350.0, 335.0),
+            rect(end + 4.0, 303.0, area.right, 335.0),
             &formats.detail,
-            &brushes.muted,
+            detail_brush,
         );
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_usage_heading(
     target: &ID2D1HwndRenderTarget,
     factory: &ID2D1Factory,
+    dwrite: &IDWriteFactory,
     formats: &FormatSet,
     brushes: &Brushes,
     locale: Locale,
     selection: UsageSummaryWeek,
     compact: bool,
 ) {
-    let (top, bottom, center_y, label_left, label_right, previous_arrow, current_arrow) = if compact
-    {
-        (64.0, 88.0, 76.0, 224.0, 288.0, 286.0, 226.0)
-    } else {
-        (278.0, 303.0, 290.5, 42.0, 106.0, 104.0, 36.0)
-    };
-    draw_text(
+    let area =
+        if compact { rect(197.0, 64.0, 315.0, 88.0) } else { rect(30.0, 278.0, 175.0, 303.0) };
+    draw_paged_heading(
         target,
+        factory,
+        dwrite,
+        formats,
+        brushes,
         match selection {
             UsageSummaryWeek::Previous => locale.text("Last week usage", "上周消耗"),
             UsageSummaryWeek::Current => locale.text("This week usage", "本周消耗"),
         },
-        rect(label_left, top, label_right, bottom),
-        if compact { &formats.stacked_label } else { &formats.metric_label },
+        area,
+        selection == UsageSummaryWeek::Previous,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_paged_heading(
+    target: &ID2D1HwndRenderTarget,
+    factory: &ID2D1Factory,
+    dwrite: &IDWriteFactory,
+    formats: &FormatSet,
+    brushes: &Brushes,
+    label: &str,
+    area: D2D_RECT_F,
+    points_right: bool,
+) {
+    let width = measure_text(dwrite, label, &formats.stacked_label)
+        .map(|m| m.widthIncludingTrailingWhitespace)
+        .unwrap_or(44.0);
+    let center = (area.left + area.right) / 2.0;
+    draw_text(target, label, area, &formats.stacked_label, &brushes.muted);
+    let sign = if points_right { 1.0 } else { -1.0 };
+    let arrow = (center + sign * (width / 2.0 + 8.0)).clamp(area.left + 6.0, area.right - 6.0);
+    let _ = draw_solid_triangle(
+        target,
+        factory,
+        arrow,
+        (area.top + area.bottom) / 2.0,
+        points_right,
+        12.0,
         &brushes.muted,
     );
-    let (base_x, points_right) = match selection {
-        UsageSummaryWeek::Previous => (previous_arrow, true),
-        UsageSummaryWeek::Current => (current_arrow, false),
-    };
-    let _ =
-        draw_solid_triangle(target, factory, base_x, center_y, points_right, 12.0, &brushes.muted);
 }
 
 fn draw_solid_triangle(

@@ -17,6 +17,18 @@ fn main() {
         let method = request["method"].as_str().unwrap_or_default();
         let spent = directory.join("spent.json");
         let consumed = spent.exists();
+        if method == "account/rateLimits/read" {
+            use std::fs::OpenOptions;
+            writeln!(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(directory.join("quota-reads.log"))
+                    .unwrap(),
+                "read"
+            )
+            .unwrap();
+        }
         if consumed && method == "account/rateLimits/read" {
             std::fs::write(directory.join("post-reset-refresh.json"), request.to_string()).unwrap();
         }
@@ -26,7 +38,7 @@ fn main() {
                 json!({"account":{"type":"chatgpt","planType":"pro","email":"fixture@example.invalid"}})
             }
             "account/rateLimits/read" => json!({
-                "rateLimitsByLimitId":{"codex":{"limitId":"codex","primary":{"usedPercent":if consumed {0}else{27},"windowDurationMins":300,"resetsAt":now+10800},
+                "rateLimitsByLimitId":{"codex":{"limitId":"codex","credits":{"balance":"1200.25","hasCredits":true,"unlimited":false},"primary":{"usedPercent":if consumed {0}else{27},"windowDurationMins":300,"resetsAt":now+10800},
                     "secondary":{"usedPercent":13,"windowDurationMins":10080,"resetsAt":now+432000}}},
                 "rateLimitResetCredits":{"availableCount":if consumed {1}else{2},"credits":
                     if consumed {json!([{"id":"fixture-2","status":"available","expiresAt":now+172800}])}

@@ -19,6 +19,11 @@ This repository is a community-maintained variant derived from
 upstream MIT license and copyright notice while carrying a separate release
 line and product decisions.
 
+The reset-credit heading pages between **Reset credits** and **Credits**. The
+Credits view shows the available balance and “For extra usage”; it is read-only
+and has no detail page or expiry estimate. Missing values show `--`, zero is `0`,
+and unlimited balances show `∞`. Balance display uses at most two decimals.
+
 ## Highlights
 
 - Five-hour and weekly quota cards remain visible side by side and can be selected
@@ -104,7 +109,7 @@ redemption, and is cleared on a definite result. Uncertain results are never ret
 automatically; explicit retries reuse the original key, including after restart.
 No credentials are stored in this record.
 
-Version 0.6.3 remains an event-driven native Win32 process. It performs no
+Version 0.6.6 remains an event-driven native Win32 process. It performs no
 continuous animation or polling between configured refresh timers. One queued
 UI message draws a hidden startup frame to prewarm Direct2D, text resources, and
 the HWND surface before normal flyout use. Those bounded resources remain cached

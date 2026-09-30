@@ -32,8 +32,11 @@ use winreg::enums::HKEY_CURRENT_USER;
 mod direct2d;
 mod history_view;
 
+#[cfg(test)]
+mod render_tests;
+
 pub use history_view::{
-    HistoryHit, HistoryNavigation, HistoryPage, HoveredHistoryDay, UsageSummaryWeek,
+    HistoryHit, HistoryNavigation, HistoryPage, HoveredHistoryDay, ResourcePage, UsageSummaryWeek,
     hit_test as history_hit_test, hovered_day as hovered_history_day,
 };
 
@@ -117,6 +120,7 @@ fn quota_panel_geometry(slot: QuotaPanelSlot) -> QuotaPanelGeometry {
 struct AccountMetrics {
     credits: String,
     credit_detail: Option<String>,
+    page: ResourcePage,
 }
 
 struct WeeklyUsageMetrics {
@@ -180,15 +184,55 @@ fn format_tokens(value: u64, locale: Locale) -> String {
     }
 }
 
-fn account_metrics(state: &DisplayState, locale: Locale) -> AccountMetrics {
+fn account_metrics(state: &DisplayState, locale: Locale, page: ResourcePage) -> AccountMetrics {
     let snapshot = state.snapshot.as_ref();
+    if page == ResourcePage::Points {
+        return AccountMetrics {
+            credits: snapshot
+                .and_then(|s| s.account.credit_balance.as_ref())
+                .map(format_credit_balance)
+                .unwrap_or_else(|| "--".into()),
+            credit_detail: Some(locale.text("For extra usage", "用于额外用量").into()),
+            page,
+        };
+    }
     let credits = snapshot
         .and_then(|snapshot| snapshot.account.reset_credits)
         .map(|credits| format!("{credits} {}", locale.text("resets", "次")))
         .unwrap_or_else(|| "--".to_owned());
     let credit_detail =
         snapshot.and_then(|snapshot| reset_credit_detail(&snapshot.account, locale));
-    AccountMetrics { credits, credit_detail }
+    AccountMetrics { credits, credit_detail, page }
+}
+
+fn resource_label(page: ResourcePage, locale: Locale) -> &'static str {
+    match page {
+        ResourcePage::Resets => locale.text("Reset credits", "重置机会"),
+        ResourcePage::Points => locale.text("Credits", "额度点数"),
+    }
+}
+
+fn format_credit_balance(balance: &crate::model::CreditBalance) -> String {
+    let crate::model::CreditBalance::Amount(raw) = balance else {
+        return "∞".into();
+    };
+    let (whole, fraction) = raw.split_once('.').unwrap_or((raw, ""));
+    if whole == "0" && !fraction.is_empty() && fraction.starts_with("00") {
+        return "<0.01".into();
+    }
+    let mut output = String::with_capacity(raw.len() + raw.len() / 3);
+    for (index, digit) in whole.bytes().enumerate() {
+        if index > 0 && (whole.len() - index) % 3 == 0 {
+            output.push(',');
+        }
+        output.push(char::from(digit));
+    }
+    let fraction = fraction.get(..fraction.len().min(2)).unwrap_or_default().trim_end_matches('0');
+    if !fraction.is_empty() {
+        output.push('.');
+        output.push_str(fraction);
+    }
+    output
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -588,7 +632,7 @@ unsafe fn draw_card(
             dpi,
         );
 
-        let account = account_metrics(state, locale);
+        let account = account_metrics(state, locale, navigation.resource_page);
         let weekly = weekly_usage_metrics(history, navigation.summary_week, locale);
         match state.quota_availability() {
             QuotaAvailability::Single(kind) => {
@@ -673,6 +717,7 @@ unsafe fn draw_card(
                     navigation.summary_week,
                     &account.credits,
                     account.credit_detail.as_deref(),
+                    account.page,
                     theme,
                     dpi,
                     interaction.hovered_history_values,
@@ -1036,7 +1081,7 @@ unsafe fn draw_stacked_metrics(
             },
             theme.line,
         );
-        draw_text_center(
+        draw_gdi_paged_heading(
             hdc,
             locale,
             match weekly.selection {
@@ -1044,36 +1089,14 @@ unsafe fn draw_stacked_metrics(
                 UsageSummaryWeek::Current => locale.text("This week usage", "本周消耗"),
             },
             RECT {
-                left: metrics.left + scale(8, dpi),
-                top: scale(59, dpi),
-                right: metrics.right - scale(8, dpi),
-                bottom: scale(83, dpi),
+                left: scale(197, dpi),
+                top: scale(64, dpi),
+                right: scale(315, dpi),
+                bottom: scale(88, dpi),
             },
-            scale(11, dpi),
-            FW_NORMAL.0 as i32,
-            theme.muted,
-        );
-        draw_text_center(
-            hdc,
-            locale,
-            if weekly.selection == UsageSummaryWeek::Previous { "▶" } else { "◀" },
-            RECT {
-                left: if weekly.selection == UsageSummaryWeek::Previous {
-                    scale(280, dpi)
-                } else {
-                    scale(218, dpi)
-                },
-                top: scale(59, dpi),
-                right: if weekly.selection == UsageSummaryWeek::Previous {
-                    scale(296, dpi)
-                } else {
-                    scale(234, dpi)
-                },
-                bottom: scale(83, dpi),
-            },
-            scale(9, dpi),
-            FW_NORMAL.0 as i32,
-            theme.muted,
+            theme,
+            dpi,
+            weekly.selection == UsageSummaryWeek::Previous,
         );
         draw_text_center(
             hdc,
@@ -1103,19 +1126,19 @@ unsafe fn draw_stacked_metrics(
             FW_NORMAL.0 as i32,
             interactive_text_color(theme, hovered_history_values, true),
         );
-        draw_text_center(
+        draw_gdi_paged_heading(
             hdc,
             locale,
-            locale.text("Reset credits", "重置机会"),
+            resource_label(account.page, locale),
             RECT {
-                left: metrics.left + scale(8, dpi),
+                left: scale(197, dpi),
                 top: scale(173, dpi),
-                right: metrics.right - scale(8, dpi),
+                right: scale(315, dpi),
                 bottom: scale(197, dpi),
             },
-            scale(11, dpi),
-            FW_NORMAL.0 as i32,
-            theme.muted,
+            theme,
+            dpi,
+            account.page == ResourcePage::Resets,
         );
         draw_text_center(
             hdc,
@@ -1162,6 +1185,7 @@ unsafe fn draw_bottom_metrics(
     selection: UsageSummaryWeek,
     credits: &str,
     credit_detail: Option<&str>,
+    page: ResourcePage,
     theme: Theme,
     dpi: u32,
     hovered_history_values: bool,
@@ -1169,7 +1193,7 @@ unsafe fn draw_bottom_metrics(
     unsafe {
         let left = metrics.left + scale(14, dpi);
         let right_left = divider + divider_width + scale(14, dpi);
-        draw_text_center(
+        draw_gdi_paged_heading(
             hdc,
             locale,
             match selection {
@@ -1177,37 +1201,18 @@ unsafe fn draw_bottom_metrics(
                 UsageSummaryWeek::Current => locale.text("This week usage", "本周消耗"),
             },
             RECT {
-                left,
-                top: metrics.top + scale(3, dpi),
-                right: divider - scale(10, dpi),
-                bottom: metrics.top + scale(25, dpi),
+                left: scale(30, dpi),
+                top: scale(278, dpi),
+                right: scale(175, dpi),
+                bottom: scale(303, dpi),
             },
-            scale(11, dpi),
-            FW_NORMAL.0 as i32,
-            theme.muted,
+            theme,
+            dpi,
+            selection == UsageSummaryWeek::Previous,
         );
-        draw_text_center(
-            hdc,
-            locale,
-            if selection == UsageSummaryWeek::Previous { "▶" } else { "◀" },
-            RECT {
-                left: if selection == UsageSummaryWeek::Previous {
-                    divider - scale(32, dpi)
-                } else {
-                    left
-                },
-                top: metrics.top + scale(3, dpi),
-                right: if selection == UsageSummaryWeek::Previous {
-                    divider - scale(14, dpi)
-                } else {
-                    left + scale(18, dpi)
-                },
-                bottom: metrics.top + scale(25, dpi),
-            },
-            scale(9, dpi),
-            FW_NORMAL.0 as i32,
-            theme.muted,
-        );
+        let token_width =
+            measure_text_width(hdc, locale, weekly_tokens, scale(20, dpi), FW_SEMIBOLD.0 as i32);
+        let token_right = (left + token_width).min(divider - scale(34, dpi));
         draw_text_bottom(
             hdc,
             locale,
@@ -1215,19 +1220,19 @@ unsafe fn draw_bottom_metrics(
             RECT {
                 left,
                 top: metrics.top + scale(20, dpi),
-                right: divider - scale(10, dpi),
+                right: token_right,
                 bottom: metrics.bottom - scale(8, dpi),
             },
             scale(20, dpi),
             FW_SEMIBOLD.0 as i32,
             interactive_text_color(theme, hovered_history_values, false),
         );
-        draw_text_bottom(
+        draw_text_right_bottom(
             hdc,
             locale,
             weekly_range,
             RECT {
-                left,
+                left: token_right + scale(4, dpi),
                 top: metrics.top + scale(24, dpi),
                 right: divider - scale(10, dpi),
                 bottom: metrics.bottom - scale(7, dpi),
@@ -1236,23 +1241,33 @@ unsafe fn draw_bottom_metrics(
             FW_NORMAL.0 as i32,
             interactive_text_color(theme, hovered_history_values, true),
         );
-        draw_text(
+        draw_gdi_paged_heading(
             hdc,
             locale,
-            locale.text("Reset credits", "重置机会"),
+            resource_label(page, locale),
             RECT {
-                left: right_left,
-                top: metrics.top + scale(3, dpi),
-                right: metrics.right - scale(10, dpi),
-                bottom: metrics.top + scale(25, dpi),
+                left: scale(203, dpi),
+                top: scale(278, dpi),
+                right: scale(345, dpi),
+                bottom: scale(303, dpi),
             },
-            scale(11, dpi),
-            FW_NORMAL.0 as i32,
-            theme.muted,
+            theme,
+            dpi,
+            page == ResourcePage::Resets,
         );
-        let value_width =
-            measure_text_width(hdc, locale, credits, scale(20, dpi), FW_SEMIBOLD.0 as i32);
-        let value_right = (right_left + value_width).min(metrics.right - scale(10, dpi));
+        let mut value_size = scale(20, dpi);
+        let mut value_width =
+            measure_text_width(hdc, locale, credits, value_size, FW_SEMIBOLD.0 as i32);
+        let detail_width = credit_detail.map_or(0, |detail| {
+            measure_text_width(hdc, locale, detail, scale(11, dpi), FW_NORMAL.0 as i32)
+        });
+        if value_width + detail_width + scale(4, dpi) > metrics.right - scale(10, dpi) - right_left
+        {
+            value_size = scale(16, dpi);
+            value_width =
+                measure_text_width(hdc, locale, credits, value_size, FW_SEMIBOLD.0 as i32);
+        }
+        let value_right = (right_left + value_width).min(metrics.right - scale(34, dpi));
         let value_bottom = metrics.bottom - scale(10, dpi);
         draw_text_bottom(
             hdc,
@@ -1264,7 +1279,7 @@ unsafe fn draw_bottom_metrics(
                 right: value_right,
                 bottom: value_bottom,
             },
-            scale(20, dpi),
+            value_size,
             FW_SEMIBOLD.0 as i32,
             theme.text,
         );
@@ -1274,7 +1289,7 @@ unsafe fn draw_bottom_metrics(
                 locale,
                 detail,
                 RECT {
-                    left: value_right + scale(10, dpi),
+                    left: value_right + scale(4, dpi),
                     top: metrics.top + scale(24, dpi),
                     right: metrics.right - scale(10, dpi),
                     bottom: metrics.bottom - scale(7, dpi),
@@ -1284,6 +1299,36 @@ unsafe fn draw_bottom_metrics(
                 theme.muted,
             );
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn draw_gdi_paged_heading(
+    hdc: HDC,
+    locale: Locale,
+    label: &str,
+    area: RECT,
+    theme: Theme,
+    dpi: u32,
+    points_right: bool,
+) {
+    unsafe {
+        let size = scale(11, dpi);
+        let width = measure_text_width(hdc, locale, label, size, FW_NORMAL.0 as i32);
+        draw_text_center(hdc, locale, label, area, size, FW_NORMAL.0 as i32, theme.muted);
+        let center = (area.left + area.right) / 2;
+        let direction = if points_right { 1 } else { -1 };
+        let arrow = (center + direction * (width / 2 + scale(11, dpi)))
+            .clamp(area.left + scale(6, dpi), area.right - scale(6, dpi));
+        draw_text_center(
+            hdc,
+            locale,
+            if points_right { "▶" } else { "◀" },
+            RECT { left: arrow - scale(6, dpi), right: arrow + scale(6, dpi), ..area },
+            scale(9, dpi),
+            FW_NORMAL.0 as i32,
+            theme.muted,
+        );
     }
 }
 
@@ -1653,19 +1698,6 @@ pub fn quota_card_hit_test(state: &DisplayState, x: i32, y: i32, dpi: u32) -> Op
         })
 }
 
-unsafe fn draw_text(
-    hdc: HDC,
-    locale: Locale,
-    value: &str,
-    rect: RECT,
-    height: i32,
-    weight: i32,
-    color: COLORREF,
-) {
-    let style = TextStyle { height, weight, color };
-    unsafe { draw_text_with_alignment(hdc, locale, value, rect, style, DT_LEFT) }
-}
-
 unsafe fn draw_text_bottom(
     hdc: HDC,
     locale: Locale,
@@ -1849,6 +1881,19 @@ fn wide0(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn points_display_is_bounded_and_never_invents_an_expiry() {
+        use crate::model::CreditBalance;
+        assert_eq!(format_credit_balance(&CreditBalance::Amount("1200.259".into())), "1,200.25");
+        assert_eq!(format_credit_balance(&CreditBalance::Amount("0.0001".into())), "<0.01");
+        assert_eq!(format_credit_balance(&CreditBalance::Amount("0".into())), "0");
+        assert_eq!(format_credit_balance(&CreditBalance::Unlimited), "∞");
+        let metrics =
+            account_metrics(&DisplayState::loading(None), Locale::Chinese, ResourcePage::Points);
+        assert_eq!(metrics.credits, "--");
+        assert_eq!(metrics.credit_detail.as_deref(), Some("用于额外用量"));
+    }
     use crate::history::DailyUsageRecord;
     use crate::model::{AccountSummary, QuotaSnapshot, QuotaWindow, SESSION_MINUTES, WEEK_MINUTES};
     use chrono::NaiveDate;

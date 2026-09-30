@@ -44,6 +44,19 @@ try {
   [void][ResetFlowNative]::SendMessage($flyout,0x202,0,$point)
   Start-Sleep -Milliseconds 150
  }
+ # A points-body click must never open the reset list or issue an RPC.
+ $readsBefore = @(Get-Content -LiteralPath (Join-Path $fixture 'quota-reads.log')).Count
+ $cpuBefore = $process.TotalProcessorTime.TotalSeconds
+ $handlesBefore = $process.HandleCount
+ foreach ($iteration in 1..12) {
+  Click-Fixture 275 290
+  Click-Fixture 220 315
+  if (Test-Path (Join-Path $fixture 'spent.json')) { throw 'Points view consumed a reset credit' }
+  Click-Fixture 275 290
+ }
+ $process.Refresh()
+ if (@(Get-Content -LiteralPath (Join-Path $fixture 'quota-reads.log')).Count -ne $readsBefore) { throw 'Resource paging unexpectedly queried quota' }
+ Write-Output "Resource paging: 24 switches, no quota RPC; CPU delta $($process.TotalProcessorTime.TotalSeconds-$cpuBefore)s; handles $handlesBefore -> $($process.HandleCount)"
  Click-Fixture 220 315
  Click-Fixture 290 100
  if (Test-Path (Join-Path $fixture 'spent.json')) { throw 'Consume before confirmation' }

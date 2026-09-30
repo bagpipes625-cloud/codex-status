@@ -19,6 +19,20 @@ impl AppState {
         }
         let (x, y) = pointer_coordinates(lparam);
         let dpi = unsafe { GetDpiForWindow(self.flyout) }.max(96) as f32;
+        if !self.reset_panel.open
+            && (self.history_navigation.resource_page == ui::ResourcePage::Points
+                || ui::history_hit_test(
+                    &self.history_navigation,
+                    None,
+                    matches!(self.display.quota_availability(), QuotaAvailability::Single(_)),
+                    x,
+                    y,
+                    dpi as u32,
+                    self.full_history_render,
+                ) == Some(ui::HistoryHit::ToggleResourcePage))
+        {
+            return None;
+        }
         self.reset_panel.hit(
             matches!(self.display.quota_availability(), QuotaAvailability::Single(_)),
             self.reset_credits().len(),

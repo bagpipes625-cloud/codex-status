@@ -2,6 +2,16 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.6.6] - 2026-09-30
+
+- Add a read-only Credits balance view in the existing reset-credit area, with
+  independent left/right paging and centered headings in compact and dual layouts.
+- Reuse account/rateLimits/read; repair missing balance through the existing,
+  account-bound read-only fallback without additional endpoints or resident work.
+- Distinguish unavailable, zero, fractional, and unlimited balances. Credits do
+  not offer a secondary page or an invented expiry; reset-credit actions and
+  expiry formatting remain unchanged. Support Direct2D and GDI fallback.
+
 ## [0.6.5] - 2026-09-08
 
 - Keep reset operations coherent when the flyout is hidden, and show a clear

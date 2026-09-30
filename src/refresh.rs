@@ -196,10 +196,15 @@ fn repair(
     }
     if let Some(quota) = quota {
         match &mut primary {
-            Ok(snapshot) if !has_quota(snapshot) => {
-                snapshot.quota.weekly = quota.weekly;
-                snapshot.quota.session = quota.session;
-                snapshot.quota.fetched_at = quota.fetched_at;
+            Ok(snapshot) => {
+                if !has_quota(snapshot) {
+                    snapshot.quota.weekly = quota.weekly;
+                    snapshot.quota.session = quota.session;
+                    snapshot.quota.fetched_at = quota.fetched_at;
+                }
+                if snapshot.quota.account.credit_balance.is_none() {
+                    snapshot.quota.account.credit_balance = quota.account.credit_balance;
+                }
                 if snapshot.quota.account.plan_type.is_none() {
                     snapshot.quota.account.plan_type = quota.account.plan_type;
                 }
@@ -215,7 +220,6 @@ fn repair(
                     supplement_allowed: true,
                 })
             }
-            _ => {}
         }
     }
     if let Ok(snapshot) = &mut primary {
@@ -279,7 +283,7 @@ fn missing(primary: &Result<AppServerSnapshot, AppServerFailure>) -> Vec<Endpoin
         }
         Ok(s) => {
             let mut endpoints = Vec::new();
-            if !has_quota(s) {
+            if !has_quota(s) || s.quota.account.credit_balance.is_none() {
                 endpoints.push(Endpoint::Quota);
             }
             if s.quota.account.reset_credits.is_none()
@@ -301,7 +305,7 @@ fn parse_quota(value: &Value, auth: &Credentials) -> Option<QuotaSnapshot> {
         return None;
     }
     let raw = value.get("rate_limit")?.as_object()?;
-    let mut bucket = json!({"planType":value.get("plan_type")});
+    let mut bucket = json!({"planType":value.get("plan_type"),"credits":value.get("credits")});
     for (input, output) in [("primary_window", "primary"), ("secondary_window", "secondary")] {
         let Some(window) = raw.get(input).filter(|v| !v.is_null()) else {
             continue;
@@ -360,6 +364,21 @@ fn parse_tokens(value: &Value) -> Option<TokenUsageSnapshot> {
 mod tests {
     use super::*;
     use base64::Engine;
+
+    #[test]
+    fn repairs_missing_balance_without_replacing_live_quota_and_keeps_explicit_zero() {
+        let mut primary = scoped(snapshot(Some(0), Some(vec![]), true));
+        primary.quota.account.credit_balance = None;
+        let original = primary.quota.weekly.clone();
+        let result = repair(Ok(primary),Some(credentials("acct",1)),&Mutex::default(),&||Some(credentials("acct",1)),
+            &|endpoint,_| { assert_eq!(endpoint,Endpoint::Quota); Ok(json!({"credits":{"balance":"1200.250","unlimited":false},"rate_limit":{"primary_window":{"used_percent":70,"limit_window_seconds":604800,"reset_at":2000000000}}})) },|_|{}).unwrap();
+        assert_eq!(result.quota.weekly, original);
+        assert_eq!(
+            result.quota.account.credit_balance,
+            Some(model::CreditBalance::Amount("1200.25".into()))
+        );
+        assert!(missing(&Ok(scoped(snapshot(Some(0), Some(vec![]), true)))).is_empty());
+    }
 
     fn credentials(account: &str, nonce: u64) -> Credentials {
         let jwt = |v: Value| {
@@ -585,6 +604,7 @@ mod tests {
                 session: None,
                 fetched_at: 1,
                 account: model::AccountSummary {
+                    credit_balance: Some(model::CreditBalance::Amount("0".into())),
                     reset_credits: count,
                     reset_credit_details: details,
                     ..Default::default()

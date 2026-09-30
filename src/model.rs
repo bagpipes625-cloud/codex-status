@@ -55,10 +55,53 @@ impl QuotaWindow {
 #[serde(rename_all = "camelCase")]
 pub struct AccountSummary {
     pub plan_type: Option<String>,
+    #[serde(default)]
+    pub credit_balance: Option<CreditBalance>,
     pub reset_credits: Option<u64>,
     pub reset_credit_expires_at: Option<i64>,
     #[serde(default)]
     pub reset_credit_details: Option<Vec<ResetCredit>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CreditBalance {
+    Amount(String),
+    Unlimited,
+}
+
+pub fn parse_credit_balance(value: &Value) -> Option<CreditBalance> {
+    if value.get("unlimited").and_then(Value::as_bool) == Some(true) {
+        return Some(CreditBalance::Unlimited);
+    }
+    let raw = value.get("balance")?;
+    let number;
+    let text = if let Some(text) = raw.as_str() {
+        text
+    } else if raw.is_number() {
+        number = raw.to_string();
+        &number
+    } else {
+        return None;
+    };
+    if text.is_empty() || text.len() > 32 {
+        return None;
+    }
+    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+        || (text.contains('.') && fraction.is_empty())
+    {
+        return None;
+    }
+    let whole = whole.trim_start_matches('0');
+    let whole = if whole.is_empty() { "0" } else { whole };
+    let fraction = fraction.trim_end_matches('0');
+    Some(CreditBalance::Amount(if fraction.is_empty() {
+        whole.to_owned()
+    } else {
+        format!("{whole}.{fraction}")
+    }))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -303,6 +346,7 @@ pub fn parse_snapshot(
         session,
         account: AccountSummary {
             plan_type,
+            credit_balance: bucket.get("credits").and_then(parse_credit_balance),
             reset_credits,
             reset_credit_expires_at,
             reset_credit_details: parse_reset_credits(rate_result),
@@ -369,6 +413,44 @@ fn parse_window(value: &Value) -> Result<Option<QuotaWindow>, ParseError> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn credit_balances_keep_zero_missing_unlimited_and_decimal_precision_distinct() {
+        assert_eq!(
+            parse_credit_balance(&json!({"balance":"0001200.2500"})),
+            Some(CreditBalance::Amount("1200.25".into()))
+        );
+        assert_eq!(
+            parse_credit_balance(&json!({"balance":"0.00"})),
+            Some(CreditBalance::Amount("0".into()))
+        );
+        assert_eq!(
+            parse_credit_balance(&json!({"balance":0})),
+            Some(CreditBalance::Amount("0".into()))
+        );
+        assert_eq!(
+            parse_credit_balance(&json!({"unlimited":true})),
+            Some(CreditBalance::Unlimited)
+        );
+        for raw in [
+            "",
+            "-1",
+            "NaN",
+            "Infinity",
+            "1e4",
+            "1.2.3",
+            "1.",
+            ".3",
+            " 12",
+            "１２",
+            "12345678901234567890123456789012345",
+        ] {
+            assert!(parse_credit_balance(&json!({"balance":raw})).is_none(), "{raw}");
+        }
+        assert!(parse_credit_balance(&json!({"hasCredits":false})).is_none());
+        let state=parse_snapshot(&account(),&json!({"rateLimits":{"credits":{"balance":"42.75"},"primary":{"usedPercent":5,"windowDurationMins":300}}}),1).unwrap();
+        assert_eq!(state.account.credit_balance, Some(CreditBalance::Amount("42.75".into())));
+    }
 
     fn account() -> Value {
         json!({"account": {"type": "chatgpt", "planType": "plus"}})

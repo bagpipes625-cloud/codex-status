@@ -23,8 +23,25 @@ pub enum HistoryPage {
     Week,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ResourcePage {
+    #[default]
+    Resets,
+    Points,
+}
+
+impl ResourcePage {
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Resets => Self::Points,
+            Self::Points => Self::Resets,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryNavigation {
+    pub resource_page: ResourcePage,
     pub page: HistoryPage,
     pub month: NaiveDate,
     pub selected_week: NaiveDate,
@@ -35,6 +52,7 @@ impl Default for HistoryNavigation {
     fn default() -> Self {
         let today = Local::now().date_naive();
         Self {
+            resource_page: ResourcePage::default(),
             page: HistoryPage::Main,
             month: today.with_day(1).expect("first day of current month"),
             selected_week: monday_of(today),
@@ -99,6 +117,7 @@ impl HistoryNavigation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryHit {
+    ToggleResourcePage,
     Back,
     ToggleSummaryWeek,
     OpenHistory,
@@ -132,13 +151,17 @@ pub fn hit_test(
     match navigation.page {
         HistoryPage::Main => {
             if compact {
-                if contains(x, y, 197, 59, 315, 86) {
+                if contains(x, y, 197, 173, 315, 198) {
+                    Some(HistoryHit::ToggleResourcePage)
+                } else if contains(x, y, 197, 59, 315, 86) {
                     Some(HistoryHit::ToggleSummaryWeek)
                 } else if contains(x, y, 197, 86, 315, 151) {
                     Some(HistoryHit::OpenHistory)
                 } else {
                     None
                 }
+            } else if contains(x, y, 197, 278, 350, 303) {
+                Some(HistoryHit::ToggleResourcePage)
             } else if contains(x, y, 30, 278, 178, 298) {
                 Some(HistoryHit::ToggleSummaryWeek)
             } else if contains(x, y, 30, 298, 178, 335) {
@@ -246,6 +269,46 @@ fn contains(x: i32, y: i32, left: i32, top: i32, right: i32, bottom: i32) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resource_pager_is_independent_and_points_body_has_no_secondary_action() {
+        let mut navigation = HistoryNavigation::default();
+        for dpi in [96, 120, 144, 192] {
+            for compact in [false, true] {
+                let (x, y) = if compact { (280, 185) } else { (280, 290) };
+                assert_eq!(
+                    hit_test(
+                        &navigation,
+                        None,
+                        compact,
+                        x * dpi / 96,
+                        y * dpi / 96,
+                        dpi as u32,
+                        false
+                    ),
+                    Some(HistoryHit::ToggleResourcePage)
+                );
+                let body_y = if compact { 220 } else { 315 };
+                assert_eq!(
+                    hit_test(
+                        &navigation,
+                        None,
+                        compact,
+                        x * dpi / 96,
+                        body_y * dpi / 96,
+                        dpi as u32,
+                        true
+                    ),
+                    None
+                );
+            }
+        }
+        navigation.resource_page = navigation.resource_page.toggle();
+        assert_eq!(navigation.resource_page, ResourcePage::Points);
+        assert_eq!(navigation.summary_week, UsageSummaryWeek::Current);
+        navigation.summary_week = navigation.summary_week.toggle();
+        assert_eq!(navigation.resource_page, ResourcePage::Points);
+    }
 
     #[test]
     fn month_and_week_navigation_cross_boundaries() {

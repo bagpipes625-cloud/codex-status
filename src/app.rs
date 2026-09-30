@@ -1217,6 +1217,12 @@ impl AppState {
     fn activate_history_hit(&mut self, hit: ui::HistoryHit) {
         self.history_wheel.reset();
         match hit {
+            ui::HistoryHit::ToggleResourcePage => {
+                self.history_navigation.resource_page =
+                    self.history_navigation.resource_page.toggle();
+                self.reset_panel.pressed = None;
+                self.reset_panel.hovered = None;
+            }
             ui::HistoryHit::Back => {
                 self.history_navigation.page = ui::HistoryPage::Main;
                 self.hovered_history_day = None;
