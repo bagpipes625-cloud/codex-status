@@ -1,6 +1,6 @@
 <div align="center">
 
-# CodexStatus
+# AgentStatus
 
 **Your Codex quota, readable at a glance in the Windows tray.**
 

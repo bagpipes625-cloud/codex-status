@@ -1,6 +1,6 @@
 <div align="center">
 
-# CodexStatus
+# AgentStatus
 
 **在 Windows 托盘里一眼看清 Codex 剩余额度。**
 

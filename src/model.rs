@@ -13,6 +13,15 @@ pub enum ProviderKind {
     Gemini,
 }
 
+impl ProviderKind {
+    pub fn other(self) -> Self {
+        match self {
+            Self::Codex => Self::Gemini,
+            Self::Gemini => Self::Codex,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum QuotaKind {

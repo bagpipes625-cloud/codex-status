@@ -97,12 +97,12 @@ BEGIN
  BEGIN
   BLOCK "040904E4"
   BEGIN
-   VALUE "CompanyName", "CodexStatus Contributors\0"
-   VALUE "FileDescription", "Codex quota in the Windows tray\0"
+   VALUE "CompanyName", "AgentStatus Contributors\0"
+   VALUE "FileDescription", "AgentStatus quota in the Windows tray\0"
    VALUE "FileVersion", "{package_version}\0"
    VALUE "InternalName", "CodexStatus\0"
    VALUE "OriginalFilename", "CodexStatus.exe\0"
-   VALUE "ProductName", "CodexStatus\0"
+   VALUE "ProductName", "AgentStatus\0"
    VALUE "ProductVersion", "{package_version}\0"
   END
  END

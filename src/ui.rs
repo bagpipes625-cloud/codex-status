@@ -142,11 +142,8 @@ pub(super) fn claude_summary_rows(state: &DisplayState) -> ClaudeSummaryRows {
     }
 }
 
-pub(super) fn header_title(provider: ProviderKind) -> &'static str {
-    match provider {
-        ProviderKind::Codex => "CodexStatus",
-        ProviderKind::Gemini => "CodexStatus · Gemini",
-    }
+pub(super) fn header_title(_provider: ProviderKind) -> &'static str {
+    "AgentStatus"
 }
 
 struct AccountMetrics {
@@ -455,7 +452,7 @@ pub fn show_fatal_error(message: &str) {
         let _ = MessageBoxW(
             None,
             PCWSTR(body.as_ptr()),
-            w!("CodexStatus"),
+            w!("AgentStatus"),
             MESSAGEBOX_STYLE(MB_OK.0 | MB_ICONERROR.0),
         );
     }
@@ -471,9 +468,9 @@ pub fn tooltip(state: &DisplayState, preferred: QuotaKind, locale: Locale) -> St
     let kind = state.resolved_quota_kind(preferred);
     match state.quota_percent(kind) {
         Some(percent) => {
-            format!("CodexStatus · {} {}% · {status}", quota_remaining_label(kind, locale), percent)
+            format!("AgentStatus · {} {}% · {status}", quota_remaining_label(kind, locale), percent)
         }
-        None => format!("CodexStatus · {status}"),
+        None => format!("AgentStatus · {status}"),
     }
 }
 

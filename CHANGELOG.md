@@ -2,6 +2,17 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.6.9] - 2026-11-17
+
+- Rename the application display title and header label to `AgentStatus` while
+  keeping existing installation paths and release asset names compatible for
+  seamless in-place self-updates.
+- Decouple Codex and Gemini refresh workers so each provider tracks its own
+  in-flight refresh state and background prefetching runs in parallel at startup
+  and on timer ticks, making provider switching instantaneous.
+- Reduce background startup refresh delay from 30 seconds to 1.5 seconds and
+  stop the refresh spinner as soon as live primary quota arrives.
+
 ## [0.6.8] - 2026-11-17
 
 - Add a unified provider switcher (`Codex` / `Gemini`) in the tray context menu

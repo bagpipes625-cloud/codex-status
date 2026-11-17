@@ -227,6 +227,8 @@ struct ProviderCache {
     display: Option<DisplayState>,
     active_account_key: Option<String>,
     failures: u8,
+    refreshing: bool,
+    refresh_pending: bool,
 }
 
 #[derive(Default)]
@@ -493,7 +495,7 @@ pub fn run() -> Result<(), AppError> {
         CreateWindowExW(
             WS_EX_TOOLWINDOW,
             MAIN_CLASS,
-            w!("CodexStatus"),
+            w!("AgentStatus"),
             WS_OVERLAPPED,
             0,
             0,
@@ -509,7 +511,7 @@ pub fn run() -> Result<(), AppError> {
         CreateWindowExW(
             WINDOW_EX_STYLE(WS_EX_TOOLWINDOW.0 | WS_EX_TOPMOST.0),
             FLYOUT_CLASS,
-            w!("CodexStatus"),
+            w!("AgentStatus"),
             WS_POPUP,
             0,
             0,
@@ -538,7 +540,7 @@ pub fn run() -> Result<(), AppError> {
     let display = DisplayState::loading(None);
     let taskbar_created = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
     TASKBAR_CREATED_MESSAGE.with(|slot| slot.set(taskbar_created));
-    let (refresh_results_tx, refresh_results) = sync_channel(1);
+    let (refresh_results_tx, refresh_results) = sync_channel(8);
     let (update_results_tx, update_results) = sync_channel(1);
     let (reset_results_tx, reset_results) = sync_channel(1);
     let reset_record = store.load_reset_attempt();
@@ -616,9 +618,10 @@ pub fn run() -> Result<(), AppError> {
         state.reset_refresh_timer(state.settings.refresh_minutes.saturating_mul(60_000));
         let _ = SetTimer(Some(hwnd), TIMER_CARD, 30_000, None);
         if background {
-            let _ = SetTimer(Some(hwnd), TIMER_STARTUP, 30_000, None);
+            let _ = SetTimer(Some(hwnd), TIMER_STARTUP, 1_500, None);
         } else {
             state.start_refresh(false);
+            state.prefetch_other_provider();
             if !tray_ready {
                 state.show_flyout();
             }
@@ -857,10 +860,14 @@ unsafe extern "system" fn main_window_proc(
                 }
                 WM_TIMER => {
                     match wparam.0 {
-                        TIMER_REFRESH => state.start_refresh(false),
+                        TIMER_REFRESH => {
+                            state.start_refresh(false);
+                            state.prefetch_other_provider();
+                        }
                         TIMER_STARTUP => {
                             let _ = KillTimer(Some(hwnd), TIMER_STARTUP);
                             state.start_refresh(false);
+                            state.prefetch_other_provider();
                         }
                         TIMER_CARD => {
                             state.refresh_time_sensitive_state();
@@ -1384,13 +1391,34 @@ impl AppState {
             let _ = InvalidateRect(Some(self.flyout), None, false);
         }
 
-        let hwnd_value = self.hwnd.0 as isize;
         let provider = self.settings.provider;
+        if let Err(error) = self.spawn_refresh_worker(provider) {
+            self.finish_refresh(RefreshOutcome::unscoped_error(
+                provider,
+                format!("Could not start refresh: {error}"),
+            ));
+        }
+    }
+
+    fn prefetch_other_provider(&mut self) {
+        let other = self.settings.provider.other();
+        let idx = provider_index(other);
+        if self.provider_caches[idx].refreshing {
+            return;
+        }
+        self.provider_caches[idx].refreshing = true;
+        if self.spawn_refresh_worker(other).is_err() {
+            self.provider_caches[idx].refreshing = false;
+        }
+    }
+
+    fn spawn_refresh_worker(&self, provider: ProviderKind) -> std::io::Result<()> {
+        let hwnd_value = self.hwnd.0 as isize;
         let client = self.client.clone();
         let fallback = self.fallback.clone();
         let gemini = self.gemini.clone();
         let results = self.refresh_results_tx.clone();
-        let spawn_result = thread::Builder::new()
+        thread::Builder::new()
             .name("codex-status-refresh".to_owned())
             .stack_size(512 * 1024)
             .spawn(move || {
@@ -1428,29 +1456,19 @@ impl AppState {
                         let _ = PostMessageW(Some(hwnd), WM_REFRESH_COMPLETE, WPARAM(0), LPARAM(0));
                     }
                 }
-            });
-        if let Err(error) = spawn_result {
-            self.finish_refresh(RefreshOutcome::unscoped_error(
-                provider,
-                format!("Could not start refresh: {error}"),
-            ));
-        }
+            })
+            .map(|_| ())
     }
 
     fn finish_refresh(&mut self, outcome: RefreshOutcome) {
-        self.reset_panel.pressed = None;
-        self.reset_panel.hovered = None;
-        self.refreshing = !outcome.complete;
-        if outcome.complete {
-            self.stop_refresh_feedback();
-        }
         if outcome.provider != self.settings.provider {
-            let slot = &mut self.provider_caches[provider_index(outcome.provider)];
+            let idx = provider_index(outcome.provider);
+            self.provider_caches[idx].refreshing = !outcome.complete;
             match outcome.result {
                 Ok(snapshot) => {
-                    slot.failures = 0;
-                    slot.active_account_key = snapshot.account_key.clone();
-                    slot.display = Some(DisplayState::live(snapshot.quota));
+                    self.provider_caches[idx].failures = 0;
+                    self.provider_caches[idx].active_account_key = snapshot.account_key.clone();
+                    self.provider_caches[idx].display = Some(DisplayState::live(snapshot.quota));
                     self.usage_history.record_refresh(
                         snapshot.account_key.as_deref(),
                         snapshot.token_usage.as_ref(),
@@ -1460,30 +1478,40 @@ impl AppState {
                     self.persist_usage_history(false);
                 }
                 Err(error) => {
-                    slot.failures = slot.failures.saturating_add(1);
+                    self.provider_caches[idx].failures =
+                        self.provider_caches[idx].failures.saturating_add(1);
                     let now = Utc::now().timestamp();
                     let same = same_verified_account(
-                        slot.active_account_key.as_deref(),
+                        self.provider_caches[idx].active_account_key.as_deref(),
                         outcome.account_key.as_deref(),
                     );
                     let prev = if same {
-                        slot.display.take().and_then(|d| d.snapshot)
+                        self.provider_caches[idx].display.take().and_then(|d| d.snapshot)
                     } else {
-                        slot.active_account_key = None;
+                        self.provider_caches[idx].active_account_key = None;
                         None
                     };
-                    slot.display = Some(DisplayState::after_error(
+                    self.provider_caches[idx].display = Some(DisplayState::after_error(
                         prev,
                         friendly_error(&error, self.locale),
                         now,
                     ));
                 }
             }
-            if outcome.complete && self.refresh_pending {
-                self.refresh_pending = false;
-                self.start_refresh(true);
+            if outcome.complete && self.provider_caches[idx].refresh_pending {
+                self.provider_caches[idx].refresh_pending = false;
+                self.provider_caches[idx].refreshing = true;
+                if self.spawn_refresh_worker(outcome.provider).is_err() {
+                    self.provider_caches[idx].refreshing = false;
+                }
             }
             return;
+        }
+        self.reset_panel.pressed = None;
+        self.reset_panel.hovered = None;
+        self.refreshing = !outcome.complete;
+        if outcome.complete || outcome.result.is_ok() {
+            self.stop_refresh_feedback();
         }
         match outcome.result {
             Ok(snapshot) => {
@@ -1574,7 +1602,7 @@ impl AppState {
 
     fn finish_ready_background_work(&mut self) {
         self.finish_reset_if_ready();
-        if let Ok(outcome) = self.refresh_results.try_recv() {
+        while let Ok(outcome) = self.refresh_results.try_recv() {
             self.finish_refresh(outcome);
         }
         if let Ok(outcome) = self.update_results.try_recv() {
@@ -1626,8 +1654,8 @@ impl AppState {
         self.show_balloon(
             self.locale.text("Checking for updates", "正在检查更新"),
             self.locale.text(
-                "CodexStatus is checking your GitHub release.",
-                "CodexStatus 正在检查你的 GitHub 发布版本。",
+                "AgentStatus is checking your GitHub release.",
+                "AgentStatus 正在检查你的 GitHub 发布版本。",
             ),
         );
 
@@ -1660,8 +1688,8 @@ impl AppState {
                 self.show_balloon(
                     self.locale.text("Update ready", "更新已准备好"),
                     self.locale.text(
-                        "The verified update will restart CodexStatus.",
-                        "已验证更新，CodexStatus 将重启并完成替换。",
+                        "The verified update will restart AgentStatus.",
+                        "已验证更新，AgentStatus 将重启并完成替换。",
                     ),
                 );
                 match updater::launch_staged_update(&update) {
@@ -1672,7 +1700,7 @@ impl AppState {
                 }
             }
             Ok(None) => self.show_balloon(
-                self.locale.text("CodexStatus is up to date", "CodexStatus 已是最新版本"),
+                self.locale.text("AgentStatus is up to date", "AgentStatus 已是最新版本"),
                 &format!(
                     "{} {}",
                     self.locale.text("Current version", "当前版本"),
@@ -1769,7 +1797,7 @@ impl AppState {
             }
             if !self.settings.onboarding_shown {
                 self.show_balloon(
-                    self.locale.text("CodexStatus is ready", "CodexStatus 已就绪"),
+                    self.locale.text("AgentStatus is ready", "AgentStatus 已就绪"),
                     self.locale.text(
                         "Your selected quota is shown in the tray. Drag the icon out of the overflow area to keep it visible.",
                         "你选择的额度会直接显示在托盘图标中。可将图标从折叠区拖出，保持常显。",
@@ -2205,7 +2233,7 @@ impl AppState {
             append(
                 menu,
                 CMD_EXIT,
-                self.locale.text("Exit CodexStatus", "退出 CodexStatus"),
+                self.locale.text("Exit AgentStatus", "退出 AgentStatus"),
                 false,
             )?;
         }
@@ -2221,6 +2249,8 @@ impl AppState {
             display: Some(self.display.clone()),
             active_account_key: self.active_account_key.clone(),
             failures: self.failures,
+            refreshing: self.refreshing,
+            refresh_pending: self.refresh_pending,
         };
         self.settings.provider = next;
         self.persist_settings();
@@ -2231,19 +2261,20 @@ impl AppState {
         let next_cache = std::mem::take(&mut self.provider_caches[provider_index(next)]);
         self.active_account_key = next_cache.active_account_key;
         self.failures = next_cache.failures;
+        self.refreshing = next_cache.refreshing;
+        self.refresh_pending = next_cache.refresh_pending;
         self.display = next_cache.display.unwrap_or_else(|| DisplayState::loading(None));
+        if !self.refreshing || self.display.snapshot.is_some() {
+            self.stop_refresh_feedback();
+        }
         self.refresh_history_view_cache();
         let _ = self.update_tray(false);
         self.sync_visible_flyout_layout();
         unsafe {
             let _ = InvalidateRect(Some(self.flyout), None, false);
         }
-        if self.display.snapshot.is_none() {
-            if self.refreshing {
-                self.refresh_pending = true;
-            } else {
-                self.start_refresh(false);
-            }
+        if self.display.snapshot.is_none() && !self.refreshing {
+            self.start_refresh(false);
         }
     }
 
