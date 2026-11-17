@@ -2,6 +2,16 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.6.10] - 2026-11-17
+
+- Persist the latest verified dual-provider (`Codex` and `Gemini`) quota
+  snapshots atomically to `snapshot.json` on each background or foreground
+  refresh without changing startup or UI behavior.
+- Trigger background prefetching of the non-selected provider on manual refresh
+  actions (`Refresh now` and the flyout refresh button) in addition to startup
+  and periodic timer ticks so both providers stay current regardless of which
+  tab is selected.
+
 ## [0.6.9] - 2026-11-17
 
 - Rename the application display title and header label to `AgentStatus` while

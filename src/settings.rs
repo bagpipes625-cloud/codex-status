@@ -1,5 +1,5 @@
 use crate::history::UsageLedger;
-use crate::model::{ProviderKind, QuotaKind};
+use crate::model::{ProviderKind, QuotaKind, QuotaSnapshot};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Write};
@@ -63,6 +63,15 @@ impl Settings {
             self.theme = "system".to_owned();
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PersistedSnapshots {
+    pub provider: ProviderKind,
+    pub codex: Option<QuotaSnapshot>,
+    pub gemini: Option<QuotaSnapshot>,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -138,6 +147,24 @@ impl AppStore {
 
     pub fn save_usage_history(&self, history: &UsageLedger) -> io::Result<()> {
         write_json_atomic(&self.directory.join("usage-history.json"), history)
+    }
+
+    pub fn save_snapshots(
+        &self,
+        provider: ProviderKind,
+        codex: Option<&QuotaSnapshot>,
+        gemini: Option<&QuotaSnapshot>,
+        updated_at: i64,
+    ) -> io::Result<()> {
+        let path = self.directory.join("snapshot.json");
+        let existing = read_json::<PersistedSnapshots>(&path, SMALL_STATE_LIMIT);
+        let payload = PersistedSnapshots {
+            provider,
+            codex: codex.cloned().or_else(|| existing.as_ref().and_then(|s| s.codex.clone())),
+            gemini: gemini.cloned().or_else(|| existing.as_ref().and_then(|s| s.gemini.clone())),
+            updated_at,
+        };
+        write_json_atomic(&path, &payload)
     }
 
     pub fn updates_directory(&self) -> PathBuf {

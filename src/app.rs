@@ -1083,6 +1083,7 @@ unsafe extern "system" fn flyout_window_proc(
                     let _ = ReleaseCapture();
                     if activate && !state.refreshing && !state.refresh_feedback {
                         state.start_refresh(true);
+                        state.prefetch_other_provider();
                     }
                     return LRESULT(0);
                 }
@@ -1476,6 +1477,7 @@ impl AppState {
                     );
                     self.history_dirty = true;
                     self.persist_usage_history(false);
+                    self.persist_snapshots();
                 }
                 Err(error) => {
                     self.provider_caches[idx].failures =
@@ -1526,6 +1528,7 @@ impl AppState {
                 self.refresh_history_view_cache();
                 self.persist_usage_history(false);
                 self.display = DisplayState::live(snapshot.quota);
+                self.persist_snapshots();
                 if outcome.complete {
                     self.reset_refresh_timer(self.settings.refresh_minutes.saturating_mul(60_000));
                 }
@@ -1598,6 +1601,25 @@ impl AppState {
             self.history_dirty = false;
             self.last_history_save = Some(Instant::now());
         }
+    }
+
+    fn persist_snapshots(&self) {
+        let snapshot_for = |provider: ProviderKind| {
+            if self.settings.provider == provider {
+                self.display.snapshot.as_ref()
+            } else {
+                self.provider_caches[provider_index(provider)]
+                    .display
+                    .as_ref()
+                    .and_then(|display| display.snapshot.as_ref())
+            }
+        };
+        let _ = self.store.save_snapshots(
+            self.settings.provider,
+            snapshot_for(ProviderKind::Codex),
+            snapshot_for(ProviderKind::Gemini),
+            Utc::now().timestamp(),
+        );
     }
 
     fn finish_ready_background_work(&mut self) {
@@ -2284,7 +2306,10 @@ impl AppState {
                 0 => {}
                 CMD_PROVIDER_CODEX => self.switch_provider(ProviderKind::Codex),
                 CMD_PROVIDER_GEMINI => self.switch_provider(ProviderKind::Gemini),
-                CMD_REFRESH => self.start_refresh(true),
+                CMD_REFRESH => {
+                    self.start_refresh(true);
+                    self.prefetch_other_provider();
+                }
                 CMD_USAGE => {
                     let url = match self.settings.provider {
                         ProviderKind::Codex => USAGE_URL,
