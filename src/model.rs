@@ -7,6 +7,14 @@ pub const SESSION_MINUTES: u64 = 5 * 60;
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub enum ProviderKind {
+    #[default]
+    Codex,
+    Gemini,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub enum QuotaKind {
     #[default]
     FiveHour,
@@ -51,7 +59,14 @@ impl QuotaWindow {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SecondaryQuotas {
+    pub five_hour: Option<QuotaWindow>,
+    pub weekly: Option<QuotaWindow>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountSummary {
     pub plan_type: Option<String>,
@@ -61,6 +76,8 @@ pub struct AccountSummary {
     pub reset_credit_expires_at: Option<i64>,
     #[serde(default)]
     pub reset_credit_details: Option<Vec<ResetCredit>>,
+    #[serde(default)]
+    pub claude_quotas: Option<SecondaryQuotas>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -350,6 +367,7 @@ pub fn parse_snapshot(
             reset_credits,
             reset_credit_expires_at,
             reset_credit_details: parse_reset_credits(rate_result),
+            claude_quotas: None,
         },
         fetched_at,
     })

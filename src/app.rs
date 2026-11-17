@@ -3,7 +3,7 @@ use crate::history::UsageLedger;
 use crate::icon::{OwnedIcon, create_icon, tone_for};
 #[cfg(test)]
 use crate::model::QuotaSnapshot;
-use crate::model::{DisplayState, QuotaAvailability, QuotaKind, RefreshState};
+use crate::model::{DisplayState, ProviderKind, QuotaAvailability, QuotaKind, RefreshState};
 use crate::settings::{AppStore, Settings};
 use crate::{startup, ui, updater};
 use chrono::{Datelike, Local, Utc};
@@ -44,15 +44,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CS_DROPSHADOW, CS_HREDRAW, CS_VREDRAW, CreatePopupMenu, CreateWindowExW,
     DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW, GetCursorPos,
     GetMessageW, GetWindowRect, HMENU, IDC_ARROW, IsWindowVisible, KillTimer, LoadCursorW,
-    MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, PostQuitMessage, RegisterClassExW,
-    RegisterWindowMessageW, SM_CXSMICON, SW_HIDE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER,
-    SWP_SHOWWINDOW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TPM_BOTTOMALIGN,
-    TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WA_INACTIVE,
-    WHEEL_DELTA, WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_APPCOMMAND, WM_CAPTURECHANGED, WM_CLOSE,
-    WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND,
-    WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_NULL, WM_PAINT, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WM_XBUTTONUP,
-    WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP, XBUTTON1,
+    MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, PostQuitMessage,
+    RegisterClassExW, RegisterWindowMessageW, SM_CXSMICON, SW_HIDE, SW_SHOWNORMAL, SWP_NOACTIVATE,
+    SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
+    TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+    TranslateMessage, WA_INACTIVE, WHEEL_DELTA, WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP,
+    WM_APPCOMMAND, WM_CAPTURECHANGED, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE,
+    WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_PAINT, WM_QUERYENDSESSION, WM_RBUTTONUP,
+    WM_SETTINGCHANGE, WM_TIMER, WM_XBUTTONUP, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_OVERLAPPED, WS_POPUP, XBUTTON1,
 };
 #[cfg(any(codex_status_channel = "stable", codex_status_channel = "beta"))]
 use windows::core::GUID;
@@ -131,6 +132,8 @@ const APPCOMMAND_BROWSER_BACKWARD_ID: u32 = 1;
 
 const CMD_REFRESH: u32 = 100;
 const CMD_USAGE: u32 = 101;
+const CMD_PROVIDER_CODEX: u32 = 102;
+const CMD_PROVIDER_GEMINI: u32 = 103;
 const CMD_DISPLAY_FIVE_HOUR: u32 = 105;
 const CMD_DISPLAY_WEEKLY: u32 = 106;
 const CMD_INTERVAL_1: u32 = 111;
@@ -148,6 +151,7 @@ const CMD_THEME_DARK: u32 = 162;
 const CMD_EXIT: u32 = 199;
 
 const USAGE_URL: &str = "https://chatgpt.com/codex/settings/usage";
+const GEMINI_USAGE_URL: &str = "https://aistudio.google.com/usage";
 
 thread_local! {
     static STATE: Cell<*mut AppState> = const { Cell::new(ptr::null_mut()) };
@@ -212,9 +216,17 @@ impl Drop for MenuHandle {
 }
 
 struct RefreshOutcome {
+    provider: ProviderKind,
     result: Result<AppServerSnapshot, String>,
     account_key: Option<String>,
     complete: bool,
+}
+
+#[derive(Default)]
+struct ProviderCache {
+    display: Option<DisplayState>,
+    active_account_key: Option<String>,
+    failures: u8,
 }
 
 #[derive(Default)]
@@ -257,14 +269,19 @@ impl HistoryWheelState {
 }
 
 impl RefreshOutcome {
-    fn from_fetch(result: Result<AppServerSnapshot, AppServerFailure>) -> Self {
+    fn from_fetch(
+        provider: ProviderKind,
+        result: Result<AppServerSnapshot, AppServerFailure>,
+    ) -> Self {
         match result {
             Ok(snapshot) => Self {
+                provider,
                 account_key: snapshot.account_key.clone(),
                 result: Ok(snapshot),
                 complete: true,
             },
             Err(failure) => Self {
+                provider,
                 account_key: failure.account_key,
                 result: Err(failure.error.to_string()),
                 complete: true,
@@ -272,8 +289,8 @@ impl RefreshOutcome {
         }
     }
 
-    fn unscoped_error(error: String) -> Self {
-        Self { result: Err(error), account_key: None, complete: true }
+    fn unscoped_error(provider: ProviderKind, error: String) -> Self {
+        Self { provider, result: Err(error), account_key: None, complete: true }
     }
 }
 
@@ -408,6 +425,8 @@ struct AppState {
     display: DisplayState,
     client: AppServerClient,
     fallback: std::sync::Arc<std::sync::Mutex<crate::refresh::FallbackState>>,
+    gemini: std::sync::Arc<std::sync::Mutex<crate::gemini::GeminiState>>,
+    provider_caches: [ProviderCache; 2],
     refresh_results: Receiver<RefreshOutcome>,
     refresh_results_tx: SyncSender<RefreshOutcome>,
     update_results: Receiver<UpdateOutcome>,
@@ -549,6 +568,8 @@ pub fn run() -> Result<(), AppError> {
         display,
         client: AppServerClient::new(),
         fallback: Default::default(),
+        gemini: Default::default(),
+        provider_caches: Default::default(),
         refresh_results,
         refresh_results_tx,
         update_results,
@@ -795,6 +816,7 @@ unsafe extern "system" fn main_window_proc(
                         state.locale,
                         state.theme,
                         ui::CardView {
+                            provider: state.settings.provider,
                             reset: Some(&state.reset_panel),
                             history,
                             navigation: &state.history_navigation,
@@ -946,6 +968,7 @@ unsafe extern "system" fn flyout_window_proc(
                     state.locale,
                     state.theme,
                     ui::CardView {
+                        provider: state.settings.provider,
                         reset: Some(&state.reset_panel),
                         history,
                         navigation: &state.history_navigation,
@@ -1218,8 +1241,10 @@ impl AppState {
         self.history_wheel.reset();
         match hit {
             ui::HistoryHit::ToggleResourcePage => {
-                self.history_navigation.resource_page =
-                    self.history_navigation.resource_page.toggle();
+                if self.settings.provider == ProviderKind::Codex {
+                    self.history_navigation.resource_page =
+                        self.history_navigation.resource_page.toggle();
+                }
                 self.reset_panel.pressed = None;
                 self.reset_panel.hovered = None;
             }
@@ -1360,8 +1385,10 @@ impl AppState {
         }
 
         let hwnd_value = self.hwnd.0 as isize;
+        let provider = self.settings.provider;
         let client = self.client.clone();
         let fallback = self.fallback.clone();
+        let gemini = self.gemini.clone();
         let results = self.refresh_results_tx.clone();
         let spawn_result = thread::Builder::new()
             .name("codex-status-refresh".to_owned())
@@ -1369,24 +1396,28 @@ impl AppState {
             .spawn(move || {
                 let hwnd = HWND(hwnd_value as *mut std::ffi::c_void);
                 diagnostic("refresh:worker");
-                let outcome = RefreshOutcome::from_fetch(crate::refresh::fetch(
-                    &client,
-                    &fallback,
-                    |snapshot| {
-                        let mut interim = RefreshOutcome::from_fetch(Ok(snapshot));
-                        interim.complete = false;
-                        if results.send(interim).is_ok() {
-                            unsafe {
-                                let _ = PostMessageW(
-                                    Some(hwnd),
-                                    WM_REFRESH_COMPLETE,
-                                    WPARAM(0),
-                                    LPARAM(0),
-                                );
+                let outcome = match provider {
+                    ProviderKind::Codex => RefreshOutcome::from_fetch(
+                        provider,
+                        crate::refresh::fetch(&client, &fallback, |snapshot| {
+                            let mut interim = RefreshOutcome::from_fetch(provider, Ok(snapshot));
+                            interim.complete = false;
+                            if results.send(interim).is_ok() {
+                                unsafe {
+                                    let _ = PostMessageW(
+                                        Some(hwnd),
+                                        WM_REFRESH_COMPLETE,
+                                        WPARAM(0),
+                                        LPARAM(0),
+                                    );
+                                }
                             }
-                        }
-                    },
-                ));
+                        }),
+                    ),
+                    ProviderKind::Gemini => {
+                        RefreshOutcome::from_fetch(provider, crate::gemini::fetch(&gemini))
+                    }
+                };
                 diagnostic(if outcome.result.is_ok() {
                     "refresh:success"
                 } else {
@@ -1399,9 +1430,10 @@ impl AppState {
                 }
             });
         if let Err(error) = spawn_result {
-            self.finish_refresh(RefreshOutcome::unscoped_error(format!(
-                "Could not start refresh: {error}"
-            )));
+            self.finish_refresh(RefreshOutcome::unscoped_error(
+                provider,
+                format!("Could not start refresh: {error}"),
+            ));
         }
     }
 
@@ -1411,6 +1443,47 @@ impl AppState {
         self.refreshing = !outcome.complete;
         if outcome.complete {
             self.stop_refresh_feedback();
+        }
+        if outcome.provider != self.settings.provider {
+            let slot = &mut self.provider_caches[provider_index(outcome.provider)];
+            match outcome.result {
+                Ok(snapshot) => {
+                    slot.failures = 0;
+                    slot.active_account_key = snapshot.account_key.clone();
+                    slot.display = Some(DisplayState::live(snapshot.quota));
+                    self.usage_history.record_refresh(
+                        snapshot.account_key.as_deref(),
+                        snapshot.token_usage.as_ref(),
+                        Utc::now().timestamp(),
+                    );
+                    self.history_dirty = true;
+                    self.persist_usage_history(false);
+                }
+                Err(error) => {
+                    slot.failures = slot.failures.saturating_add(1);
+                    let now = Utc::now().timestamp();
+                    let same = same_verified_account(
+                        slot.active_account_key.as_deref(),
+                        outcome.account_key.as_deref(),
+                    );
+                    let prev = if same {
+                        slot.display.take().and_then(|d| d.snapshot)
+                    } else {
+                        slot.active_account_key = None;
+                        None
+                    };
+                    slot.display = Some(DisplayState::after_error(
+                        prev,
+                        friendly_error(&error, self.locale),
+                        now,
+                    ));
+                }
+            }
+            if outcome.complete && self.refresh_pending {
+                self.refresh_pending = false;
+                self.start_refresh(true);
+            }
+            return;
         }
         match outcome.result {
             Ok(snapshot) => {
@@ -1806,10 +1879,13 @@ impl AppState {
             (_, QuotaKind::FiveHour) => "5-hour remaining:",
             (_, QuotaKind::Weekly) => "Weekly remaining:",
         };
-        self.show_balloon(
-            self.locale.text("Codex quota is running low", "Codex 额度偏低"),
-            &format!("{quota_label} {}%", alert.percent),
-        );
+        let title = match self.settings.provider {
+            ProviderKind::Codex => self.locale.text("Codex quota is running low", "Codex 额度偏低"),
+            ProviderKind::Gemini => {
+                self.locale.text("Gemini quota is running low", "Gemini 额度偏低")
+            }
+        };
+        self.show_balloon(title, &format!("{quota_label} {}%", alert.percent));
         self.settings.last_alert_reset = Some(alert_key);
         self.persist_internal_settings();
     }
@@ -2015,13 +2091,25 @@ impl AppState {
         let menu = owned_menu.0;
         let startup_enabled = startup::is_enabled();
         unsafe {
-            append(menu, CMD_REFRESH, self.locale.text("Refresh now", "立即刷新"), false)?;
             append(
                 menu,
-                CMD_USAGE,
-                self.locale.text("Open Codex usage", "打开 Codex 用量页"),
-                false,
+                CMD_PROVIDER_CODEX,
+                "Codex",
+                self.settings.provider == ProviderKind::Codex,
             )?;
+            append(
+                menu,
+                CMD_PROVIDER_GEMINI,
+                "Gemini",
+                self.settings.provider == ProviderKind::Gemini,
+            )?;
+            separator(menu)?;
+            append(menu, CMD_REFRESH, self.locale.text("Refresh now", "立即刷新"), false)?;
+            let usage_label = match self.settings.provider {
+                ProviderKind::Codex => self.locale.text("Open Codex usage", "打开 Codex 用量页"),
+                ProviderKind::Gemini => self.locale.text("Open Gemini usage", "打开 Gemini 用量页"),
+            };
+            append(menu, CMD_USAGE, usage_label, false)?;
             separator(menu)?;
             if quota_switching_available(&self.display) {
                 append(
@@ -2038,27 +2126,29 @@ impl AppState {
                 )?;
                 separator(menu)?;
             }
+
+            let refresh_sub = MenuHandle(CreatePopupMenu()?);
             append(
-                menu,
+                refresh_sub.0,
                 CMD_INTERVAL_1,
                 self.locale.text("Refresh every 1 minute", "每 1 分钟刷新"),
                 self.settings.refresh_minutes == 1,
             )?;
             append(
-                menu,
+                refresh_sub.0,
                 CMD_INTERVAL_5,
                 self.locale.text("Refresh every 5 minutes", "每 5 分钟刷新"),
                 self.settings.refresh_minutes == 5,
             )?;
             append(
-                menu,
+                refresh_sub.0,
                 CMD_INTERVAL_15,
                 self.locale.text("Refresh every 15 minutes", "每 15 分钟刷新"),
                 self.settings.refresh_minutes == 15,
             )?;
-            separator(menu)?;
+            separator(refresh_sub.0)?;
             append(
-                menu,
+                refresh_sub.0,
                 CMD_ALERT_OFF,
                 self.locale.text("Low-quota alerts off", "关闭低额度提醒"),
                 self.settings.alert_threshold.is_none(),
@@ -2069,34 +2159,47 @@ impl AppState {
                     (ui::Locale::Chinese, value) => format!("剩余低于 {value}% 时提醒"),
                     (_, value) => format!("Alert below {value}%"),
                 };
-                append(menu, command, &label, self.settings.alert_threshold == Some(threshold))?;
+                append(
+                    refresh_sub.0,
+                    command,
+                    &label,
+                    self.settings.alert_threshold == Some(threshold),
+                )?;
             }
-            separator(menu)?;
+            append_submenu(menu, refresh_sub, self.locale.text("Refresh & alerts", "刷新与提醒"))?;
+
+            let system_sub = MenuHandle(CreatePopupMenu()?);
             append(
-                menu,
-                CMD_STARTUP,
-                self.locale.text("Start with Windows", "开机自动启动"),
-                startup_enabled,
-            )?;
-            separator(menu)?;
-            append(
-                menu,
+                system_sub.0,
                 CMD_THEME_SYSTEM,
                 self.locale.text("Theme: system", "主题：跟随系统"),
                 self.settings.theme == "system",
             )?;
             append(
-                menu,
+                system_sub.0,
                 CMD_THEME_LIGHT,
                 self.locale.text("Theme: light", "主题：浅色"),
                 self.settings.theme == "light",
             )?;
             append(
-                menu,
+                system_sub.0,
                 CMD_THEME_DARK,
                 self.locale.text("Theme: dark", "主题：深色"),
                 self.settings.theme == "dark",
             )?;
+            separator(system_sub.0)?;
+            append(
+                system_sub.0,
+                CMD_STARTUP,
+                self.locale.text("Start with Windows", "开机自动启动"),
+                startup_enabled,
+            )?;
+            append_submenu(
+                menu,
+                system_sub,
+                self.locale.text("Appearance & system", "界面与系统"),
+            )?;
+
             separator(menu)?;
             append(menu, CMD_UPDATE, self.locale.text("Check for updates", "检查更新"), false)?;
             append(
@@ -2109,12 +2212,55 @@ impl AppState {
         Ok(owned_menu.into_raw())
     }
 
+    fn switch_provider(&mut self, next: ProviderKind) {
+        if self.settings.provider == next {
+            return;
+        }
+        let current_idx = provider_index(self.settings.provider);
+        self.provider_caches[current_idx] = ProviderCache {
+            display: Some(self.display.clone()),
+            active_account_key: self.active_account_key.clone(),
+            failures: self.failures,
+        };
+        self.settings.provider = next;
+        self.persist_settings();
+        self.reset_panel.close();
+        self.history_navigation.page = ui::HistoryPage::Main;
+        self.hovered_history_day = None;
+
+        let next_cache = std::mem::take(&mut self.provider_caches[provider_index(next)]);
+        self.active_account_key = next_cache.active_account_key;
+        self.failures = next_cache.failures;
+        self.display = next_cache.display.unwrap_or_else(|| DisplayState::loading(None));
+        self.refresh_history_view_cache();
+        let _ = self.update_tray(false);
+        self.sync_visible_flyout_layout();
+        unsafe {
+            let _ = InvalidateRect(Some(self.flyout), None, false);
+        }
+        if self.display.snapshot.is_none() {
+            if self.refreshing {
+                self.refresh_pending = true;
+            } else {
+                self.start_refresh(false);
+            }
+        }
+    }
+
     unsafe fn handle_command(&mut self, command: u32) {
         unsafe {
             match command {
                 0 => {}
+                CMD_PROVIDER_CODEX => self.switch_provider(ProviderKind::Codex),
+                CMD_PROVIDER_GEMINI => self.switch_provider(ProviderKind::Gemini),
                 CMD_REFRESH => self.start_refresh(true),
-                CMD_USAGE => self.open_url(USAGE_URL),
+                CMD_USAGE => {
+                    let url = match self.settings.provider {
+                        ProviderKind::Codex => USAGE_URL,
+                        ProviderKind::Gemini => GEMINI_USAGE_URL,
+                    };
+                    self.open_url(url);
+                }
                 CMD_UPDATE => self.start_update_check(),
                 CMD_DISPLAY_FIVE_HOUR | CMD_DISPLAY_WEEKLY => {
                     let kind = if command == CMD_DISPLAY_WEEKLY {
@@ -2253,6 +2399,29 @@ unsafe fn append(
     }
 }
 
+unsafe fn append_submenu(
+    parent: HMENU,
+    submenu: MenuHandle,
+    label: &str,
+) -> windows::core::Result<()> {
+    unsafe {
+        let text = wide0(label);
+        let raw = submenu.into_raw();
+        if let Err(err) = AppendMenuW(parent, MF_POPUP, raw.0 as usize, PCWSTR(text.as_ptr())) {
+            let _ = DestroyMenu(raw);
+            return Err(err);
+        }
+        Ok(())
+    }
+}
+
+fn provider_index(provider: ProviderKind) -> usize {
+    match provider {
+        ProviderKind::Codex => 0,
+        ProviderKind::Gemini => 1,
+    }
+}
+
 unsafe fn separator(menu: HMENU) -> windows::core::Result<()> {
     unsafe { AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null()) }
 }
@@ -2280,6 +2449,16 @@ fn wide0(value: &str) -> Vec<u16> {
 
 fn friendly_error(error: &str, locale: ui::Locale) -> String {
     let lower = error.to_ascii_lowercase();
+    if lower.contains("antigravity language server is not running") {
+        return locale
+            .text("Start Antigravity, then refresh", "请先启动 Antigravity，然后刷新")
+            .to_owned();
+    }
+    if lower.contains("antigravity") {
+        return locale
+            .text("Could not read local Antigravity quota", "无法读取本地 Antigravity 额度")
+            .to_owned();
+    }
     if lower.contains("not installed") || lower.contains("not available on path") {
         return locale
             .text("Codex is not installed or not on PATH", "未找到 Codex，请先安装并加入 PATH")

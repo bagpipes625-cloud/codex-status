@@ -1,6 +1,7 @@
 use crate::history::UsageHistoryView;
 use crate::model::{
-    AccountSummary, DisplayState, QuotaAvailability, QuotaKind, QuotaWindow, RefreshState,
+    AccountSummary, DisplayState, ProviderKind, QuotaAvailability, QuotaKind, QuotaWindow,
+    RefreshState,
 };
 use chrono::{DateTime, Datelike, Local};
 use std::ffi::c_void;
@@ -75,6 +76,7 @@ pub struct CardInteraction {
 
 #[derive(Debug, Clone, Copy)]
 pub struct CardView<'a> {
+    pub provider: ProviderKind,
     pub reset: Option<&'a crate::reset::ResetPanel>,
     pub history: Option<&'a UsageHistoryView>,
     pub navigation: &'a HistoryNavigation,
@@ -114,6 +116,36 @@ fn quota_panel_geometry(slot: QuotaPanelSlot) -> QuotaPanelGeometry {
     match slot {
         QuotaPanelSlot::Left => QuotaPanelGeometry { left: 16, right: 184, center_x: 100 },
         QuotaPanelSlot::Right => QuotaPanelGeometry { left: 192, right: 360, center_x: 276 },
+    }
+}
+
+pub(super) struct ClaudeSummaryRows {
+    pub five_hour_percent: Option<u8>,
+    pub weekly_percent: Option<u8>,
+}
+
+pub(super) fn claude_summary_rows(state: &DisplayState) -> ClaudeSummaryRows {
+    let now = chrono::Utc::now().timestamp();
+    let valid_window = |window: Option<&QuotaWindow>, fetched_at: i64| -> Option<u8> {
+        let w = window?;
+        w.is_cache_valid(now, fetched_at).then(|| w.display_percent())
+    };
+    let Some(snapshot) = state.snapshot.as_ref() else {
+        return ClaudeSummaryRows { five_hour_percent: None, weekly_percent: None };
+    };
+    let Some(claude) = snapshot.account.claude_quotas.as_ref() else {
+        return ClaudeSummaryRows { five_hour_percent: None, weekly_percent: None };
+    };
+    ClaudeSummaryRows {
+        five_hour_percent: valid_window(claude.five_hour.as_ref(), snapshot.fetched_at),
+        weekly_percent: valid_window(claude.weekly.as_ref(), snapshot.fetched_at),
+    }
+}
+
+pub(super) fn header_title(provider: ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::Codex => "CodexStatus",
+        ProviderKind::Gemini => "CodexStatus · Gemini",
     }
 }
 
@@ -463,6 +495,7 @@ pub fn paint_card(
         let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96);
 
         let painted = direct2d::paint(direct2d::PaintInput {
+            provider: view.provider,
             hwnd,
             pixel_size: (width, height),
             dpi,
@@ -510,6 +543,7 @@ pub fn prewarm_card_renderer(
         let mut client = RECT::default();
         let _ = GetClientRect(hwnd, &mut client);
         direct2d::prewarm(direct2d::PaintInput {
+            provider: view.provider,
             hwnd,
             pixel_size: ((client.right - client.left).max(1), (client.bottom - client.top).max(1)),
             dpi: windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96),
@@ -574,14 +608,15 @@ unsafe fn draw_card(
             scale(2, dpi),
             status_color,
         );
+        let title = header_title(view.provider);
         draw_text_bottom(
             hdc,
             locale,
-            "CodexStatus",
+            title,
             RECT {
                 left: scale(29, dpi),
                 top: scale(HEADER_TEXT_TOP, dpi),
-                right: scale(180, dpi),
+                right: scale(205, dpi),
                 bottom: scale(HEADER_TEXT_BOTTOM, dpi),
             },
             scale(14, dpi),
@@ -589,7 +624,7 @@ unsafe fn draw_card(
             theme.text,
         );
         let title_right = scale(29, dpi)
-            + measure_text_width(hdc, locale, "CodexStatus", scale(14, dpi), FW_SEMIBOLD.0 as i32);
+            + measure_text_width(hdc, locale, title, scale(14, dpi), FW_SEMIBOLD.0 as i32);
         draw_text_bottom(
             hdc,
             locale,
@@ -597,7 +632,7 @@ unsafe fn draw_card(
             RECT {
                 left: title_right,
                 top: scale(HEADER_VERSION_TOP, dpi),
-                right: scale(188, dpi),
+                right: scale(240, dpi),
                 bottom: scale(HEADER_VERSION_BOTTOM, dpi),
             },
             scale(11, dpi),
@@ -633,6 +668,7 @@ unsafe fn draw_card(
         );
 
         let account = account_metrics(state, locale, navigation.resource_page);
+        let claude = claude_summary_rows(state);
         let weekly = weekly_usage_metrics(history, navigation.summary_week, locale);
         match state.quota_availability() {
             QuotaAvailability::Single(kind) => {
@@ -654,6 +690,8 @@ unsafe fn draw_card(
                     locale,
                     &weekly,
                     &account,
+                    view.provider,
+                    &claude,
                     theme,
                     dpi,
                     interaction.hovered_history_values,
@@ -718,6 +756,8 @@ unsafe fn draw_card(
                     &account.credits,
                     account.credit_detail.as_deref(),
                     account.page,
+                    view.provider,
+                    &claude,
                     theme,
                     dpi,
                     interaction.hovered_history_values,
@@ -1053,11 +1093,14 @@ unsafe fn draw_centered_percentage(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn draw_stacked_metrics(
     hdc: HDC,
     locale: Locale,
     weekly: &WeeklyUsageMetrics,
     account: &AccountMetrics,
+    provider: ProviderKind,
+    claude: &ClaudeSummaryRows,
     theme: Theme,
     dpi: u32,
     hovered_history_values: bool,
@@ -1126,49 +1169,66 @@ unsafe fn draw_stacked_metrics(
             FW_NORMAL.0 as i32,
             interactive_text_color(theme, hovered_history_values, true),
         );
-        draw_gdi_paged_heading(
-            hdc,
-            locale,
-            resource_label(account.page, locale),
-            RECT {
-                left: scale(197, dpi),
-                top: scale(173, dpi),
-                right: scale(315, dpi),
-                bottom: scale(197, dpi),
-            },
-            theme,
-            dpi,
-            account.page == ResourcePage::Resets,
-        );
-        draw_text_center(
-            hdc,
-            locale,
-            &account.credits,
-            RECT {
-                left: metrics.left + scale(8, dpi),
-                top: scale(198, dpi),
-                right: metrics.right - scale(8, dpi),
-                bottom: scale(236, dpi),
-            },
-            scale(20, dpi),
-            FW_SEMIBOLD.0 as i32,
-            theme.text,
-        );
-        if let Some(detail) = account.credit_detail.as_deref() {
+        if provider == ProviderKind::Gemini {
+            draw_gdi_claude_rows(
+                hdc,
+                locale,
+                RECT {
+                    left: metrics.left + scale(8, dpi),
+                    top: scale(174, dpi),
+                    right: metrics.right - scale(8, dpi),
+                    bottom: metrics.bottom - scale(10, dpi),
+                },
+                claude,
+                theme,
+                dpi,
+                true,
+            );
+        } else {
+            draw_gdi_paged_heading(
+                hdc,
+                locale,
+                resource_label(account.page, locale),
+                RECT {
+                    left: scale(197, dpi),
+                    top: scale(173, dpi),
+                    right: scale(315, dpi),
+                    bottom: scale(197, dpi),
+                },
+                theme,
+                dpi,
+                account.page == ResourcePage::Resets,
+            );
             draw_text_center(
                 hdc,
                 locale,
-                detail,
+                &account.credits,
                 RECT {
-                    left: metrics.left + scale(5, dpi),
-                    top: scale(237, dpi),
-                    right: metrics.right - scale(5, dpi),
-                    bottom: scale(262, dpi),
+                    left: metrics.left + scale(8, dpi),
+                    top: scale(198, dpi),
+                    right: metrics.right - scale(8, dpi),
+                    bottom: scale(236, dpi),
                 },
-                scale(11, dpi),
-                FW_NORMAL.0 as i32,
-                theme.muted,
+                scale(20, dpi),
+                FW_SEMIBOLD.0 as i32,
+                theme.text,
             );
+            if let Some(detail) = account.credit_detail.as_deref() {
+                draw_text_center(
+                    hdc,
+                    locale,
+                    detail,
+                    RECT {
+                        left: metrics.left + scale(5, dpi),
+                        top: scale(237, dpi),
+                        right: metrics.right - scale(5, dpi),
+                        bottom: scale(262, dpi),
+                    },
+                    scale(11, dpi),
+                    FW_NORMAL.0 as i32,
+                    theme.muted,
+                );
+            }
         }
     }
 }
@@ -1186,6 +1246,8 @@ unsafe fn draw_bottom_metrics(
     credits: &str,
     credit_detail: Option<&str>,
     page: ResourcePage,
+    provider: ProviderKind,
+    claude: &ClaudeSummaryRows,
     theme: Theme,
     dpi: u32,
     hovered_history_values: bool,
@@ -1241,6 +1303,23 @@ unsafe fn draw_bottom_metrics(
             FW_NORMAL.0 as i32,
             interactive_text_color(theme, hovered_history_values, true),
         );
+        if provider == ProviderKind::Gemini {
+            draw_gdi_claude_rows(
+                hdc,
+                locale,
+                RECT {
+                    left: right_left,
+                    top: metrics.top + scale(6, dpi),
+                    right: metrics.right - scale(10, dpi),
+                    bottom: metrics.bottom - scale(6, dpi),
+                },
+                claude,
+                theme,
+                dpi,
+                false,
+            );
+            return;
+        }
         draw_gdi_paged_heading(
             hdc,
             locale,
@@ -1297,6 +1376,91 @@ unsafe fn draw_bottom_metrics(
                 scale(11, dpi),
                 FW_NORMAL.0 as i32,
                 theme.muted,
+            );
+        }
+    }
+}
+
+unsafe fn draw_gdi_claude_rows(
+    hdc: HDC,
+    locale: Locale,
+    bounds: RECT,
+    claude: &ClaudeSummaryRows,
+    theme: Theme,
+    dpi: u32,
+    compact: bool,
+) {
+    unsafe {
+        let rows = [
+            (locale.text("Claude 5H", "Claude 5H"), claude.five_hour_percent),
+            (locale.text("Claude Wk", "Claude 周"), claude.weekly_percent),
+        ];
+        let row_height = (bounds.bottom - bounds.top) / 2;
+        for (index, (label, percent)) in rows.into_iter().enumerate() {
+            let row_top = bounds.top + row_height * index as i32;
+            let row_bottom = row_top + row_height;
+            let pct_text = percent.map_or_else(|| "--".to_owned(), |v| format!("{v}%"));
+            let bar_color = quota_bar_color(percent, theme.high_contrast);
+            let pct_color = if percent.is_some() { bar_color } else { theme.muted };
+            let pct_width = scale(34, dpi);
+            let bar_width = if compact { scale(28, dpi) } else { scale(44, dpi) };
+            let bar_right = bounds.right - pct_width - scale(4, dpi);
+            let bar_left = (bar_right - bar_width).max(bounds.left + scale(58, dpi));
+            draw_text_with_alignment(
+                hdc,
+                locale,
+                label,
+                RECT {
+                    left: bounds.left,
+                    top: row_top,
+                    right: bar_left - scale(4, dpi),
+                    bottom: row_bottom,
+                },
+                TextStyle {
+                    height: scale(11, dpi),
+                    weight: FW_SEMIBOLD.0 as i32,
+                    color: theme.muted,
+                },
+                DT_LEFT,
+            );
+            let bar_mid = (row_top + row_bottom) / 2;
+            let bar_h = scale(4, dpi).max(2);
+            let bar_rect = RECT {
+                left: bar_left,
+                top: bar_mid - bar_h / 2,
+                right: bar_right,
+                bottom: bar_mid - bar_h / 2 + bar_h,
+            };
+            fill_rounded(hdc, bar_rect, bar_h, outer_track_color(theme, theme.high_contrast));
+            if let Some(value) = percent
+                && value > 0
+            {
+                let fill_w = ((bar_rect.right - bar_rect.left) * i32::from(value)) / 100;
+                if fill_w > 0 {
+                    fill_rounded(
+                        hdc,
+                        RECT { right: bar_rect.left + fill_w.max(bar_h), ..bar_rect },
+                        bar_h,
+                        bar_color,
+                    );
+                }
+            }
+            draw_text_with_alignment(
+                hdc,
+                locale,
+                &pct_text,
+                RECT {
+                    left: bar_right + scale(4, dpi),
+                    top: row_top,
+                    right: bounds.right,
+                    bottom: row_bottom,
+                },
+                TextStyle {
+                    height: scale(12, dpi),
+                    weight: FW_SEMIBOLD.0 as i32,
+                    color: pct_color,
+                },
+                DT_RIGHT,
             );
         }
     }

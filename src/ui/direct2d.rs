@@ -11,13 +11,14 @@ use super::{
     HistoryNavigation, HistoryPage, Locale, QuotaPanelGeometry, QuotaPanelSlot,
     REFRESH_ARC_START_DEGREES, REFRESH_ARC_SWEEP_DEGREES, REFRESH_BUTTON_GAP,
     REFRESH_BUTTON_RADIUS, REFRESH_BUTTON_RIGHT, ResourcePage, Theme, UsageSummaryWeek, accent_for,
-    account_metrics, flyout_dimensions, format_tokens, inner_track_color, interactive_text_color,
-    outer_track_color, quota_bar_color, quota_card_colors, quota_label, quota_panel_geometry,
-    refresh_icon_color, reset_details, resource_label, theoretical_color,
-    theoretical_remaining_percent, updated_text, version_text, weekly_usage_metrics,
+    account_metrics, claude_summary_rows, flyout_dimensions, format_tokens, header_title,
+    inner_track_color, interactive_text_color, outer_track_color, quota_bar_color,
+    quota_card_colors, quota_label, quota_panel_geometry, refresh_icon_color, reset_details,
+    resource_label, theoretical_color, theoretical_remaining_percent, updated_text, version_text,
+    weekly_usage_metrics,
 };
 use crate::history::UsageHistoryView;
-use crate::model::{DisplayState, QuotaAvailability, QuotaKind, QuotaWindow};
+use crate::model::{DisplayState, ProviderKind, QuotaAvailability, QuotaKind, QuotaWindow};
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use std::cell::{Cell, RefCell};
 use windows::Win32::Foundation::{COLORREF, D2DERR_RECREATE_TARGET, HWND};
@@ -56,6 +57,7 @@ thread_local! {
 }
 
 pub(super) struct PaintInput<'a> {
+    pub provider: ProviderKind,
     pub reset: Option<&'a crate::reset::ResetPanel>,
     pub hwnd: HWND,
     pub pixel_size: (i32, i32),
@@ -724,19 +726,20 @@ fn draw_frame(
         }
         return Ok(());
     }
+    let title = header_title(input.provider);
     draw_text(
         target,
-        "CodexStatus",
-        rect(29.0, HEADER_TEXT_TOP as f32, 180.0, HEADER_TEXT_BOTTOM as f32),
+        title,
+        rect(29.0, HEADER_TEXT_TOP as f32, 205.0, HEADER_TEXT_BOTTOM as f32),
         &formats.header,
         &brushes.text,
     );
     let title_width =
-        measure_text(dwrite, "CodexStatus", &formats.header)?.widthIncludingTrailingWhitespace;
+        measure_text(dwrite, title, &formats.header)?.widthIncludingTrailingWhitespace;
     draw_text(
         target,
         &version_text(),
-        rect(29.0 + title_width, HEADER_VERSION_TOP as f32, 190.0, HEADER_VERSION_BOTTOM as f32),
+        rect(29.0 + title_width, HEADER_VERSION_TOP as f32, 240.0, HEADER_VERSION_BOTTOM as f32),
         &formats.metric_label,
         &brushes.muted,
     );
@@ -1439,6 +1442,18 @@ fn draw_stacked_metrics(
         &formats.stacked_detail,
         detail_brush,
     );
+    if input.provider == ProviderKind::Gemini {
+        draw_d2d_claude_rows(
+            target,
+            dwrite,
+            formats,
+            brushes,
+            input,
+            rect(200.0, 174.0, 312.0, 258.0),
+            true,
+        );
+        return;
+    }
     draw_paged_heading(
         target,
         factory,
@@ -1526,6 +1541,18 @@ fn draw_bottom_metrics(
         detail_brush,
         false,
     );
+    if input.provider == ProviderKind::Gemini {
+        draw_d2d_claude_rows(
+            target,
+            dwrite,
+            formats,
+            brushes,
+            input,
+            rect(202.0, 281.0, 350.0, 331.0),
+            false,
+        );
+        return;
+    }
     draw_paged_heading(
         target,
         factory,
@@ -1554,6 +1581,84 @@ fn draw_bottom_metrics(
         &brushes.muted,
         true,
     );
+}
+
+fn draw_d2d_claude_rows(
+    target: &ID2D1HwndRenderTarget,
+    dwrite: &IDWriteFactory,
+    formats: &FormatSet,
+    brushes: &Brushes,
+    input: &PaintInput<'_>,
+    bounds: D2D_RECT_F,
+    compact: bool,
+) {
+    let claude = claude_summary_rows(input.state);
+    let rows = [
+        (input.locale.text("Claude 5H", "Claude 5H"), claude.five_hour_percent),
+        (input.locale.text("Claude Wk", "Claude 周"), claude.weekly_percent),
+    ];
+    let row_height = (bounds.bottom - bounds.top) / 2.0;
+    let track_color = outer_track_color(input.theme, input.theme.high_contrast);
+    let Ok(track_brush) = brush(target, track_color) else {
+        return;
+    };
+    for (index, (label, percent)) in rows.into_iter().enumerate() {
+        let row_top = bounds.top + row_height * index as f32;
+        let row_bottom = row_top + row_height;
+        let pct_text = percent.map_or_else(|| "--".to_owned(), |v| format!("{v}%"));
+        let bar_color = quota_bar_color(percent, input.theme.high_contrast);
+        let pct_width = 34.0;
+        let bar_width = if compact { 28.0 } else { 44.0 };
+        let bar_right = bounds.right - pct_width - 4.0;
+        let bar_left = (bar_right - bar_width).max(bounds.left + 58.0);
+        draw_text(
+            target,
+            label,
+            rect(bounds.left, row_top, bar_left - 4.0, row_bottom),
+            &formats.metric_label,
+            &brushes.muted,
+        );
+        let bar_mid = (row_top + row_bottom) * 0.5;
+        let bar_rect = rounded_rect(bar_left, bar_mid - 2.0, bar_right, bar_mid + 2.0, 2.0);
+        unsafe {
+            target.FillRoundedRectangle(&bar_rect, &track_brush);
+        }
+        if let Some(value) = percent
+            && value > 0
+            && let Ok(fill_brush) = brush(target, bar_color)
+        {
+            let fill_w = ((bar_right - bar_left) * f32::from(value)) / 100.0;
+            if fill_w > 0.0 {
+                let fill_rect = rounded_rect(
+                    bar_left,
+                    bar_mid - 2.0,
+                    (bar_left + fill_w.max(4.0)).min(bar_right),
+                    bar_mid + 2.0,
+                    2.0,
+                );
+                unsafe {
+                    target.FillRoundedRectangle(&fill_rect, &fill_brush);
+                }
+            }
+        }
+        let pct_brush = if percent.is_some() { brush(target, bar_color).ok() } else { None };
+        let pct_u16: Vec<u16> = pct_text.encode_utf16().collect();
+        if let Ok(layout) = unsafe {
+            dwrite.CreateTextLayout(&pct_u16, &formats.metric_label, pct_width, row_height)
+        } {
+            unsafe {
+                let _ = layout.SetTextAlignment(
+                    windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT_TRAILING,
+                );
+                target.DrawTextLayout(
+                    windows_numerics::Vector2::new(bar_right + 4.0, row_top),
+                    &layout,
+                    pct_brush.as_ref().unwrap_or(&brushes.muted),
+                    windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                );
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -84,6 +84,7 @@ fn render_reset_credit_states() {
                 ui::Locale::Chinese,
                 theme,
                 ui::CardView {
+                    provider: codex_status::model::ProviderKind::Codex,
                     reset: Some(&panel),
                     history: None,
                     navigation: &ui::HistoryNavigation::default(),

@@ -1,5 +1,5 @@
 use crate::history::UsageLedger;
-use crate::model::QuotaKind;
+use crate::model::{ProviderKind, QuotaKind};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Write};
@@ -23,6 +23,7 @@ static TEMPORARY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
+    pub provider: ProviderKind,
     pub refresh_minutes: u32,
     pub display_quota: QuotaKind,
     pub alert_threshold: Option<u8>,
@@ -35,6 +36,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            provider: ProviderKind::Codex,
             refresh_minutes: 5,
             display_quota: QuotaKind::FiveHour,
             alert_threshold: None,

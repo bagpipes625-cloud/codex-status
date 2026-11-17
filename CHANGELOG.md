@@ -2,6 +2,18 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.6.8] - 2026-11-17
+
+- Add a unified provider switcher (`Codex` / `Gemini`) in the tray context menu
+  and reorganize low-frequency settings into compact submenus (`Refresh & alerts`,
+  `Appearance & system`).
+- Support read-only Gemini & Claude (`5H` / `Weekly`) quota display in Gemini
+  mode while preserving the existing dual/single quota ring layout and natural
+  weekly Token history / calendar view.
+- Isolate provider caches, low-quota alerts, and background refresh state so
+  switching providers during an active refresh automatically queues and completes
+  without cross-provider state leakage.
+
 ## [0.6.7] - 2026-09-30
 
 - Retry atomic update replacement and rollback for up to five seconds when

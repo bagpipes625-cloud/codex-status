@@ -12,7 +12,8 @@ impl AppState {
     }
 
     fn reset_hit(&self, lparam: LPARAM) -> Option<ResetHit> {
-        if !self.full_history_render
+        if self.settings.provider != ProviderKind::Codex
+            || !self.full_history_render
             || (!self.reset_panel.open && self.history_navigation.page != ui::HistoryPage::Main)
         {
             return None;

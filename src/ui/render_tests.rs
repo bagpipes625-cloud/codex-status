@@ -102,6 +102,7 @@ fn render_resource_matrix() {
                             };
                             assert!(
                                 direct2d::paint(direct2d::PaintInput {
+                                    provider: crate::model::ProviderKind::Codex,
                                     hwnd,
                                     pixel_size: (width, height),
                                     dpi,
@@ -138,6 +139,7 @@ fn render_resource_matrix() {
                                 Locale::Chinese,
                                 theme,
                                 CardView {
+                                    provider: crate::model::ProviderKind::Codex,
                                     reset: None,
                                     history: Some(&history),
                                     navigation: &navigation,
