@@ -2,6 +2,14 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.6.11] - 2026-11-18
+
+- Display the subscription plan (`Ultra`, `Pro`, `Plus`) bottom-aligned with
+  `Google One` in the bottom-left metrics slot when viewing `Gemini` mode, while
+  retaining the weekly Token usage and calendar view in `Codex` mode.
+- Read `userTier` name/id and `planInfo.planName` from local Antigravity status
+  responses so `Ultra` and `Pro` tiers resolve reliably.
+
 ## [0.6.10] - 2026-11-17
 
 - Persist the latest verified dual-provider (`Codex` and `Gemini`) quota

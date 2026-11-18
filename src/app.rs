@@ -1143,18 +1143,19 @@ unsafe extern "system" fn flyout_window_proc(
                     dpi,
                     state.full_history_render,
                 );
-                let hovered_history_values = matches!(
-                    ui::history_hit_test(
-                        &state.history_navigation,
-                        history,
-                        compact,
-                        x,
-                        y,
-                        dpi,
-                        state.full_history_render,
-                    ),
-                    Some(ui::HistoryHit::OpenHistory)
-                );
+                let hovered_history_values = state.settings.provider == ProviderKind::Codex
+                    && matches!(
+                        ui::history_hit_test(
+                            &state.history_navigation,
+                            history,
+                            compact,
+                            x,
+                            y,
+                            dpi,
+                            state.full_history_render,
+                        ),
+                        Some(ui::HistoryHit::OpenHistory)
+                    );
                 if hovered != state.hovered_history_day
                     || hovered_history_values != state.hovered_history_values
                 {
@@ -1247,6 +1248,9 @@ impl AppState {
 
     fn activate_history_hit(&mut self, hit: ui::HistoryHit) {
         self.history_wheel.reset();
+        if self.settings.provider != ProviderKind::Codex {
+            return;
+        }
         match hit {
             ui::HistoryHit::ToggleResourcePage => {
                 if self.settings.provider == ProviderKind::Codex {

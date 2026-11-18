@@ -1410,6 +1410,42 @@ fn draw_stacked_metrics(
             None::<&ID2D1StrokeStyle>,
         );
     }
+    if input.provider == ProviderKind::Gemini {
+        let claude = claude_summary_rows(input.state);
+        draw_text(
+            target,
+            input.locale.text("Plan", "套餐"),
+            rect(197.0, 64.0, 315.0, 88.0),
+            &formats.stacked_label,
+            &brushes.muted,
+        );
+        draw_text(
+            target,
+            &claude.plan_name,
+            rect(197.0, 86.0, 315.0, 124.0),
+            &formats.stacked_value,
+            &brushes.text,
+        );
+        if let Some(detail) = claude.plan_provider {
+            draw_text(
+                target,
+                detail,
+                rect(197.0, 120.0, 315.0, 145.0),
+                &formats.stacked_detail,
+                &brushes.muted,
+            );
+        }
+        draw_d2d_claude_rows(
+            target,
+            dwrite,
+            formats,
+            brushes,
+            input,
+            rect(200.0, 174.0, 312.0, 258.0),
+            true,
+        );
+        return;
+    }
     let weekly = weekly_usage_metrics(input.history, input.navigation.summary_week, input.locale);
     let value_brush =
         if input.interaction.hovered_history_values { &brushes.interactive } else { &brushes.text };
@@ -1442,18 +1478,6 @@ fn draw_stacked_metrics(
         &formats.stacked_detail,
         detail_brush,
     );
-    if input.provider == ProviderKind::Gemini {
-        draw_d2d_claude_rows(
-            target,
-            dwrite,
-            formats,
-            brushes,
-            input,
-            rect(200.0, 174.0, 312.0, 258.0),
-            true,
-        );
-        return;
-    }
     draw_paged_heading(
         target,
         factory,
@@ -1512,6 +1536,37 @@ fn draw_bottom_metrics(
             None::<&ID2D1StrokeStyle>,
         );
     }
+    if input.provider == ProviderKind::Gemini {
+        let claude = claude_summary_rows(input.state);
+        draw_text(
+            target,
+            input.locale.text("Plan", "套餐"),
+            rect(30.0, 278.0, 175.0, 303.0),
+            &formats.metric_label,
+            &brushes.muted,
+        );
+        draw_inline_metrics(
+            target,
+            dwrite,
+            formats,
+            &claude.plan_name,
+            claude.plan_provider,
+            rect(30.0, 296.0, 178.0, 332.0),
+            &brushes.text,
+            &brushes.muted,
+            true,
+        );
+        draw_d2d_claude_rows(
+            target,
+            dwrite,
+            formats,
+            brushes,
+            input,
+            rect(202.0, 281.0, 350.0, 331.0),
+            false,
+        );
+        return;
+    }
     let weekly = weekly_usage_metrics(input.history, input.navigation.summary_week, input.locale);
     let value_brush =
         if input.interaction.hovered_history_values { &brushes.interactive } else { &brushes.text };
@@ -1541,18 +1596,6 @@ fn draw_bottom_metrics(
         detail_brush,
         false,
     );
-    if input.provider == ProviderKind::Gemini {
-        draw_d2d_claude_rows(
-            target,
-            dwrite,
-            formats,
-            brushes,
-            input,
-            rect(202.0, 281.0, 350.0, 331.0),
-            false,
-        );
-        return;
-    }
     draw_paged_heading(
         target,
         factory,

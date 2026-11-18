@@ -466,7 +466,10 @@ fn retry_after(request: &Handle) -> Duration {
 
 fn extract_plan_type(value: &Value) -> Option<String> {
     value
-        .pointer("/userStatus/planName")
+        .pointer("/userStatus/userTier/name")
+        .or_else(|| value.pointer("/userStatus/userTier/id"))
+        .or_else(|| value.pointer("/userStatus/planName"))
+        .or_else(|| value.pointer("/userStatus/planStatus/planInfo/planName"))
         .or_else(|| value.pointer("/userStatus/planStatus/planInfo/planType"))
         .or_else(|| value.pointer("/planName"))
         .and_then(Value::as_str)
