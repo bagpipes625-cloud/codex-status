@@ -2,6 +2,13 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.6.13] - 2026-11-19
+
+- Fix `theoretical_remaining_percent` so unused 5-hour windows with past reset
+  timestamps continue reporting `0%` theoretical time remaining while still
+  displaying `未使用` (`Unused`) / `使用后计时` (`Starts on use`), resolving the
+  unit test regression from `v0.6.12`.
+
 ## [0.6.12] - 2026-11-19
 
 - Keep an unused 5-hour quota window (`100%` remaining with no active future

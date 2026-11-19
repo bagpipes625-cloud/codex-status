@@ -1686,9 +1686,6 @@ unsafe fn draw_gdi_paged_heading(
 }
 
 fn theoretical_remaining_percent(window: &QuotaWindow, now: i64) -> Option<u8> {
-    if window.is_unused(now) {
-        return Some(100);
-    }
     let reset = window.resets_at?;
     let total_seconds = i64::try_from(window.window_minutes.checked_mul(60)?).ok()?;
     if total_seconds == 0 {
