@@ -1532,8 +1532,68 @@ unsafe fn draw_gdi_claude_rows(
             let pct_text = percent.map_or_else(|| "--".to_owned(), |v| format!("{v}%"));
             let bar_color = quota_bar_color(percent, theme.high_contrast);
             let pct_color = if percent.is_some() { bar_color } else { theme.muted };
-            let pct_width = scale(34, dpi);
-            let bar_width = if compact { scale(28, dpi) } else { scale(44, dpi) };
+            let pct_width = scale(36, dpi);
+            let bar_h = scale(4, dpi).max(2);
+            if compact {
+                let text_bottom = row_top + scale(22, dpi);
+                draw_text_with_alignment(
+                    hdc,
+                    locale,
+                    label,
+                    RECT {
+                        left: bounds.left,
+                        top: row_top,
+                        right: bounds.right - pct_width,
+                        bottom: text_bottom,
+                    },
+                    TextStyle {
+                        height: scale(11, dpi),
+                        weight: FW_SEMIBOLD.0 as i32,
+                        color: theme.muted,
+                    },
+                    DT_LEFT,
+                );
+                draw_text_with_alignment(
+                    hdc,
+                    locale,
+                    &pct_text,
+                    RECT {
+                        left: bounds.right - pct_width,
+                        top: row_top,
+                        right: bounds.right,
+                        bottom: text_bottom,
+                    },
+                    TextStyle {
+                        height: scale(11, dpi),
+                        weight: FW_SEMIBOLD.0 as i32,
+                        color: pct_color,
+                    },
+                    DT_RIGHT,
+                );
+                let bar_top = text_bottom + scale(4, dpi);
+                let bar_rect = RECT {
+                    left: bounds.left,
+                    top: bar_top,
+                    right: bounds.right,
+                    bottom: bar_top + bar_h,
+                };
+                fill_rounded(hdc, bar_rect, bar_h, outer_track_color(theme, theme.high_contrast));
+                if let Some(value) = percent
+                    && value > 0
+                {
+                    let fill_w = ((bar_rect.right - bar_rect.left) * i32::from(value)) / 100;
+                    if fill_w > 0 {
+                        fill_rounded(
+                            hdc,
+                            RECT { right: bar_rect.left + fill_w.max(bar_h), ..bar_rect },
+                            bar_h,
+                            bar_color,
+                        );
+                    }
+                }
+                continue;
+            }
+            let bar_width = scale(44, dpi);
             let bar_right = bounds.right - pct_width - scale(4, dpi);
             let bar_left = (bar_right - bar_width).max(bounds.left + scale(58, dpi));
             draw_text_with_alignment(
@@ -1554,7 +1614,6 @@ unsafe fn draw_gdi_claude_rows(
                 DT_LEFT,
             );
             let bar_mid = (row_top + row_bottom) / 2;
-            let bar_h = scale(4, dpi).max(2);
             let bar_rect = RECT {
                 left: bar_left,
                 top: bar_mid - bar_h / 2,
@@ -1627,6 +1686,9 @@ unsafe fn draw_gdi_paged_heading(
 }
 
 fn theoretical_remaining_percent(window: &QuotaWindow, now: i64) -> Option<u8> {
+    if window.is_unused(now) {
+        return Some(100);
+    }
     let reset = window.resets_at?;
     let total_seconds = i64::try_from(window.window_minutes.checked_mul(60)?).ok()?;
     if total_seconds == 0 {
@@ -1857,13 +1919,19 @@ fn version_text() -> String {
 }
 
 fn reset_details(window: &QuotaWindow, locale: Locale) -> (String, String) {
+    let now = Local::now().timestamp();
+    if window.is_unused(now) {
+        return (
+            locale.text("Unused", "未使用").to_owned(),
+            locale.text("Starts on use", "使用后计时").to_owned(),
+        );
+    }
     let Some(reset) = window.resets_at else {
         return (
             locale.text("Unavailable", "暂无").to_owned(),
             locale.text("Reset time", "重置时间").to_owned(),
         );
     };
-    let now = Local::now().timestamp();
     let seconds = reset.saturating_sub(now).max(0);
     let countdown = reset_countdown(seconds, locale);
     let local_time = DateTime::from_timestamp(reset, 0)

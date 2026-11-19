@@ -1650,8 +1650,62 @@ fn draw_d2d_claude_rows(
         let row_bottom = row_top + row_height;
         let pct_text = percent.map_or_else(|| "--".to_owned(), |v| format!("{v}%"));
         let bar_color = quota_bar_color(percent, input.theme.high_contrast);
-        let pct_width = 34.0;
-        let bar_width = if compact { 28.0 } else { 44.0 };
+        let pct_width = 36.0;
+        let pct_brush = if percent.is_some() { brush(target, bar_color).ok() } else { None };
+        let pct_u16: Vec<u16> = pct_text.encode_utf16().collect();
+
+        if compact {
+            // 4-line stacked layout: row 1 label + percentage, row 2 full-width progress bar.
+            let text_height = 22.0;
+            draw_text(
+                target,
+                label,
+                rect(bounds.left, row_top, bounds.right - pct_width, row_top + text_height),
+                &formats.metric_label,
+                &brushes.muted,
+            );
+            if let Ok(layout) = unsafe {
+                dwrite.CreateTextLayout(&pct_u16, &formats.metric_label, pct_width, text_height)
+            } {
+                unsafe {
+                    let _ = layout.SetTextAlignment(
+                        windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT_TRAILING,
+                    );
+                    target.DrawTextLayout(
+                        windows_numerics::Vector2::new(bounds.right - pct_width, row_top),
+                        &layout,
+                        pct_brush.as_ref().unwrap_or(&brushes.muted),
+                        windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                    );
+                }
+            }
+            let bar_top = row_top + text_height + 3.0;
+            let bar_rect = rounded_rect(bounds.left, bar_top, bounds.right, bar_top + 4.0, 2.0);
+            unsafe {
+                target.FillRoundedRectangle(&bar_rect, &track_brush);
+            }
+            if let Some(value) = percent
+                && value > 0
+                && let Ok(fill_brush) = brush(target, bar_color)
+            {
+                let fill_w = ((bounds.right - bounds.left) * f32::from(value)) / 100.0;
+                if fill_w > 0.0 {
+                    let fill_rect = rounded_rect(
+                        bounds.left,
+                        bar_top,
+                        (bounds.left + fill_w.max(4.0)).min(bounds.right),
+                        bar_top + 4.0,
+                        2.0,
+                    );
+                    unsafe {
+                        target.FillRoundedRectangle(&fill_rect, &fill_brush);
+                    }
+                }
+            }
+            continue;
+        }
+
+        let bar_width = 44.0;
         let bar_right = bounds.right - pct_width - 4.0;
         let bar_left = (bar_right - bar_width).max(bounds.left + 58.0);
         draw_text(
@@ -1684,8 +1738,6 @@ fn draw_d2d_claude_rows(
                 }
             }
         }
-        let pct_brush = if percent.is_some() { brush(target, bar_color).ok() } else { None };
-        let pct_u16: Vec<u16> = pct_text.encode_utf16().collect();
         if let Ok(layout) = unsafe {
             dwrite.CreateTextLayout(&pct_u16, &formats.metric_label, pct_width, row_height)
         } {

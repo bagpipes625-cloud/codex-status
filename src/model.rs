@@ -60,7 +60,16 @@ impl QuotaWindow {
         self.remaining_percent.round().clamp(0.0, 100.0) as u8
     }
 
+    pub fn is_unused(&self, now: i64) -> bool {
+        self.window_minutes == SESSION_MINUTES
+            && self.display_percent() == 100
+            && self.resets_at.is_none_or(|reset| reset <= now)
+    }
+
     pub fn is_cache_valid(&self, now: i64, fetched_at: i64) -> bool {
+        if self.is_unused(now) {
+            return now.saturating_sub(fetched_at) < 15 * 60;
+        }
         match self.resets_at {
             Some(reset) => reset > now,
             None => now.saturating_sub(fetched_at) < 15 * 60,
@@ -756,5 +765,27 @@ mod tests {
         let snapshot = parse_snapshot(&account(), &rate, 100).unwrap();
         assert!(snapshot.weekly.is_none());
         assert!(snapshot.session.is_none());
+    }
+
+    #[test]
+    fn unused_five_hour_window_stays_visible_even_when_old_reset_passed() {
+        let unused = QuotaWindow {
+            used_percent: 0.0,
+            remaining_percent: 100.0,
+            window_minutes: SESSION_MINUTES,
+            resets_at: Some(100),
+        };
+        assert!(unused.is_unused(200));
+        assert!(unused.is_cache_valid(200, 150));
+        assert!(!unused.is_cache_valid(2000, 150));
+
+        let consumed = QuotaWindow {
+            used_percent: 10.0,
+            remaining_percent: 90.0,
+            window_minutes: SESSION_MINUTES,
+            resets_at: Some(100),
+        };
+        assert!(!consumed.is_unused(200));
+        assert!(!consumed.is_cache_valid(200, 150));
     }
 }

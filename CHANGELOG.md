@@ -2,6 +2,16 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.6.12] - 2026-11-19
+
+- Keep an unused 5-hour quota window (`100%` remaining with no active future
+  reset time) visible across both `Codex` and `Gemini` modes, displaying
+  `未使用` (`Unused`) and `使用后计时` (`Starts on use`) instead of collapsing
+  into single-quota layout.
+- Re-layout the compact single-quota Claude panel into 4 stacked rows (label +
+  percentage above a full-width progress bar per window) so `Claude 5H` never
+  truncates.
+
 ## [0.6.11] - 2026-11-18
 
 - Display the subscription plan (`Ultra`, `Pro`, `Plus`) bottom-aligned with
