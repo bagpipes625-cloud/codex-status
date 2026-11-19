@@ -2,6 +2,12 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.6.14] - 2026-11-19
+
+- Align the compact single-quota Claude 4-row bars, labels, and percentages
+  horizontally with the `96px` divider above (`x = 208..304`) for balanced
+  margins in both Direct2D and GDI renderers.
+
 ## [0.6.13] - 2026-11-19
 
 - Fix `theoretical_remaining_percent` so unused 5-hour windows with past reset

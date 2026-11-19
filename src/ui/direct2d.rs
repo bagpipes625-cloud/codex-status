@@ -1441,7 +1441,7 @@ fn draw_stacked_metrics(
             formats,
             brushes,
             input,
-            rect(200.0, 174.0, 312.0, 258.0),
+            rect(208.0, 174.0, 304.0, 258.0),
             true,
         );
         return;
@@ -1655,24 +1655,30 @@ fn draw_d2d_claude_rows(
         let pct_u16: Vec<u16> = pct_text.encode_utf16().collect();
 
         if compact {
-            // 4-line stacked layout: row 1 label + percentage, row 2 full-width progress bar.
+            // 4-line stacked layout aligned with the 96px divider above.
             let text_height = 22.0;
+            let compact_pct_width = 32.0;
             draw_text(
                 target,
                 label,
-                rect(bounds.left, row_top, bounds.right - pct_width, row_top + text_height),
+                rect(bounds.left, row_top, bounds.right - compact_pct_width, row_top + text_height),
                 &formats.metric_label,
                 &brushes.muted,
             );
             if let Ok(layout) = unsafe {
-                dwrite.CreateTextLayout(&pct_u16, &formats.metric_label, pct_width, text_height)
+                dwrite.CreateTextLayout(
+                    &pct_u16,
+                    &formats.metric_label,
+                    compact_pct_width,
+                    text_height,
+                )
             } {
                 unsafe {
                     let _ = layout.SetTextAlignment(
                         windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT_TRAILING,
                     );
                     target.DrawTextLayout(
-                        windows_numerics::Vector2::new(bounds.right - pct_width, row_top),
+                        windows_numerics::Vector2::new(bounds.right - compact_pct_width, row_top),
                         &layout,
                         pct_brush.as_ref().unwrap_or(&brushes.muted),
                         windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_CLIP,

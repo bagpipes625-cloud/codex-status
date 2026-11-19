@@ -1204,9 +1204,9 @@ unsafe fn draw_stacked_metrics(
                 hdc,
                 locale,
                 RECT {
-                    left: metrics.left + scale(8, dpi),
+                    left: scale(208, dpi),
                     top: scale(174, dpi),
-                    right: metrics.right - scale(8, dpi),
+                    right: scale(304, dpi),
                     bottom: metrics.bottom - scale(10, dpi),
                 },
                 claude,
