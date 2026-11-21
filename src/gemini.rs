@@ -36,11 +36,14 @@ const PROCESS_QUERY: &str = r#"$items = @(Get-CimInstance Win32_Process | Where-
 const MAX_DISCOVERY_BYTES: usize = 256 * 1024;
 const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 const TOTAL_DEADLINE: Duration = Duration::from_secs(20);
+const PROXY_CACHE_TTL: Duration = Duration::from_secs(300);
+const AGY_RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(300);
 const AGY_ACCOUNT_KEY: &str = "gemini:agy-cli";
 
 #[derive(Default)]
 pub struct GeminiState {
     blocked_until: Option<Instant>,
+    cached_proxy: Option<(Option<String>, Instant)>,
 }
 
 impl GeminiState {
@@ -49,8 +52,27 @@ impl GeminiState {
     }
 
     fn block(&mut self, delay: Duration) {
-        let until = Instant::now() + delay;
+        self.block_at(Instant::now(), delay);
+    }
+
+    fn block_at(&mut self, now: Instant, delay: Duration) {
+        let until = now + delay;
         self.blocked_until = Some(self.blocked_until.map_or(until, |old| old.max(until)));
+    }
+
+    fn cached_proxy(&self, now: Instant) -> Option<Option<String>> {
+        self.cached_proxy
+            .as_ref()
+            .filter(|(_, observed)| now.saturating_duration_since(*observed) < PROXY_CACHE_TTL)
+            .map(|(proxy, _)| proxy.clone())
+    }
+
+    fn store_proxy(&mut self, proxy: Option<String>, now: Instant) {
+        self.cached_proxy = Some((proxy, now));
+    }
+
+    fn invalidate_proxy(&mut self) {
+        self.cached_proxy = None;
     }
 }
 
@@ -236,7 +258,7 @@ pub fn fetch(state: &Mutex<GeminiState>) -> Result<AppServerSnapshot, AppServerF
     }
 
     if let Some(agy) = resolve_agy_binary() {
-        return fetch_via_agy_cli(&agy);
+        return fetch_via_agy_cli(&agy, state);
     }
 
     let processes = discover_local_processes().map_err(failure)?;
@@ -606,6 +628,9 @@ fn run_agy_json(
         if detail.contains("login") || detail.contains("auth") || detail.contains("sign in") {
             return Err(local_error("Sign in to Antigravity CLI (agy), then refresh"));
         }
+        if is_rate_limit_text(&detail) {
+            return Err(local_error("Antigravity CLI (agy) was rate-limited"));
+        }
         return Err(local_error("Antigravity CLI (agy) failed to fetch quota"));
     }
 
@@ -614,9 +639,26 @@ fn run_agy_json(
     if let Some(st) = value.get("status").and_then(Value::as_str)
         && !st.eq_ignore_ascii_case("SUCCESS")
     {
+        let err_text = value
+            .get("error")
+            .or_else(|| value.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if is_rate_limit_text(&err_text) {
+            return Err(local_error("Antigravity CLI (agy) was rate-limited"));
+        }
         return Err(local_error("Antigravity CLI (agy) reported an error"));
     }
     Ok(value)
+}
+
+fn is_rate_limit_text(text: &str) -> bool {
+    text.split(|c: char| !c.is_ascii_alphanumeric()).any(|part| part == "429")
+        || text.contains("rate limit")
+        || text.contains("rate-limit")
+        || text.contains("too many requests")
+        || text.contains("resource_exhausted")
 }
 
 fn agy_failure(error: AppServerError) -> AppServerFailure {
@@ -631,7 +673,10 @@ fn agy_failure(error: AppServerError) -> AppServerFailure {
     }
 }
 
-fn fetch_via_agy_cli(binary: &Path) -> Result<AppServerSnapshot, AppServerFailure> {
+fn fetch_via_agy_cli(
+    binary: &Path,
+    state: &Mutex<GeminiState>,
+) -> Result<AppServerSnapshot, AppServerFailure> {
     let has_env_proxy = std::env::var_os("HTTPS_PROXY")
         .or_else(|| std::env::var_os("https_proxy"))
         .or_else(|| std::env::var_os("HTTP_PROXY"))
@@ -639,9 +684,37 @@ fn fetch_via_agy_cli(binary: &Path) -> Result<AppServerSnapshot, AppServerFailur
         .or_else(|| std::env::var_os("ALL_PROXY"))
         .or_else(|| std::env::var_os("all_proxy"))
         .is_some();
-    let proxy = if has_env_proxy { None } else { resolve_windows_proxy_for_url() };
-    let usage_value = run_agy_json(binary, "/usage", proxy.as_deref(), Duration::from_secs(20))
-        .map_err(agy_failure)?;
+    let proxy = if has_env_proxy {
+        None
+    } else {
+        let now = Instant::now();
+        let cached = state.lock().ok().and_then(|guard| guard.cached_proxy(now));
+        match cached {
+            Some(proxy) => proxy,
+            None => {
+                let resolved = resolve_windows_proxy_for_url();
+                if let Ok(mut guard) = state.lock() {
+                    guard.store_proxy(resolved.clone(), now);
+                }
+                resolved
+            }
+        }
+    };
+    let usage_value =
+        match run_agy_json(binary, "/usage", proxy.as_deref(), Duration::from_secs(20)) {
+            Ok(value) => value,
+            Err(error) => {
+                if let Ok(mut guard) = state.lock() {
+                    if !has_env_proxy {
+                        guard.invalidate_proxy();
+                    }
+                    if is_rate_limit_text(&error.to_string().to_ascii_lowercase()) {
+                        guard.block(AGY_RATE_LIMIT_BACKOFF);
+                    }
+                }
+                return Err(agy_failure(error));
+            }
+        };
     let snapshot = parse_quota_snapshot(&usage_value, None, chrono::Utc::now().timestamp())
         .map_err(agy_failure)?;
     Ok(AppServerSnapshot {
@@ -1191,6 +1264,44 @@ mod tests {
         );
         assert_eq!(normalize_proxy_server("DIRECT"), None);
         assert_eq!(normalize_proxy_server("   "), None);
+    }
+
+    #[test]
+    fn gemini_state_caches_proxy_within_ttl_and_invalidates_on_reset() {
+        let mut state = GeminiState::default();
+        let start = Instant::now();
+        assert_eq!(state.cached_proxy(start), None);
+
+        state.store_proxy(Some("http://127.0.0.1:7897".into()), start);
+        assert_eq!(
+            state.cached_proxy(start + Duration::from_secs(60)),
+            Some(Some("http://127.0.0.1:7897".into()))
+        );
+        assert_eq!(state.cached_proxy(start + PROXY_CACHE_TTL), None);
+
+        state.store_proxy(None, start);
+        assert_eq!(state.cached_proxy(start + Duration::from_secs(10)), Some(None));
+        state.invalidate_proxy();
+        assert_eq!(state.cached_proxy(start + Duration::from_secs(10)), None);
+    }
+
+    #[test]
+    fn recognizes_agy_rate_limit_signals_and_enforces_backoff() {
+        for text in [
+            "HTTP 429 too many requests",
+            "error: rate limit exceeded",
+            "status: RESOURCE_EXHAUSTED",
+        ] {
+            assert!(is_rate_limit_text(&text.to_ascii_lowercase()), "{text}");
+        }
+        assert!(!is_rate_limit_text("connection timed out"));
+
+        let mut state = GeminiState::default();
+        let now = Instant::now();
+        assert!(state.can_attempt(now));
+        state.block_at(now, AGY_RATE_LIMIT_BACKOFF);
+        assert!(!state.can_attempt(now + Duration::from_secs(60)));
+        assert!(state.can_attempt(now + AGY_RATE_LIMIT_BACKOFF));
     }
 
     #[test]

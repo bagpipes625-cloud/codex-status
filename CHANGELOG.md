@@ -2,6 +2,12 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.6.20] - 2026-11-21
+
+- Prefer the CLI daemon-managed Codex binary (`%CODEX_HOME%\packages\app-server-daemon\current\bin\codex.exe`) and npm native `codex.exe` over legacy Desktop plugin binaries and Node.js wrappers, and widen `OPTIONAL_USAGE_GRACE` to 900 ms to avoid unnecessary fallback token requests.
+- Throttle periodic background prefetching of the non-active provider to at least 15 minutes (keeping startup, manual refresh, and stale-on-switch refreshes immediate), cutting redundant `agy.exe` / `codex.exe` cold starts.
+- Cache resolved Windows proxy settings in `GeminiState` for 5 minutes (invalidated on request errors) and hook `agy` CLI rate-limit signals (`429` / `RESOURCE_EXHAUSTED`) into `GeminiState` backoff.
+
 ## [0.6.19] - 2026-11-21
 
 - Remove the Google One `Credits` display and `agy -p /credits` subprocess

@@ -127,6 +127,7 @@ const FLYOUT_ACTIVATION_GUARD: Duration = Duration::from_millis(220);
 const TRAY_CLOSE_COALESCE: Duration = Duration::from_millis(250);
 const REFRESH_ANIMATION_DURATION: Duration = Duration::from_millis(600);
 const HISTORY_SAVE_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const BACKGROUND_PREFETCH_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const HISTORY_WHEEL_THROTTLE: Duration = Duration::from_millis(400);
 const APPCOMMAND_BROWSER_BACKWARD_ID: u32 = 1;
 
@@ -229,6 +230,23 @@ struct ProviderCache {
     failures: u8,
     refreshing: bool,
     refresh_pending: bool,
+    last_prefetched: Option<Instant>,
+}
+
+fn should_background_prefetch(cache: &ProviderCache, force: bool, now: Instant) -> bool {
+    if cache.refreshing {
+        return false;
+    }
+    if force {
+        return true;
+    }
+    let has_snapshot = cache.display.as_ref().is_some_and(|d| d.snapshot.is_some());
+    if !has_snapshot && cache.failures == 0 {
+        return true;
+    }
+    cache
+        .last_prefetched
+        .is_none_or(|last| now.saturating_duration_since(last) >= BACKGROUND_PREFETCH_INTERVAL)
 }
 
 #[derive(Default)]
@@ -621,7 +639,7 @@ pub fn run() -> Result<(), AppError> {
             let _ = SetTimer(Some(hwnd), TIMER_STARTUP, 1_500, None);
         } else {
             state.start_refresh(false);
-            state.prefetch_other_provider();
+            state.prefetch_other_provider(true);
             if !tray_ready {
                 state.show_flyout();
             }
@@ -862,12 +880,12 @@ unsafe extern "system" fn main_window_proc(
                     match wparam.0 {
                         TIMER_REFRESH => {
                             state.start_refresh(false);
-                            state.prefetch_other_provider();
+                            state.prefetch_other_provider(false);
                         }
                         TIMER_STARTUP => {
                             let _ = KillTimer(Some(hwnd), TIMER_STARTUP);
                             state.start_refresh(false);
-                            state.prefetch_other_provider();
+                            state.prefetch_other_provider(true);
                         }
                         TIMER_CARD => {
                             state.refresh_time_sensitive_state();
@@ -1083,7 +1101,7 @@ unsafe extern "system" fn flyout_window_proc(
                     let _ = ReleaseCapture();
                     if activate && !state.refreshing && !state.refresh_feedback {
                         state.start_refresh(true);
-                        state.prefetch_other_provider();
+                        state.prefetch_other_provider(true);
                     }
                     return LRESULT(0);
                 }
@@ -1405,13 +1423,15 @@ impl AppState {
         }
     }
 
-    fn prefetch_other_provider(&mut self) {
+    fn prefetch_other_provider(&mut self, force: bool) {
         let other = self.settings.provider.other();
         let idx = provider_index(other);
-        if self.provider_caches[idx].refreshing {
+        let now = Instant::now();
+        if !should_background_prefetch(&self.provider_caches[idx], force, now) {
             return;
         }
         self.provider_caches[idx].refreshing = true;
+        self.provider_caches[idx].last_prefetched = Some(now);
         if self.spawn_refresh_worker(other).is_err() {
             self.provider_caches[idx].refreshing = false;
         }
@@ -2277,6 +2297,7 @@ impl AppState {
             failures: self.failures,
             refreshing: self.refreshing,
             refresh_pending: self.refresh_pending,
+            last_prefetched: self.display.snapshot.as_ref().map(|_| Instant::now()),
         };
         self.settings.provider = next;
         self.persist_settings();
@@ -2299,7 +2320,11 @@ impl AppState {
         unsafe {
             let _ = InvalidateRect(Some(self.flyout), None, false);
         }
-        if self.display.snapshot.is_none() && !self.refreshing {
+        let stale = self.display.snapshot.as_ref().is_none_or(|snapshot| {
+            let max_age = i64::from(self.settings.refresh_minutes).saturating_mul(60);
+            Utc::now().timestamp().saturating_sub(snapshot.fetched_at) >= max_age
+        });
+        if stale && !self.refreshing {
             self.start_refresh(false);
         }
     }
@@ -2312,7 +2337,7 @@ impl AppState {
                 CMD_PROVIDER_GEMINI => self.switch_provider(ProviderKind::Gemini),
                 CMD_REFRESH => {
                     self.start_refresh(true);
-                    self.prefetch_other_provider();
+                    self.prefetch_other_provider(true);
                 }
                 CMD_USAGE => {
                     let url = match self.settings.provider {
@@ -2827,5 +2852,26 @@ mod tests {
         let weekly = LowQuotaAlert { kind: QuotaKind::Weekly, percent: 9, reset: None };
         assert_eq!(alert_cycle_key(five_hour), alert_cycle_key(five_hour));
         assert_ne!(alert_cycle_key(five_hour), alert_cycle_key(weekly));
+    }
+
+    #[test]
+    fn background_prefetch_throttles_periodic_runs_but_allows_forced_and_stale() {
+        let now = Instant::now();
+        let mut cache = ProviderCache::default();
+        assert!(should_background_prefetch(&cache, false, now));
+
+        cache.display = Some(display_with_quotas(Some(80), Some(90)));
+        cache.last_prefetched = Some(now);
+        assert!(!should_background_prefetch(&cache, false, now + Duration::from_secs(5 * 60)));
+        assert!(should_background_prefetch(&cache, true, now + Duration::from_secs(5 * 60)));
+        assert!(should_background_prefetch(&cache, false, now + BACKGROUND_PREFETCH_INTERVAL));
+
+        cache.display = None;
+        cache.failures = 1;
+        assert!(!should_background_prefetch(&cache, false, now + Duration::from_secs(5 * 60)));
+        assert!(should_background_prefetch(&cache, false, now + BACKGROUND_PREFETCH_INTERVAL));
+
+        cache.refreshing = true;
+        assert!(!should_background_prefetch(&cache, true, now + BACKGROUND_PREFETCH_INTERVAL));
     }
 }

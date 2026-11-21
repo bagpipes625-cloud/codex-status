@@ -29,7 +29,7 @@ use windows::Win32::System::Threading::{
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
-const OPTIONAL_USAGE_GRACE: Duration = Duration::from_millis(300);
+const OPTIONAL_USAGE_GRACE: Duration = Duration::from_millis(900);
 const READER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 const ERROR_LIMIT: usize = 240;
 const STDOUT_LINE_LIMIT: usize = 256 * 1024;
@@ -802,11 +802,43 @@ fn local_codex_executables() -> Vec<PathBuf> {
 
     let mut executables = Vec::new();
     for root in roots {
+        executables.push(
+            root.join("packages")
+                .join("app-server-daemon")
+                .join("current")
+                .join("bin")
+                .join("codex.exe"),
+        );
         executables.push(root.join("bin").join("codex.exe"));
         executables.push(root.join("plugins").join(".plugin-appserver").join("codex.exe"));
         executables.push(root.join(".sandbox-bin").join("codex.exe"));
     }
     executables
+}
+
+fn npm_native_codex_binary(directory: &std::path::Path) -> Option<PathBuf> {
+    let candidates = [
+        directory
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("node_modules")
+            .join("@openai")
+            .join("codex-win32-x64")
+            .join("vendor")
+            .join("x86_64-pc-windows-msvc")
+            .join("codex")
+            .join("codex.exe"),
+        directory
+            .join("node_modules")
+            .join("@openai")
+            .join("codex-win32-x64")
+            .join("vendor")
+            .join("x86_64-pc-windows-msvc")
+            .join("codex")
+            .join("codex.exe"),
+    ];
+    candidates.into_iter().find(|path| path.is_file())
 }
 
 fn command_from_path(path: PathBuf) -> Result<CommandSpec, AppServerError> {
@@ -822,6 +854,9 @@ fn command_from_path(path: PathBuf) -> Result<CommandSpec, AppServerError> {
         let directory = path
             .parent()
             .ok_or_else(|| AppServerError::UnsupportedWrapper(path.display().to_string()))?;
+        if let Some(native) = npm_native_codex_binary(directory) {
+            return Ok(CommandSpec { program: native, args: Vec::new() });
+        }
         let script = directory
             .join("node_modules")
             .join("@openai")
@@ -954,6 +989,60 @@ mod tests {
         let spec = command_from_path(directory.join("codex.cmd")).unwrap();
         assert_eq!(spec.program, directory.join("node.exe"));
         assert_eq!(spec.args, vec![script.into_os_string()]);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn prefers_npm_native_codex_binary_over_node_wrapper() {
+        let directory = root("npm-native");
+        let script = directory
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("bin")
+            .join("codex.js");
+        let native = directory
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("node_modules")
+            .join("@openai")
+            .join("codex-win32-x64")
+            .join("vendor")
+            .join("x86_64-pc-windows-msvc")
+            .join("codex")
+            .join("codex.exe");
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::create_dir_all(native.parent().unwrap()).unwrap();
+        fs::write(directory.join("codex.cmd"), "").unwrap();
+        fs::write(directory.join("node.exe"), "").unwrap();
+        fs::write(&script, "").unwrap();
+        fs::write(&native, "").unwrap();
+
+        let spec = command_from_path(directory.join("codex.cmd")).unwrap();
+        assert_eq!(spec.program, native);
+        assert!(spec.args.is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn prefers_daemon_managed_codex_over_legacy_plugin_appserver() {
+        let directory = root("daemon-priority");
+        let daemon = directory
+            .join("packages")
+            .join("app-server-daemon")
+            .join("current")
+            .join("bin")
+            .join("codex.exe");
+        let legacy = directory.join("plugins").join(".plugin-appserver").join("codex.exe");
+        fs::create_dir_all(daemon.parent().unwrap()).unwrap();
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&daemon, "").unwrap();
+        fs::write(&legacy, "").unwrap();
+
+        let commands = resolve_commands_from(&[], &[daemon.clone(), legacy.clone()]).unwrap();
+        assert_eq!(commands[0].program, daemon);
+        assert_eq!(commands[1].program, legacy);
         fs::remove_dir_all(directory).unwrap();
     }
 
