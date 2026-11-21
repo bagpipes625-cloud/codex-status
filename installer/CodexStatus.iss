@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.6.18"
+  #define AppVersion "0.6.19"
 #endif
 
 #define AppName "CodexStatus"

@@ -1411,38 +1411,26 @@ fn draw_stacked_metrics(
         );
     }
     if input.provider == ProviderKind::Gemini {
-        let claude = claude_summary_rows(input.state);
-        draw_text(
-            target,
-            input.locale.text("Credits", "积分"),
-            rect(197.0, 64.0, 315.0, 88.0),
-            &formats.stacked_label,
-            &brushes.muted,
-        );
-        draw_text(
-            target,
-            &claude.credits,
-            rect(197.0, 86.0, 315.0, 124.0),
-            &formats.stacked_value,
-            &brushes.text,
-        );
-        if let Some(detail) = claude.credits_provider {
-            draw_text(
-                target,
-                detail,
-                rect(197.0, 120.0, 315.0, 145.0),
-                &formats.stacked_detail,
-                &brushes.muted,
-            );
-        }
-        draw_d2d_claude_rows(
+        let claude = claude_summary_rows(input.state, input.locale);
+        draw_d2d_claude_slot(
             target,
             dwrite,
             formats,
             brushes,
             input,
-            rect(208.0, 174.0, 304.0, 258.0),
-            true,
+            rect(208.0, 74.0, 304.0, 126.0),
+            input.locale.text("Claude 5H", "Claude 5H"),
+            &claude.five_hour,
+        );
+        draw_d2d_claude_slot(
+            target,
+            dwrite,
+            formats,
+            brushes,
+            input,
+            rect(208.0, 186.0, 304.0, 238.0),
+            input.locale.text("Claude Wk", "Claude 周"),
+            &claude.weekly,
         );
         return;
     }
@@ -1537,33 +1525,26 @@ fn draw_bottom_metrics(
         );
     }
     if input.provider == ProviderKind::Gemini {
-        let claude = claude_summary_rows(input.state);
-        draw_text(
-            target,
-            input.locale.text("Credits", "积分"),
-            rect(30.0, 278.0, 175.0, 303.0),
-            &formats.metric_label,
-            &brushes.muted,
-        );
-        draw_inline_metrics(
-            target,
-            dwrite,
-            formats,
-            &claude.credits,
-            claude.credits_provider,
-            rect(30.0, 296.0, 178.0, 332.0),
-            &brushes.text,
-            &brushes.muted,
-            true,
-        );
-        draw_d2d_claude_rows(
+        let claude = claude_summary_rows(input.state, input.locale);
+        draw_d2d_claude_slot(
             target,
             dwrite,
             formats,
             brushes,
             input,
-            rect(202.0, 281.0, 350.0, 331.0),
-            false,
+            rect(42.0, 280.0, 162.0, 332.0),
+            input.locale.text("Claude 5H", "Claude 5H"),
+            &claude.five_hour,
+        );
+        draw_d2d_claude_slot(
+            target,
+            dwrite,
+            formats,
+            brushes,
+            input,
+            rect(214.0, 280.0, 334.0, 332.0),
+            input.locale.text("Claude Wk", "Claude 周"),
+            &claude.weekly,
         );
         return;
     }
@@ -1626,140 +1607,89 @@ fn draw_bottom_metrics(
     );
 }
 
-fn draw_d2d_claude_rows(
+#[allow(clippy::too_many_arguments)]
+fn draw_d2d_claude_slot(
     target: &ID2D1HwndRenderTarget,
     dwrite: &IDWriteFactory,
     formats: &FormatSet,
     brushes: &Brushes,
     input: &PaintInput<'_>,
     bounds: D2D_RECT_F,
-    compact: bool,
+    label: &str,
+    summary: &super::ClaudeWindowSummary,
 ) {
-    let claude = claude_summary_rows(input.state);
-    let rows = [
-        (input.locale.text("Claude 5H", "Claude 5H"), claude.five_hour_percent),
-        (input.locale.text("Claude Wk", "Claude 周"), claude.weekly_percent),
-    ];
-    let row_height = (bounds.bottom - bounds.top) / 2.0;
     let track_color = outer_track_color(input.theme, input.theme.high_contrast);
     let Ok(track_brush) = brush(target, track_color) else {
         return;
     };
-    for (index, (label, percent)) in rows.into_iter().enumerate() {
-        let row_top = bounds.top + row_height * index as f32;
-        let row_bottom = row_top + row_height;
-        let pct_text = percent.map_or_else(|| "--".to_owned(), |v| format!("{v}%"));
-        let bar_color = quota_bar_color(percent, input.theme.high_contrast);
-        let pct_width = 36.0;
-        let pct_brush = if percent.is_some() { brush(target, bar_color).ok() } else { None };
-        let pct_u16: Vec<u16> = pct_text.encode_utf16().collect();
+    let pct_text = summary.percent.map_or_else(|| "--".to_owned(), |v| format!("{v}%"));
+    let bar_color = quota_bar_color(summary.percent, input.theme.high_contrast);
+    let pct_brush = if summary.percent.is_some() { brush(target, bar_color).ok() } else { None };
+    let pct_u16: Vec<u16> = pct_text.encode_utf16().collect();
+    let pct_width = 34.0;
+    let header_height = 18.0;
 
-        if compact {
-            // 4-line stacked layout aligned with the 96px divider above.
-            let text_height = 22.0;
-            let compact_pct_width = 32.0;
-            draw_text(
-                target,
-                label,
-                rect(bounds.left, row_top, bounds.right - compact_pct_width, row_top + text_height),
-                &formats.metric_label,
-                &brushes.muted,
-            );
-            if let Ok(layout) = unsafe {
-                dwrite.CreateTextLayout(
-                    &pct_u16,
-                    &formats.metric_label,
-                    compact_pct_width,
-                    text_height,
-                )
-            } {
-                unsafe {
-                    let _ = layout.SetTextAlignment(
-                        windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT_TRAILING,
-                    );
-                    target.DrawTextLayout(
-                        windows_numerics::Vector2::new(bounds.right - compact_pct_width, row_top),
-                        &layout,
-                        pct_brush.as_ref().unwrap_or(&brushes.muted),
-                        windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                    );
-                }
-            }
-            let bar_top = row_top + text_height + 3.0;
-            let bar_rect = rounded_rect(bounds.left, bar_top, bounds.right, bar_top + 4.0, 2.0);
-            unsafe {
-                target.FillRoundedRectangle(&bar_rect, &track_brush);
-            }
-            if let Some(value) = percent
-                && value > 0
-                && let Ok(fill_brush) = brush(target, bar_color)
-            {
-                let fill_w = ((bounds.right - bounds.left) * f32::from(value)) / 100.0;
-                if fill_w > 0.0 {
-                    let fill_rect = rounded_rect(
-                        bounds.left,
-                        bar_top,
-                        (bounds.left + fill_w.max(4.0)).min(bounds.right),
-                        bar_top + 4.0,
-                        2.0,
-                    );
-                    unsafe {
-                        target.FillRoundedRectangle(&fill_rect, &fill_brush);
-                    }
-                }
-            }
-            continue;
-        }
-
-        let bar_width = 44.0;
-        let bar_right = bounds.right - pct_width - 4.0;
-        let bar_left = (bar_right - bar_width).max(bounds.left + 58.0);
-        draw_text(
-            target,
-            label,
-            rect(bounds.left, row_top, bar_left - 4.0, row_bottom),
-            &formats.metric_label,
-            &brushes.muted,
-        );
-        let bar_mid = (row_top + row_bottom) * 0.5;
-        let bar_rect = rounded_rect(bar_left, bar_mid - 2.0, bar_right, bar_mid + 2.0, 2.0);
+    draw_text(
+        target,
+        label,
+        rect(bounds.left, bounds.top, bounds.right - pct_width, bounds.top + header_height),
+        &formats.metric_label,
+        &brushes.muted,
+    );
+    if let Ok(layout) = unsafe {
+        dwrite.CreateTextLayout(&pct_u16, &formats.metric_label, pct_width, header_height)
+    } {
         unsafe {
-            target.FillRoundedRectangle(&bar_rect, &track_brush);
+            let _ = layout.SetTextAlignment(
+                windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT_TRAILING,
+            );
+            let _ = layout.SetFontWeight(
+                windows::Win32::Graphics::DirectWrite::DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_RANGE {
+                    startPosition: 0,
+                    length: pct_u16.len() as u32,
+                },
+            );
+            target.DrawTextLayout(
+                windows_numerics::Vector2::new(bounds.right - pct_width, bounds.top),
+                &layout,
+                pct_brush.as_ref().unwrap_or(&brushes.muted),
+                windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_CLIP,
+            );
         }
-        if let Some(value) = percent
-            && value > 0
-            && let Ok(fill_brush) = brush(target, bar_color)
-        {
-            let fill_w = ((bar_right - bar_left) * f32::from(value)) / 100.0;
-            if fill_w > 0.0 {
-                let fill_rect = rounded_rect(
-                    bar_left,
-                    bar_mid - 2.0,
-                    (bar_left + fill_w.max(4.0)).min(bar_right),
-                    bar_mid + 2.0,
-                    2.0,
-                );
-                unsafe {
-                    target.FillRoundedRectangle(&fill_rect, &fill_brush);
-                }
-            }
-        }
-        if let Ok(layout) = unsafe {
-            dwrite.CreateTextLayout(&pct_u16, &formats.metric_label, pct_width, row_height)
-        } {
+    }
+
+    let bar_top = bounds.top + 22.0;
+    let bar_rect = rounded_rect(bounds.left, bar_top, bounds.right, bar_top + 4.0, 2.0);
+    unsafe {
+        target.FillRoundedRectangle(&bar_rect, &track_brush);
+    }
+    if let Some(value) = summary.percent
+        && value > 0
+        && let Ok(fill_brush) = brush(target, bar_color)
+    {
+        let fill_w = ((bounds.right - bounds.left) * f32::from(value)) / 100.0;
+        if fill_w > 0.0 {
+            let fill_rect = rounded_rect(
+                bounds.left,
+                bar_top,
+                (bounds.left + fill_w.max(4.0)).min(bounds.right),
+                bar_top + 4.0,
+                2.0,
+            );
             unsafe {
-                let _ = layout.SetTextAlignment(
-                    windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT_TRAILING,
-                );
-                target.DrawTextLayout(
-                    windows_numerics::Vector2::new(bar_right + 4.0, row_top),
-                    &layout,
-                    pct_brush.as_ref().unwrap_or(&brushes.muted),
-                    windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                );
+                target.FillRoundedRectangle(&fill_rect, &fill_brush);
             }
         }
     }
+
+    draw_text(
+        target,
+        &summary.reset_hint,
+        rect(bounds.left, bounds.top + 29.0, bounds.right, bounds.bottom),
+        &formats.metric_label,
+        &brushes.muted,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]

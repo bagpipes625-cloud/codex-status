@@ -2,6 +2,16 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.6.19] - 2026-11-21
+
+- Remove the Google One `Credits` display and `agy -p /credits` subprocess
+  calls completely so every Gemini refresh spawns only a single `agy -p /usage`
+  process (never exceeding single-process transient memory).
+- Redesign the Gemini bottom metrics card into symmetrical side-by-side
+  `Claude 5H` and `Claude 周` (`Claude Wk`) 3-row panels (inset `120px` bars
+  with label + percentage, progress bar, and reset countdown/date), and mirror
+  the same stacked layout in compact mode across both Direct2D and GDI.
+
 ## [0.6.18] - 2026-11-21
 
 - Prevent `agy.exe` from spawning detached `agy.exe --bg-updater` child

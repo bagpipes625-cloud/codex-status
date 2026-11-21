@@ -2,8 +2,7 @@
 
 use crate::app_server::{AppServerError, AppServerFailure, AppServerSnapshot};
 use crate::model::{
-    AccountSummary, CreditBalance, QuotaSnapshot, QuotaWindow, SESSION_MINUTES, SecondaryQuotas,
-    WEEK_MINUTES,
+    AccountSummary, QuotaSnapshot, QuotaWindow, SESSION_MINUTES, SecondaryQuotas, WEEK_MINUTES,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -37,13 +36,11 @@ const PROCESS_QUERY: &str = r#"$items = @(Get-CimInstance Win32_Process | Where-
 const MAX_DISCOVERY_BYTES: usize = 256 * 1024;
 const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 const TOTAL_DEADLINE: Duration = Duration::from_secs(20);
-const CREDITS_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const AGY_ACCOUNT_KEY: &str = "gemini:agy-cli";
 
 #[derive(Default)]
 pub struct GeminiState {
     blocked_until: Option<Instant>,
-    cached_credits: Option<(Instant, Option<CreditBalance>)>,
 }
 
 impl GeminiState {
@@ -54,17 +51,6 @@ impl GeminiState {
     fn block(&mut self, delay: Duration) {
         let until = Instant::now() + delay;
         self.blocked_until = Some(self.blocked_until.map_or(until, |old| old.max(until)));
-    }
-
-    fn fresh_credits(&self, now: Instant) -> Option<Option<CreditBalance>> {
-        self.cached_credits.as_ref().and_then(|(fetched_at, balance)| {
-            (now.saturating_duration_since(*fetched_at) < CREDITS_CACHE_TTL)
-                .then(|| balance.clone())
-        })
-    }
-
-    fn record_credits(&mut self, now: Instant, balance: Option<CreditBalance>) {
-        self.cached_credits = Some((now, balance));
     }
 }
 
@@ -250,7 +236,7 @@ pub fn fetch(state: &Mutex<GeminiState>) -> Result<AppServerSnapshot, AppServerF
     }
 
     if let Some(agy) = resolve_agy_binary() {
-        return fetch_via_agy_cli(&agy, state);
+        return fetch_via_agy_cli(&agy);
     }
 
     let processes = discover_local_processes().map_err(failure)?;
@@ -633,27 +619,6 @@ fn run_agy_json(
     Ok(value)
 }
 
-fn extract_agy_credits(value: &Value) -> Option<CreditBalance> {
-    let credits = value
-        .pointer("/command/data/remaining_credits")
-        .or_else(|| value.pointer("/command/data/remainingCredits"))
-        .or_else(|| value.get("remaining_credits"))?;
-    if let Some(n) = credits.as_u64() {
-        return Some(CreditBalance::Amount(n.to_string()));
-    }
-    if let Some(n) = credits.as_i64() {
-        return Some(CreditBalance::Amount(n.max(0).to_string()));
-    }
-    if let Some(n) = credits.as_f64().filter(|v| v.is_finite() && *v >= 0.0) {
-        return Some(CreditBalance::Amount(n.to_string()));
-    }
-    credits
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| CreditBalance::Amount(s.to_owned()))
-}
-
 fn agy_failure(error: AppServerError) -> AppServerFailure {
     let is_auth = matches!(&error, AppServerError::Rpc { message, .. } if {
         let lower = message.to_ascii_lowercase();
@@ -666,10 +631,7 @@ fn agy_failure(error: AppServerError) -> AppServerFailure {
     }
 }
 
-fn fetch_via_agy_cli(
-    binary: &Path,
-    state: &Mutex<GeminiState>,
-) -> Result<AppServerSnapshot, AppServerFailure> {
+fn fetch_via_agy_cli(binary: &Path) -> Result<AppServerSnapshot, AppServerFailure> {
     let has_env_proxy = std::env::var_os("HTTPS_PROXY")
         .or_else(|| std::env::var_os("https_proxy"))
         .or_else(|| std::env::var_os("HTTP_PROXY"))
@@ -678,41 +640,10 @@ fn fetch_via_agy_cli(
         .or_else(|| std::env::var_os("all_proxy"))
         .is_some();
     let proxy = if has_env_proxy { None } else { resolve_windows_proxy_for_url() };
-    let proxy_ref = proxy.as_deref();
-
-    let now = Instant::now();
-    let cached_credits = state.lock().ok().and_then(|guard| guard.fresh_credits(now));
-
-    let (usage_res, fresh_credits_res) = if cached_credits.is_some() {
-        (run_agy_json(binary, "/usage", proxy_ref, Duration::from_secs(20)), None)
-    } else {
-        std::thread::scope(|scope| {
-            let usage_handle =
-                scope.spawn(|| run_agy_json(binary, "/usage", proxy_ref, Duration::from_secs(20)));
-            let credits_handle = scope
-                .spawn(|| run_agy_json(binary, "/credits", proxy_ref, Duration::from_secs(18)));
-            let usage = usage_handle
-                .join()
-                .unwrap_or_else(|_| Err(local_error("Antigravity CLI (agy) worker panicked")));
-            let credits = credits_handle.join().ok().and_then(Result::ok);
-            (usage, credits)
-        })
-    };
-
-    let usage_value = usage_res.map_err(agy_failure)?;
-    let credits = match cached_credits {
-        Some(balance) => balance,
-        None => {
-            let parsed = fresh_credits_res.and_then(|v| extract_agy_credits(&v));
-            if let Ok(mut guard) = state.lock() {
-                guard.record_credits(Instant::now(), parsed.clone());
-            }
-            parsed
-        }
-    };
-    let mut snapshot = parse_quota_snapshot(&usage_value, None, chrono::Utc::now().timestamp())
+    let usage_value = run_agy_json(binary, "/usage", proxy.as_deref(), Duration::from_secs(20))
         .map_err(agy_failure)?;
-    snapshot.account.credit_balance = credits;
+    let snapshot = parse_quota_snapshot(&usage_value, None, chrono::Utc::now().timestamp())
+        .map_err(agy_failure)?;
     Ok(AppServerSnapshot {
         quota: snapshot,
         token_usage: None,
@@ -1234,12 +1165,6 @@ mod tests {
         let claude = snap.account.claude_quotas.as_ref().unwrap();
         assert_eq!(claude.weekly.as_ref().unwrap().display_percent(), 100);
         assert_eq!(claude.five_hour.as_ref().unwrap().display_percent(), 100);
-
-        let credits = json!({
-            "status": "SUCCESS",
-            "command": { "name": "credits", "data": { "remaining_credits": 250 } }
-        });
-        assert_eq!(extract_agy_credits(&credits), Some(CreditBalance::Amount("250".into())));
     }
 
     #[test]

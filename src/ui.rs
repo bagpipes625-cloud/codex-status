@@ -119,44 +119,68 @@ fn quota_panel_geometry(slot: QuotaPanelSlot) -> QuotaPanelGeometry {
     }
 }
 
-pub(super) struct ClaudeSummaryRows {
-    pub credits: String,
-    pub credits_provider: Option<&'static str>,
-    pub five_hour_percent: Option<u8>,
-    pub weekly_percent: Option<u8>,
+pub(super) struct ClaudeWindowSummary {
+    pub percent: Option<u8>,
+    pub reset_hint: String,
 }
 
-pub(super) fn claude_summary_rows(state: &DisplayState) -> ClaudeSummaryRows {
+pub(super) struct ClaudeSummaryRows {
+    pub five_hour: ClaudeWindowSummary,
+    pub weekly: ClaudeWindowSummary,
+}
+
+fn claude_reset_hint(window: &QuotaWindow, now: i64, locale: Locale) -> String {
+    if window.is_unused(now) {
+        return locale.text("Unused", "未使用").to_owned();
+    }
+    let Some(reset) = window.resets_at else {
+        return "--".to_owned();
+    };
+    let seconds = reset.saturating_sub(now).max(0);
+    let countdown = reset_countdown(seconds, locale);
+    let short_date = chrono::DateTime::from_timestamp(reset, 0).map(|utc| {
+        let dt = utc.with_timezone(&Local);
+        if window.window_minutes == crate::model::SESSION_MINUTES {
+            dt.format("%H:%M").to_string()
+        } else {
+            match locale {
+                Locale::Chinese => format!("{}月{}日", dt.month(), dt.day()),
+                Locale::English => dt.format("%b %-d").to_string(),
+            }
+        }
+    });
+    match short_date {
+        Some(date) => format!("{countdown} · {date}"),
+        None => countdown,
+    }
+}
+
+pub(super) fn claude_summary_rows(state: &DisplayState, locale: Locale) -> ClaudeSummaryRows {
     let now = chrono::Utc::now().timestamp();
-    let valid_window = |window: Option<&QuotaWindow>, fetched_at: i64| -> Option<u8> {
-        let w = window?;
-        w.is_cache_valid(now, fetched_at).then(|| w.display_percent())
+    let summarize = |window: Option<&QuotaWindow>, fetched_at: i64| -> ClaudeWindowSummary {
+        match window.filter(|w| w.is_cache_valid(now, fetched_at)) {
+            Some(w) => ClaudeWindowSummary {
+                percent: Some(w.display_percent()),
+                reset_hint: claude_reset_hint(w, now, locale),
+            },
+            None => ClaudeWindowSummary { percent: None, reset_hint: "--".to_owned() },
+        }
     };
     let Some(snapshot) = state.snapshot.as_ref() else {
         return ClaudeSummaryRows {
-            credits: "--".to_owned(),
-            credits_provider: None,
-            five_hour_percent: None,
-            weekly_percent: None,
+            five_hour: ClaudeWindowSummary { percent: None, reset_hint: "--".to_owned() },
+            weekly: ClaudeWindowSummary { percent: None, reset_hint: "--".to_owned() },
         };
-    };
-    let (credits, credits_provider) = match snapshot.account.credit_balance.as_ref() {
-        Some(balance) => (format_credit_balance(balance), Some("Google One")),
-        None => ("--".to_owned(), None),
     };
     let Some(claude) = snapshot.account.claude_quotas.as_ref() else {
         return ClaudeSummaryRows {
-            credits,
-            credits_provider,
-            five_hour_percent: None,
-            weekly_percent: None,
+            five_hour: ClaudeWindowSummary { percent: None, reset_hint: "--".to_owned() },
+            weekly: ClaudeWindowSummary { percent: None, reset_hint: "--".to_owned() },
         };
     };
     ClaudeSummaryRows {
-        credits,
-        credits_provider,
-        five_hour_percent: valid_window(claude.five_hour.as_ref(), snapshot.fetched_at),
-        weekly_percent: valid_window(claude.weekly.as_ref(), snapshot.fetched_at),
+        five_hour: summarize(claude.five_hour.as_ref(), snapshot.fetched_at),
+        weekly: summarize(claude.weekly.as_ref(), snapshot.fetched_at),
     }
 }
 
@@ -683,7 +707,7 @@ unsafe fn draw_card(
         );
 
         let account = account_metrics(state, locale, navigation.resource_page);
-        let claude = claude_summary_rows(state);
+        let claude = claude_summary_rows(state, locale);
         let weekly = weekly_usage_metrics(history, navigation.summary_week, locale);
         match state.quota_availability() {
             QuotaAvailability::Single(kind) => {
@@ -1140,63 +1164,33 @@ unsafe fn draw_stacked_metrics(
             theme.line,
         );
         if provider == ProviderKind::Gemini {
-            draw_text_center(
-                hdc,
-                locale,
-                locale.text("Credits", "积分"),
-                RECT {
-                    left: scale(197, dpi),
-                    top: scale(64, dpi),
-                    right: scale(315, dpi),
-                    bottom: scale(88, dpi),
-                },
-                scale(11, dpi),
-                FW_NORMAL.0 as i32,
-                theme.muted,
-            );
-            draw_text_center(
-                hdc,
-                locale,
-                &claude.credits,
-                RECT {
-                    left: metrics.left + scale(8, dpi),
-                    top: scale(87, dpi),
-                    right: metrics.right - scale(8, dpi),
-                    bottom: scale(130, dpi),
-                },
-                scale(20, dpi),
-                FW_SEMIBOLD.0 as i32,
-                theme.text,
-            );
-            if let Some(detail) = claude.credits_provider {
-                draw_text_center(
-                    hdc,
-                    locale,
-                    detail,
-                    RECT {
-                        left: metrics.left + scale(8, dpi),
-                        top: scale(120, dpi),
-                        right: metrics.right - scale(8, dpi),
-                        bottom: scale(145, dpi),
-                    },
-                    scale(11, dpi),
-                    FW_NORMAL.0 as i32,
-                    theme.muted,
-                );
-            }
-            draw_gdi_claude_rows(
+            draw_gdi_claude_slot(
                 hdc,
                 locale,
                 RECT {
                     left: scale(208, dpi),
-                    top: scale(174, dpi),
+                    top: scale(74, dpi),
                     right: scale(304, dpi),
-                    bottom: metrics.bottom - scale(10, dpi),
+                    bottom: scale(126, dpi),
                 },
-                claude,
+                locale.text("Claude 5H", "Claude 5H"),
+                &claude.five_hour,
                 theme,
                 dpi,
-                true,
+            );
+            draw_gdi_claude_slot(
+                hdc,
+                locale,
+                RECT {
+                    left: scale(208, dpi),
+                    top: scale(186, dpi),
+                    right: scale(304, dpi),
+                    bottom: scale(238, dpi),
+                },
+                locale.text("Claude Wk", "Claude 周"),
+                &claude.weekly,
+                theme,
+                dpi,
             );
         } else {
             draw_gdi_paged_heading(
@@ -1315,74 +1309,33 @@ unsafe fn draw_bottom_metrics(
         let left = metrics.left + scale(14, dpi);
         let right_left = divider + divider_width + scale(14, dpi);
         if provider == ProviderKind::Gemini {
-            draw_text_with_alignment(
-                hdc,
-                locale,
-                locale.text("Credits", "积分"),
-                RECT {
-                    left,
-                    top: scale(278, dpi),
-                    right: divider - scale(10, dpi),
-                    bottom: scale(303, dpi),
-                },
-                TextStyle {
-                    height: scale(11, dpi),
-                    weight: FW_NORMAL.0 as i32,
-                    color: theme.muted,
-                },
-                DT_LEFT,
-            );
-            let credits_width = measure_text_width(
-                hdc,
-                locale,
-                &claude.credits,
-                scale(20, dpi),
-                FW_SEMIBOLD.0 as i32,
-            );
-            let credits_right = (left + credits_width).min(divider - scale(34, dpi));
-            draw_text_bottom(
-                hdc,
-                locale,
-                &claude.credits,
-                RECT {
-                    left,
-                    top: metrics.top + scale(20, dpi),
-                    right: credits_right,
-                    bottom: metrics.bottom - scale(10, dpi),
-                },
-                scale(20, dpi),
-                FW_SEMIBOLD.0 as i32,
-                theme.text,
-            );
-            if let Some(detail) = claude.credits_provider {
-                draw_text_right_bottom(
-                    hdc,
-                    locale,
-                    detail,
-                    RECT {
-                        left: credits_right + scale(4, dpi),
-                        top: metrics.top + scale(24, dpi),
-                        right: divider - scale(10, dpi),
-                        bottom: metrics.bottom - scale(7, dpi),
-                    },
-                    scale(11, dpi),
-                    FW_NORMAL.0 as i32,
-                    theme.muted,
-                );
-            }
-            draw_gdi_claude_rows(
+            draw_gdi_claude_slot(
                 hdc,
                 locale,
                 RECT {
-                    left: right_left,
-                    top: metrics.top + scale(6, dpi),
-                    right: metrics.right - scale(10, dpi),
-                    bottom: metrics.bottom - scale(6, dpi),
+                    left: scale(42, dpi),
+                    top: scale(280, dpi),
+                    right: scale(162, dpi),
+                    bottom: scale(332, dpi),
                 },
-                claude,
+                locale.text("Claude 5H", "Claude 5H"),
+                &claude.five_hour,
                 theme,
                 dpi,
-                false,
+            );
+            draw_gdi_claude_slot(
+                hdc,
+                locale,
+                RECT {
+                    left: scale(214, dpi),
+                    top: scale(280, dpi),
+                    right: scale(334, dpi),
+                    bottom: scale(332, dpi),
+                },
+                locale.text("Claude Wk", "Claude 周"),
+                &claude.weekly,
+                theme,
+                dpi,
             );
             return;
         }
@@ -1495,147 +1448,81 @@ unsafe fn draw_bottom_metrics(
     }
 }
 
-unsafe fn draw_gdi_claude_rows(
+unsafe fn draw_gdi_claude_slot(
     hdc: HDC,
     locale: Locale,
     bounds: RECT,
-    claude: &ClaudeSummaryRows,
+    label: &str,
+    summary: &ClaudeWindowSummary,
     theme: Theme,
     dpi: u32,
-    compact: bool,
 ) {
     unsafe {
-        let rows = [
-            (locale.text("Claude 5H", "Claude 5H"), claude.five_hour_percent),
-            (locale.text("Claude Wk", "Claude 周"), claude.weekly_percent),
-        ];
-        let row_height = (bounds.bottom - bounds.top) / 2;
-        for (index, (label, percent)) in rows.into_iter().enumerate() {
-            let row_top = bounds.top + row_height * index as i32;
-            let row_bottom = row_top + row_height;
-            let pct_text = percent.map_or_else(|| "--".to_owned(), |v| format!("{v}%"));
-            let bar_color = quota_bar_color(percent, theme.high_contrast);
-            let pct_color = if percent.is_some() { bar_color } else { theme.muted };
-            let pct_width = scale(36, dpi);
-            let bar_h = scale(4, dpi).max(2);
-            if compact {
-                let text_bottom = row_top + scale(22, dpi);
-                draw_text_with_alignment(
+        let pct_text = summary.percent.map_or_else(|| "--".to_owned(), |v| format!("{v}%"));
+        let bar_color = quota_bar_color(summary.percent, theme.high_contrast);
+        let pct_color = if summary.percent.is_some() { bar_color } else { theme.muted };
+        let pct_width = scale(34, dpi);
+        let header_bottom = bounds.top + scale(18, dpi);
+        draw_text_with_alignment(
+            hdc,
+            locale,
+            label,
+            RECT {
+                left: bounds.left,
+                top: bounds.top,
+                right: bounds.right - pct_width,
+                bottom: header_bottom,
+            },
+            TextStyle { height: scale(11, dpi), weight: FW_NORMAL.0 as i32, color: theme.muted },
+            DT_LEFT,
+        );
+        draw_text_with_alignment(
+            hdc,
+            locale,
+            &pct_text,
+            RECT {
+                left: bounds.right - pct_width,
+                top: bounds.top,
+                right: bounds.right,
+                bottom: header_bottom,
+            },
+            TextStyle { height: scale(11, dpi), weight: FW_SEMIBOLD.0 as i32, color: pct_color },
+            DT_RIGHT,
+        );
+        let bar_h = scale(4, dpi).max(2);
+        let bar_top = bounds.top + scale(22, dpi);
+        let bar_rect =
+            RECT { left: bounds.left, top: bar_top, right: bounds.right, bottom: bar_top + bar_h };
+        fill_rounded(hdc, bar_rect, bar_h, outer_track_color(theme, theme.high_contrast));
+        if let Some(value) = summary.percent
+            && value > 0
+        {
+            let fill_w = ((bar_rect.right - bar_rect.left) * i32::from(value)) / 100;
+            if fill_w > 0 {
+                fill_rounded(
                     hdc,
-                    locale,
-                    label,
                     RECT {
-                        left: bounds.left,
-                        top: row_top,
-                        right: bounds.right - pct_width,
-                        bottom: text_bottom,
+                        right: (bar_rect.left + fill_w.max(bar_h)).min(bar_rect.right),
+                        ..bar_rect
                     },
-                    TextStyle {
-                        height: scale(11, dpi),
-                        weight: FW_SEMIBOLD.0 as i32,
-                        color: theme.muted,
-                    },
-                    DT_LEFT,
+                    bar_h,
+                    bar_color,
                 );
-                draw_text_with_alignment(
-                    hdc,
-                    locale,
-                    &pct_text,
-                    RECT {
-                        left: bounds.right - pct_width,
-                        top: row_top,
-                        right: bounds.right,
-                        bottom: text_bottom,
-                    },
-                    TextStyle {
-                        height: scale(11, dpi),
-                        weight: FW_SEMIBOLD.0 as i32,
-                        color: pct_color,
-                    },
-                    DT_RIGHT,
-                );
-                let bar_top = text_bottom + scale(4, dpi);
-                let bar_rect = RECT {
-                    left: bounds.left,
-                    top: bar_top,
-                    right: bounds.right,
-                    bottom: bar_top + bar_h,
-                };
-                fill_rounded(hdc, bar_rect, bar_h, outer_track_color(theme, theme.high_contrast));
-                if let Some(value) = percent
-                    && value > 0
-                {
-                    let fill_w = ((bar_rect.right - bar_rect.left) * i32::from(value)) / 100;
-                    if fill_w > 0 {
-                        fill_rounded(
-                            hdc,
-                            RECT { right: bar_rect.left + fill_w.max(bar_h), ..bar_rect },
-                            bar_h,
-                            bar_color,
-                        );
-                    }
-                }
-                continue;
             }
-            let bar_width = scale(44, dpi);
-            let bar_right = bounds.right - pct_width - scale(4, dpi);
-            let bar_left = (bar_right - bar_width).max(bounds.left + scale(58, dpi));
-            draw_text_with_alignment(
-                hdc,
-                locale,
-                label,
-                RECT {
-                    left: bounds.left,
-                    top: row_top,
-                    right: bar_left - scale(4, dpi),
-                    bottom: row_bottom,
-                },
-                TextStyle {
-                    height: scale(11, dpi),
-                    weight: FW_SEMIBOLD.0 as i32,
-                    color: theme.muted,
-                },
-                DT_LEFT,
-            );
-            let bar_mid = (row_top + row_bottom) / 2;
-            let bar_rect = RECT {
-                left: bar_left,
-                top: bar_mid - bar_h / 2,
-                right: bar_right,
-                bottom: bar_mid - bar_h / 2 + bar_h,
-            };
-            fill_rounded(hdc, bar_rect, bar_h, outer_track_color(theme, theme.high_contrast));
-            if let Some(value) = percent
-                && value > 0
-            {
-                let fill_w = ((bar_rect.right - bar_rect.left) * i32::from(value)) / 100;
-                if fill_w > 0 {
-                    fill_rounded(
-                        hdc,
-                        RECT { right: bar_rect.left + fill_w.max(bar_h), ..bar_rect },
-                        bar_h,
-                        bar_color,
-                    );
-                }
-            }
-            draw_text_with_alignment(
-                hdc,
-                locale,
-                &pct_text,
-                RECT {
-                    left: bar_right + scale(4, dpi),
-                    top: row_top,
-                    right: bounds.right,
-                    bottom: row_bottom,
-                },
-                TextStyle {
-                    height: scale(12, dpi),
-                    weight: FW_SEMIBOLD.0 as i32,
-                    color: pct_color,
-                },
-                DT_RIGHT,
-            );
         }
+        draw_text_with_alignment(
+            hdc,
+            locale,
+            &summary.reset_hint,
+            RECT {
+                left: bounds.left,
+                top: bounds.top + scale(29, dpi),
+                right: bounds.right,
+                bottom: bounds.bottom,
+            },
+            TextStyle { height: scale(10, dpi), weight: FW_NORMAL.0 as i32, color: theme.muted },
+            DT_LEFT,
+        );
     }
 }
 
