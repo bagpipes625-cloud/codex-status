@@ -2,20 +2,25 @@
 
 use crate::app_server::{AppServerError, AppServerFailure, AppServerSnapshot};
 use crate::model::{
-    AccountSummary, QuotaSnapshot, QuotaWindow, SESSION_MINUTES, SecondaryQuotas, WEEK_MINUTES,
+    AccountSummary, CreditBalance, QuotaSnapshot, QuotaWindow, SESSION_MINUTES, SecondaryQuotas,
+    WEEK_MINUTES,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::ffi::c_void;
+use std::io::Read;
 use std::os::windows::process::CommandExt;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::ptr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use windows::Win32::Networking::WinHttp::*;
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 use windows::core::{PCWSTR, w};
+use winreg::RegKey;
+use winreg::enums::HKEY_CURRENT_USER;
 
 const LOOPBACK_HOST: PCWSTR = w!("127.0.0.1");
 const GET_USER_STATUS_PATH: &str = "/exa.language_server_pb.LanguageServerService/GetUserStatus";
@@ -223,6 +228,10 @@ pub fn fetch(state: &Mutex<GeminiState>) -> Result<AppServerSnapshot, AppServerF
         });
     }
 
+    if let Some(agy) = resolve_agy_binary() {
+        return fetch_via_agy_cli(&agy);
+    }
+
     let processes = discover_local_processes().map_err(failure)?;
     let deadline = Instant::now() + TOTAL_DEADLINE;
     let mut last_status = None;
@@ -291,6 +300,188 @@ pub fn fetch(state: &Mutex<GeminiState>) -> Result<AppServerSnapshot, AppServerF
 
 fn failure(error: AppServerError) -> AppServerFailure {
     AppServerFailure { error, account_key: None, token_usage: None }
+}
+
+fn resolve_agy_binary() -> Option<PathBuf> {
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join("agy.exe");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        let candidate = PathBuf::from(local_app_data).join("agy").join("bin").join("agy.exe");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn read_windows_system_proxy() -> Option<String> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let key =
+        hkcu.open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings").ok()?;
+    let enabled: u32 = key.get_value("ProxyEnable").unwrap_or(0);
+    if enabled == 0 {
+        return None;
+    }
+    let server: String = key.get_value("ProxyServer").ok()?;
+    normalize_proxy_server(&server)
+}
+
+fn normalize_proxy_server(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let selected = if trimmed.contains('=') {
+        let mut https_val = None;
+        let mut http_val = None;
+        for part in trimmed.split(';') {
+            let part = part.trim();
+            if let Some(val) = part.strip_prefix("https=").or_else(|| part.strip_prefix("HTTPS=")) {
+                https_val = Some(val.trim());
+            } else if let Some(val) =
+                part.strip_prefix("http=").or_else(|| part.strip_prefix("HTTP="))
+            {
+                http_val = Some(val.trim());
+            }
+        }
+        https_val.or(http_val)?.trim()
+    } else {
+        trimmed
+    };
+    if selected.is_empty() {
+        return None;
+    }
+    if selected.contains("://") {
+        Some(selected.to_owned())
+    } else {
+        Some(format!("http://{selected}"))
+    }
+}
+
+fn run_agy_json(
+    binary: &Path,
+    slash_cmd: &str,
+    timeout: Duration,
+) -> Result<Value, AppServerError> {
+    let mut cmd = Command::new(binary);
+    cmd.args(["-p", slash_cmd, "--output-format", "json", "--print-timeout", "15s"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW.0);
+
+    let has_env_proxy = std::env::var_os("HTTPS_PROXY")
+        .or_else(|| std::env::var_os("https_proxy"))
+        .or_else(|| std::env::var_os("HTTP_PROXY"))
+        .or_else(|| std::env::var_os("http_proxy"))
+        .is_some();
+    if !has_env_proxy && let Some(proxy) = read_windows_system_proxy() {
+        cmd.env("HTTP_PROXY", &proxy);
+        cmd.env("HTTPS_PROXY", &proxy);
+    }
+
+    let mut child =
+        cmd.spawn().map_err(|_| local_error("Could not launch Antigravity CLI (agy)"))?;
+
+    let stdout_handle = child.stdout.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = (&mut pipe).take(MAX_RESPONSE_BYTES as u64 + 1).read_to_end(&mut buf);
+            buf
+        })
+    });
+    let stderr_handle = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = (&mut pipe).take(16 * 1024).read_to_end(&mut buf);
+            buf
+        })
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(local_error("Antigravity CLI (agy) timed out"));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                return Err(local_error("Failed waiting for Antigravity CLI (agy)"));
+            }
+        }
+    };
+
+    let stdout = stdout_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+    let stderr = stderr_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+    if stdout.len() > MAX_RESPONSE_BYTES {
+        return Err(local_error("Antigravity CLI (agy) response exceeded size limit"));
+    }
+
+    if !status.success() {
+        let detail = String::from_utf8_lossy(&stderr).to_ascii_lowercase();
+        if detail.contains("login") || detail.contains("auth") || detail.contains("sign in") {
+            return Err(local_error("Sign in to Antigravity CLI (agy), then refresh"));
+        }
+        return Err(local_error("Antigravity CLI (agy) failed to fetch quota"));
+    }
+
+    let value: Value = serde_json::from_slice(&stdout)
+        .map_err(|_| local_error("Invalid JSON from Antigravity CLI (agy)"))?;
+    if let Some(st) = value.get("status").and_then(Value::as_str)
+        && !st.eq_ignore_ascii_case("SUCCESS")
+    {
+        return Err(local_error("Antigravity CLI (agy) reported an error"));
+    }
+    Ok(value)
+}
+
+fn extract_agy_credits(value: &Value) -> Option<CreditBalance> {
+    let credits = value
+        .pointer("/command/data/remaining_credits")
+        .or_else(|| value.pointer("/command/data/remainingCredits"))
+        .or_else(|| value.get("remaining_credits"))?;
+    if let Some(n) = credits.as_u64() {
+        return Some(CreditBalance::Amount(n.to_string()));
+    }
+    if let Some(n) = credits.as_i64() {
+        return Some(CreditBalance::Amount(n.max(0).to_string()));
+    }
+    if let Some(n) = credits.as_f64().filter(|v| v.is_finite() && *v >= 0.0) {
+        return Some(CreditBalance::Amount(n.to_string()));
+    }
+    credits
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| CreditBalance::Amount(s.to_owned()))
+}
+
+fn fetch_via_agy_cli(binary: &Path) -> Result<AppServerSnapshot, AppServerFailure> {
+    let usage_value = run_agy_json(binary, "/usage", Duration::from_secs(20)).map_err(failure)?;
+    let credits = run_agy_json(binary, "/credits", Duration::from_secs(10))
+        .ok()
+        .and_then(|v| extract_agy_credits(&v));
+    let mut snapshot = parse_quota_snapshot(&usage_value, None, chrono::Utc::now().timestamp())
+        .map_err(failure)?;
+    snapshot.account.credit_balance = credits;
+    Ok(AppServerSnapshot {
+        quota: snapshot,
+        token_usage: None,
+        account_key: Some("gemini:agy-cli".to_owned()),
+        supplement_allowed: false,
+    })
 }
 
 fn local_error(message: &str) -> AppServerError {
@@ -494,8 +685,12 @@ enum PoolKind {
     Claude,
 }
 
+fn bucket_identifier(bucket: &Value) -> Option<&str> {
+    bucket.get("bucketId").or_else(|| bucket.get("id")).and_then(Value::as_str)
+}
+
 fn classify_bucket(bucket: &Value) -> Option<PoolKind> {
-    let bucket_id = bucket.get("bucketId").and_then(Value::as_str)?;
+    let bucket_id = bucket_identifier(bucket)?;
     if bucket_id == "gemini-5h" || bucket_id == "gemini-weekly" {
         Some(PoolKind::Gemini)
     } else if bucket_id == "3p-5h" || bucket_id == "3p-weekly" {
@@ -511,7 +706,7 @@ fn parse_window_minutes(bucket: &Value) -> Option<u64> {
         Some("weekly") => return Some(WEEK_MINUTES),
         _ => {}
     }
-    match bucket.get("bucketId").and_then(Value::as_str) {
+    match bucket_identifier(bucket) {
         Some("gemini-5h" | "3p-5h") => return Some(SESSION_MINUTES),
         Some("gemini-weekly" | "3p-weekly") => return Some(WEEK_MINUTES),
         _ => {}
@@ -535,20 +730,23 @@ fn parse_window_minutes(bucket: &Value) -> Option<u64> {
 }
 
 fn parse_reset_time(bucket: &Value) -> Option<i64> {
-    if let Some(ts) = bucket.get("resetTime").and_then(Value::as_i64) {
+    let field = bucket.get("resetTime").or_else(|| bucket.get("reset_time"))?;
+    if let Some(ts) = field.as_i64() {
         return Some(ts);
     }
-    bucket
-        .get("resetTime")
-        .and_then(Value::as_str)
+    field
+        .as_str()
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.timestamp())
 }
 
 fn parse_bucket_window(bucket: &Value) -> Option<QuotaWindow> {
     // QuotaSummary is protobuf JSON. A known bucket can omit its zero-valued
-    // remainingFraction, which means exhausted rather than unknown.
-    let remaining_fraction = bucket.get("remainingFraction").map_or(Some(0.0), Value::as_f64)?;
+    // remainingFraction / remaining_fraction, which means exhausted rather than unknown.
+    let remaining_fraction = bucket
+        .get("remainingFraction")
+        .or_else(|| bucket.get("remaining_fraction"))
+        .map_or(Some(0.0), Value::as_f64)?;
     if !remaining_fraction.is_finite() {
         return None;
     }
@@ -581,8 +779,11 @@ pub(crate) fn parse_quota_snapshot(
     let mut claude_5h = None;
     let mut claude_wk = None;
 
-    let groups =
-        value.get("groups").or_else(|| value.pointer("/response/groups")).and_then(Value::as_array);
+    let groups = value
+        .pointer("/command/data/groups")
+        .or_else(|| value.get("groups"))
+        .or_else(|| value.pointer("/response/groups"))
+        .and_then(Value::as_array);
     if let Some(groups) = groups {
         for bucket in groups
             .iter()
@@ -742,6 +943,83 @@ mod tests {
         assert_eq!(command_argument(line, "--extension_server_port").as_deref(), Some("6108"));
         assert_eq!(command_argument(line, "--csrf_token").as_deref(), Some("secret-token_123"));
         assert!(command_argument(line, "--missing").is_none());
+    }
+
+    #[test]
+    fn parses_agy_cli_usage_and_credits_json() {
+        let usage = json!({
+            "status": "SUCCESS",
+            "command": {
+                "name": "usage",
+                "data": {
+                    "groups": [
+                        {
+                            "name": "Gemini Models",
+                            "buckets": [
+                                {
+                                    "id": "gemini-weekly",
+                                    "window": "weekly",
+                                    "remaining_fraction": 0.805,
+                                    "reset_time": "2026-11-25T00:49:58Z"
+                                },
+                                {
+                                    "id": "gemini-5h",
+                                    "window": "5h",
+                                    "remaining_fraction": 0.975,
+                                    "reset_time": "2026-11-21T06:12:31Z"
+                                }
+                            ]
+                        },
+                        {
+                            "name": "Claude and GPT models",
+                            "buckets": [
+                                {
+                                    "id": "3p-weekly",
+                                    "window": "weekly",
+                                    "remaining_fraction": 1,
+                                    "reset_time": "2026-11-28T01:47:20Z"
+                                },
+                                {
+                                    "id": "3p-5h",
+                                    "window": "5h",
+                                    "remaining_fraction": 1,
+                                    "reset_time": "2026-11-21T06:47:20Z"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+        let snap = parse_quota_snapshot(&usage, None, 1_795_225_600).unwrap();
+        assert_eq!(snap.weekly.as_ref().unwrap().display_percent(), 81);
+        assert_eq!(snap.session.as_ref().unwrap().display_percent(), 98);
+        let claude = snap.account.claude_quotas.as_ref().unwrap();
+        assert_eq!(claude.weekly.as_ref().unwrap().display_percent(), 100);
+        assert_eq!(claude.five_hour.as_ref().unwrap().display_percent(), 100);
+
+        let credits = json!({
+            "status": "SUCCESS",
+            "command": { "name": "credits", "data": { "remaining_credits": 250 } }
+        });
+        assert_eq!(extract_agy_credits(&credits), Some(CreditBalance::Amount("250".into())));
+    }
+
+    #[test]
+    fn normalizes_windows_proxy_server_values() {
+        assert_eq!(
+            normalize_proxy_server("127.0.0.1:7897").as_deref(),
+            Some("http://127.0.0.1:7897")
+        );
+        assert_eq!(
+            normalize_proxy_server("http=127.0.0.1:8080;https=127.0.0.1:8443").as_deref(),
+            Some("http://127.0.0.1:8443")
+        );
+        assert_eq!(
+            normalize_proxy_server("socks5://127.0.0.1:1080").as_deref(),
+            Some("socks5://127.0.0.1:1080")
+        );
+        assert_eq!(normalize_proxy_server("   "), None);
     }
 
     #[test]

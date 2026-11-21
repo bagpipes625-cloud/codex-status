@@ -2509,6 +2509,14 @@ fn wide0(value: &str) -> Vec<u16> {
 
 fn friendly_error(error: &str, locale: ui::Locale) -> String {
     let lower = error.to_ascii_lowercase();
+    if lower.contains("sign in to antigravity cli") {
+        return locale
+            .text(
+                "Sign in to Antigravity CLI (agy), then refresh",
+                "请先登录 Antigravity CLI (agy)，然后刷新",
+            )
+            .to_owned();
+    }
     if lower.contains("antigravity language server is not running") {
         return locale
             .text("Start Antigravity, then refresh", "请先启动 Antigravity，然后刷新")

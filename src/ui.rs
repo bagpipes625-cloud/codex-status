@@ -120,29 +120,10 @@ fn quota_panel_geometry(slot: QuotaPanelSlot) -> QuotaPanelGeometry {
 }
 
 pub(super) struct ClaudeSummaryRows {
-    pub plan_name: String,
-    pub plan_provider: Option<&'static str>,
+    pub credits: String,
+    pub credits_provider: Option<&'static str>,
     pub five_hour_percent: Option<u8>,
     pub weekly_percent: Option<u8>,
-}
-
-fn normalize_gemini_plan(raw: Option<&str>) -> (String, Option<&'static str>) {
-    let Some(text) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
-        return ("--".to_owned(), None);
-    };
-    let lower = text.to_ascii_lowercase();
-    let label = if lower.contains("ultra") {
-        "Ultra"
-    } else if lower.contains("pro") {
-        "Pro"
-    } else if lower.contains("plus") {
-        "Plus"
-    } else if lower.contains("free") {
-        "Free"
-    } else {
-        text.strip_prefix("Google AI ").or_else(|| text.strip_prefix("AI ")).unwrap_or(text)
-    };
-    (label.to_owned(), Some("Google One"))
 }
 
 pub(super) fn claude_summary_rows(state: &DisplayState) -> ClaudeSummaryRows {
@@ -153,24 +134,27 @@ pub(super) fn claude_summary_rows(state: &DisplayState) -> ClaudeSummaryRows {
     };
     let Some(snapshot) = state.snapshot.as_ref() else {
         return ClaudeSummaryRows {
-            plan_name: "--".to_owned(),
-            plan_provider: None,
+            credits: "--".to_owned(),
+            credits_provider: None,
             five_hour_percent: None,
             weekly_percent: None,
         };
     };
-    let (plan_name, plan_provider) = normalize_gemini_plan(snapshot.account.plan_type.as_deref());
+    let (credits, credits_provider) = match snapshot.account.credit_balance.as_ref() {
+        Some(balance) => (format_credit_balance(balance), Some("Google One")),
+        None => ("--".to_owned(), None),
+    };
     let Some(claude) = snapshot.account.claude_quotas.as_ref() else {
         return ClaudeSummaryRows {
-            plan_name,
-            plan_provider,
+            credits,
+            credits_provider,
             five_hour_percent: None,
             weekly_percent: None,
         };
     };
     ClaudeSummaryRows {
-        plan_name,
-        plan_provider,
+        credits,
+        credits_provider,
         five_hour_percent: valid_window(claude.five_hour.as_ref(), snapshot.fetched_at),
         weekly_percent: valid_window(claude.weekly.as_ref(), snapshot.fetched_at),
     }
@@ -1159,7 +1143,7 @@ unsafe fn draw_stacked_metrics(
             draw_text_center(
                 hdc,
                 locale,
-                locale.text("Plan", "套餐"),
+                locale.text("Credits", "积分"),
                 RECT {
                     left: scale(197, dpi),
                     top: scale(64, dpi),
@@ -1173,7 +1157,7 @@ unsafe fn draw_stacked_metrics(
             draw_text_center(
                 hdc,
                 locale,
-                &claude.plan_name,
+                &claude.credits,
                 RECT {
                     left: metrics.left + scale(8, dpi),
                     top: scale(87, dpi),
@@ -1184,7 +1168,7 @@ unsafe fn draw_stacked_metrics(
                 FW_SEMIBOLD.0 as i32,
                 theme.text,
             );
-            if let Some(detail) = claude.plan_provider {
+            if let Some(detail) = claude.credits_provider {
                 draw_text_center(
                     hdc,
                     locale,
@@ -1334,7 +1318,7 @@ unsafe fn draw_bottom_metrics(
             draw_text_with_alignment(
                 hdc,
                 locale,
-                locale.text("Plan", "套餐"),
+                locale.text("Credits", "积分"),
                 RECT {
                     left,
                     top: scale(278, dpi),
@@ -1348,35 +1332,35 @@ unsafe fn draw_bottom_metrics(
                 },
                 DT_LEFT,
             );
-            let plan_width = measure_text_width(
+            let credits_width = measure_text_width(
                 hdc,
                 locale,
-                &claude.plan_name,
+                &claude.credits,
                 scale(20, dpi),
                 FW_SEMIBOLD.0 as i32,
             );
-            let plan_right = (left + plan_width).min(divider - scale(34, dpi));
+            let credits_right = (left + credits_width).min(divider - scale(34, dpi));
             draw_text_bottom(
                 hdc,
                 locale,
-                &claude.plan_name,
+                &claude.credits,
                 RECT {
                     left,
                     top: metrics.top + scale(20, dpi),
-                    right: plan_right,
+                    right: credits_right,
                     bottom: metrics.bottom - scale(10, dpi),
                 },
                 scale(20, dpi),
                 FW_SEMIBOLD.0 as i32,
                 theme.text,
             );
-            if let Some(detail) = claude.plan_provider {
+            if let Some(detail) = claude.credits_provider {
                 draw_text_right_bottom(
                     hdc,
                     locale,
                     detail,
                     RECT {
-                        left: plan_right + scale(4, dpi),
+                        left: credits_right + scale(4, dpi),
                         top: metrics.top + scale(24, dpi),
                         right: divider - scale(10, dpi),
                         bottom: metrics.bottom - scale(7, dpi),

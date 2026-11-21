@@ -2,6 +2,18 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.6.15] - 2026-11-21
+
+- Switch `Gemini` quota fetching to prefer the official Antigravity CLI (`agy`)
+  via `agy -p /usage --output-format json` and `agy -p /credits --output-format json`
+  (zero-token, non-interactive), resolving failures caused by newer Antigravity
+  desktop builds no longer exposing `--csrf_token` on process command lines.
+- Automatically detect Windows system proxy settings (`HKCU\...\Internet Settings`)
+  and inject `HTTP_PROXY` / `HTTPS_PROXY` into the `agy.exe` child process when
+  environment proxy variables are unset.
+- Display remaining Google One credits (`积分`) instead of subscription plan in
+  the `Gemini` mode bottom-left metrics slot (both full and compact layouts).
+
 ## [0.6.14] - 2026-11-19
 
 - Align the compact single-quota Claude 4-row bars, labels, and percentages

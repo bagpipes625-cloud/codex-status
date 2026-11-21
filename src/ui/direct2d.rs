@@ -1414,19 +1414,19 @@ fn draw_stacked_metrics(
         let claude = claude_summary_rows(input.state);
         draw_text(
             target,
-            input.locale.text("Plan", "套餐"),
+            input.locale.text("Credits", "积分"),
             rect(197.0, 64.0, 315.0, 88.0),
             &formats.stacked_label,
             &brushes.muted,
         );
         draw_text(
             target,
-            &claude.plan_name,
+            &claude.credits,
             rect(197.0, 86.0, 315.0, 124.0),
             &formats.stacked_value,
             &brushes.text,
         );
-        if let Some(detail) = claude.plan_provider {
+        if let Some(detail) = claude.credits_provider {
             draw_text(
                 target,
                 detail,
@@ -1540,7 +1540,7 @@ fn draw_bottom_metrics(
         let claude = claude_summary_rows(input.state);
         draw_text(
             target,
-            input.locale.text("Plan", "套餐"),
+            input.locale.text("Credits", "积分"),
             rect(30.0, 278.0, 175.0, 303.0),
             &formats.metric_label,
             &brushes.muted,
@@ -1549,8 +1549,8 @@ fn draw_bottom_metrics(
             target,
             dwrite,
             formats,
-            &claude.plan_name,
-            claude.plan_provider,
+            &claude.credits,
+            claude.credits_provider,
             rect(30.0, 296.0, 178.0, 332.0),
             &brushes.text,
             &brushes.muted,
