@@ -16,9 +16,10 @@ use std::process::{Command, Stdio};
 use std::ptr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use windows::Win32::Foundation::{GlobalFree, HGLOBAL};
 use windows::Win32::Networking::WinHttp::*;
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
-use windows::core::{PCWSTR, w};
+use windows::core::{PCWSTR, PWSTR, w};
 use winreg::RegKey;
 use winreg::enums::HKEY_CURRENT_USER;
 
@@ -320,6 +321,77 @@ fn resolve_agy_binary() -> Option<PathBuf> {
     None
 }
 
+fn pwstr_to_string_and_free(ptr: PWSTR) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    let text = unsafe { ptr.to_string().ok() };
+    unsafe {
+        let _ = GlobalFree(Some(HGLOBAL(ptr.0.cast())));
+    }
+    text.filter(|s| !s.trim().is_empty())
+}
+
+fn resolve_windows_proxy_for_url() -> Option<String> {
+    let mut ie_config = WINHTTP_CURRENT_USER_IE_PROXY_CONFIG::default();
+    if unsafe { WinHttpGetIEProxyConfigForCurrentUser(&mut ie_config) }.is_err() {
+        return read_windows_system_proxy();
+    }
+    let auto_detect = ie_config.fAutoDetect.as_bool();
+    let auto_config_url = pwstr_to_string_and_free(ie_config.lpszAutoConfigUrl);
+    let fixed_proxy = pwstr_to_string_and_free(ie_config.lpszProxy);
+    let _ = pwstr_to_string_and_free(ie_config.lpszProxyBypass);
+
+    if let Some(proxy) = fixed_proxy.as_deref().and_then(normalize_proxy_server) {
+        return Some(proxy);
+    }
+
+    if auto_config_url.is_some() || auto_detect {
+        let session = unsafe {
+            Handle::new(WinHttpOpen(
+                w!("CodexStatus Proxy Resolver"),
+                WINHTTP_ACCESS_TYPE_NO_PROXY,
+                PCWSTR::null(),
+                PCWSTR::null(),
+                0,
+            ))
+            .ok()?
+        };
+        let pac_wide: Option<Vec<u16>> =
+            auto_config_url.as_deref().map(|s| s.encode_utf16().chain(Some(0)).collect());
+        let mut options =
+            WINHTTP_AUTOPROXY_OPTIONS { fAutoLogonIfChallenged: true.into(), ..Default::default() };
+        if let Some(ref wide) = pac_wide {
+            options.dwFlags = WINHTTP_AUTOPROXY_CONFIG_URL;
+            options.lpszAutoConfigUrl = PCWSTR(wide.as_ptr());
+        } else {
+            options.dwFlags = WINHTTP_AUTOPROXY_AUTO_DETECT;
+            options.dwAutoDetectFlags =
+                WINHTTP_AUTO_DETECT_TYPE_DHCP | WINHTTP_AUTO_DETECT_TYPE_DNS_A;
+        }
+        let mut proxy_info = WINHTTP_PROXY_INFO::default();
+        let ok = unsafe {
+            WinHttpGetProxyForUrl(
+                session.0,
+                w!("https://antigravity.google/"),
+                &mut options,
+                &mut proxy_info,
+            )
+            .is_ok()
+        };
+        let resolved = pwstr_to_string_and_free(proxy_info.lpszProxy);
+        let _ = pwstr_to_string_and_free(proxy_info.lpszProxyBypass);
+        if ok
+            && proxy_info.dwAccessType == WINHTTP_ACCESS_TYPE_NAMED_PROXY
+            && let Some(proxy) = resolved.as_deref().and_then(normalize_proxy_server)
+        {
+            return Some(proxy);
+        }
+    }
+
+    read_windows_system_proxy()
+}
+
 fn read_windows_system_proxy() -> Option<String> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let key =
@@ -337,9 +409,10 @@ fn normalize_proxy_server(raw: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    let selected = if trimmed.contains('=') {
+    if trimmed.contains('=') {
         let mut https_val = None;
         let mut http_val = None;
+        let mut socks_val = None;
         for part in trimmed.split(';') {
             let part = part.trim();
             if let Some(val) = part.strip_prefix("https=").or_else(|| part.strip_prefix("HTTPS=")) {
@@ -348,42 +421,92 @@ fn normalize_proxy_server(raw: &str) -> Option<String> {
                 part.strip_prefix("http=").or_else(|| part.strip_prefix("HTTP="))
             {
                 http_val = Some(val.trim());
+            } else if let Some(val) =
+                part.strip_prefix("socks=").or_else(|| part.strip_prefix("SOCKS="))
+            {
+                socks_val = Some(val.trim());
             }
         }
-        https_val.or(http_val)?.trim()
-    } else {
-        trimmed
-    };
-    if selected.is_empty() {
+        if let Some(val) = https_val.or(http_val).filter(|v| !v.is_empty()) {
+            return Some(if val.contains("://") {
+                val.to_owned()
+            } else {
+                format!("http://{val}")
+            });
+        }
+        if let Some(val) = socks_val.filter(|v| !v.is_empty()) {
+            return Some(if val.contains("://") {
+                val.to_owned()
+            } else {
+                format!("socks5://{val}")
+            });
+        }
         return None;
     }
-    if selected.contains("://") {
-        Some(selected.to_owned())
-    } else {
-        Some(format!("http://{selected}"))
+
+    for entry in trimmed.split(';') {
+        let entry = entry.trim();
+        if entry.is_empty() || entry.eq_ignore_ascii_case("DIRECT") {
+            continue;
+        }
+        let mut parts = entry.split_whitespace();
+        let first = parts.next()?;
+        if first.eq_ignore_ascii_case("PROXY") || first.eq_ignore_ascii_case("HTTP") {
+            if let Some(host) = parts.next() {
+                return Some(if host.contains("://") {
+                    host.to_owned()
+                } else {
+                    format!("http://{host}")
+                });
+            }
+            continue;
+        }
+        if first.eq_ignore_ascii_case("HTTPS") {
+            if let Some(host) = parts.next() {
+                return Some(if host.contains("://") {
+                    host.to_owned()
+                } else {
+                    format!("https://{host}")
+                });
+            }
+            continue;
+        }
+        if first.eq_ignore_ascii_case("SOCKS") || first.eq_ignore_ascii_case("SOCKS5") {
+            if let Some(host) = parts.next() {
+                return Some(if host.contains("://") {
+                    host.to_owned()
+                } else {
+                    format!("socks5://{host}")
+                });
+            }
+            continue;
+        }
+        return Some(if first.contains("://") {
+            first.to_owned()
+        } else {
+            format!("http://{first}")
+        });
     }
+    None
 }
 
 fn run_agy_json(
     binary: &Path,
     slash_cmd: &str,
+    proxy: Option<&str>,
     timeout: Duration,
 ) -> Result<Value, AppServerError> {
     let mut cmd = Command::new(binary);
     cmd.args(["-p", slash_cmd, "--output-format", "json", "--print-timeout", "15s"])
+        .current_dir(std::env::temp_dir())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .creation_flags(CREATE_NO_WINDOW.0);
 
-    let has_env_proxy = std::env::var_os("HTTPS_PROXY")
-        .or_else(|| std::env::var_os("https_proxy"))
-        .or_else(|| std::env::var_os("HTTP_PROXY"))
-        .or_else(|| std::env::var_os("http_proxy"))
-        .is_some();
-    if !has_env_proxy && let Some(proxy) = read_windows_system_proxy() {
-        cmd.env("HTTP_PROXY", &proxy);
-        cmd.env("HTTPS_PROXY", &proxy);
+    if let Some(proxy) = proxy {
+        cmd.env("HTTP_PROXY", proxy);
+        cmd.env("HTTPS_PROXY", proxy);
     }
 
     let mut child =
@@ -469,10 +592,30 @@ fn extract_agy_credits(value: &Value) -> Option<CreditBalance> {
 }
 
 fn fetch_via_agy_cli(binary: &Path) -> Result<AppServerSnapshot, AppServerFailure> {
-    let usage_value = run_agy_json(binary, "/usage", Duration::from_secs(20)).map_err(failure)?;
-    let credits = run_agy_json(binary, "/credits", Duration::from_secs(10))
-        .ok()
-        .and_then(|v| extract_agy_credits(&v));
+    let has_env_proxy = std::env::var_os("HTTPS_PROXY")
+        .or_else(|| std::env::var_os("https_proxy"))
+        .or_else(|| std::env::var_os("HTTP_PROXY"))
+        .or_else(|| std::env::var_os("http_proxy"))
+        .or_else(|| std::env::var_os("ALL_PROXY"))
+        .or_else(|| std::env::var_os("all_proxy"))
+        .is_some();
+    let proxy = if has_env_proxy { None } else { resolve_windows_proxy_for_url() };
+    let proxy_ref = proxy.as_deref();
+
+    let (usage_res, credits_res) = std::thread::scope(|scope| {
+        let usage_handle =
+            scope.spawn(|| run_agy_json(binary, "/usage", proxy_ref, Duration::from_secs(20)));
+        let credits_handle =
+            scope.spawn(|| run_agy_json(binary, "/credits", proxy_ref, Duration::from_secs(15)));
+        let usage = usage_handle
+            .join()
+            .unwrap_or_else(|_| Err(local_error("Antigravity CLI (agy) worker panicked")));
+        let credits = credits_handle.join().ok().and_then(Result::ok);
+        (usage, credits)
+    });
+
+    let usage_value = usage_res.map_err(failure)?;
+    let credits = credits_res.and_then(|v| extract_agy_credits(&v));
     let mut snapshot = parse_quota_snapshot(&usage_value, None, chrono::Utc::now().timestamp())
         .map_err(failure)?;
     snapshot.account.credit_balance = credits;
@@ -1016,9 +1159,18 @@ mod tests {
             Some("http://127.0.0.1:8443")
         );
         assert_eq!(
+            normalize_proxy_server("PROXY 127.0.0.1:7897; DIRECT").as_deref(),
+            Some("http://127.0.0.1:7897")
+        );
+        assert_eq!(
+            normalize_proxy_server("SOCKS 127.0.0.1:7897; DIRECT").as_deref(),
+            Some("socks5://127.0.0.1:7897")
+        );
+        assert_eq!(
             normalize_proxy_server("socks5://127.0.0.1:1080").as_deref(),
             Some("socks5://127.0.0.1:1080")
         );
+        assert_eq!(normalize_proxy_server("DIRECT"), None);
         assert_eq!(normalize_proxy_server("   "), None);
     }
 

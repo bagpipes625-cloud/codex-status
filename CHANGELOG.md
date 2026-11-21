@@ -2,6 +2,16 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.6.16] - 2026-11-21
+
+- Resolve Windows proxy settings via WinHTTP (`WinHttpGetIEProxyConfigForCurrentUser`
+  + `WinHttpGetProxyForUrl`) so `agy` CLI works seamlessly under fixed system
+  proxy, PAC script (`AutoConfigURL`), WPAD auto-detect, TUN, and explicit
+  environment variables.
+- Run `agy -p /usage` and `agy -p /credits` in parallel from the system temp
+  directory, cutting Gemini refresh latency roughly in half and avoiding
+  workspace scanning on startup.
+
 ## [0.6.15] - 2026-11-21
 
 - Switch `Gemini` quota fetching to prefer the official Antigravity CLI (`agy`)
