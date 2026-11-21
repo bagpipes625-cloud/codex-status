@@ -20,9 +20,9 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{CloseHandle, GlobalFree, HANDLE, HGLOBAL};
 use windows::Win32::Networking::WinHttp::*;
 use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-    SetInformationJobObject,
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectExtendedLimitInformation, SetInformationJobObject,
 };
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 use windows::core::{PCWSTR, PWSTR, w};
@@ -515,7 +515,12 @@ impl KillOnCloseJob {
         unsafe {
             let job = CreateJobObjectW(None, None).ok()?;
             let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // Prevent agy.exe from spawning detached background helpers (such as
+            // `agy.exe --bg-updater`, which lacks CREATE_NO_WINDOW and flashes
+            // Windows Terminal every ~15 minutes on Windows 11).
+            limits.BasicLimitInformation.LimitFlags =
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+            limits.BasicLimitInformation.ActiveProcessLimit = 1;
             if SetInformationJobObject(
                 job,
                 JobObjectExtendedLimitInformation,
@@ -554,6 +559,8 @@ fn run_agy_json(
     let mut cmd = Command::new(binary);
     cmd.args(["-p", slash_cmd, "--output-format", "json", "--print-timeout", "15s"])
         .current_dir(std::env::temp_dir())
+        .env("AGY_DISABLE_AUTO_UPDATE", "1")
+        .env("AGY_CLI_DISABLE_AUTO_UPDATE", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

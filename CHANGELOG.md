@@ -2,6 +2,14 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.6.18] - 2026-11-21
+
+- Prevent `agy.exe` from spawning detached `agy.exe --bg-updater` child
+  processes during headless quota refreshes (which flashed Windows Terminal
+  every ~15 minutes on Windows 11) by setting `AGY_DISABLE_AUTO_UPDATE=1` /
+  `AGY_CLI_DISABLE_AUTO_UPDATE=1` and enforcing `JOB_OBJECT_LIMIT_ACTIVE_PROCESS`
+  (`ActiveProcessLimit = 1`) on the `agy` JobObject.
+
 ## [0.6.17] - 2026-11-21
 
 - Cache `agy -p /credits` results for 30 minutes so routine Gemini refreshes
