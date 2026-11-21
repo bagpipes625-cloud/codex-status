@@ -10,14 +10,20 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::ffi::c_void;
 use std::io::Read;
+use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::ptr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{GlobalFree, HGLOBAL};
+use windows::Win32::Foundation::{CloseHandle, GlobalFree, HANDLE, HGLOBAL};
 use windows::Win32::Networking::WinHttp::*;
+use windows::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    SetInformationJobObject,
+};
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 use windows::core::{PCWSTR, PWSTR, w};
 use winreg::RegKey;
@@ -31,10 +37,13 @@ const PROCESS_QUERY: &str = r#"$items = @(Get-CimInstance Win32_Process | Where-
 const MAX_DISCOVERY_BYTES: usize = 256 * 1024;
 const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 const TOTAL_DEADLINE: Duration = Duration::from_secs(20);
+const CREDITS_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+const AGY_ACCOUNT_KEY: &str = "gemini:agy-cli";
 
 #[derive(Default)]
 pub struct GeminiState {
     blocked_until: Option<Instant>,
+    cached_credits: Option<(Instant, Option<CreditBalance>)>,
 }
 
 impl GeminiState {
@@ -45,6 +54,17 @@ impl GeminiState {
     fn block(&mut self, delay: Duration) {
         let until = Instant::now() + delay;
         self.blocked_until = Some(self.blocked_until.map_or(until, |old| old.max(until)));
+    }
+
+    fn fresh_credits(&self, now: Instant) -> Option<Option<CreditBalance>> {
+        self.cached_credits.as_ref().and_then(|(fetched_at, balance)| {
+            (now.saturating_duration_since(*fetched_at) < CREDITS_CACHE_TTL)
+                .then(|| balance.clone())
+        })
+    }
+
+    fn record_credits(&mut self, now: Instant, balance: Option<CreditBalance>) {
+        self.cached_credits = Some((now, balance));
     }
 }
 
@@ -230,7 +250,7 @@ pub fn fetch(state: &Mutex<GeminiState>) -> Result<AppServerSnapshot, AppServerF
     }
 
     if let Some(agy) = resolve_agy_binary() {
-        return fetch_via_agy_cli(&agy);
+        return fetch_via_agy_cli(&agy, state);
     }
 
     let processes = discover_local_processes().map_err(failure)?;
@@ -369,23 +389,21 @@ fn resolve_windows_proxy_for_url() -> Option<String> {
             options.dwAutoDetectFlags =
                 WINHTTP_AUTO_DETECT_TYPE_DHCP | WINHTTP_AUTO_DETECT_TYPE_DNS_A;
         }
-        let mut proxy_info = WINHTTP_PROXY_INFO::default();
-        let ok = unsafe {
-            WinHttpGetProxyForUrl(
-                session.0,
-                w!("https://antigravity.google/"),
-                &mut options,
-                &mut proxy_info,
-            )
-            .is_ok()
-        };
-        let resolved = pwstr_to_string_and_free(proxy_info.lpszProxy);
-        let _ = pwstr_to_string_and_free(proxy_info.lpszProxyBypass);
-        if ok
-            && proxy_info.dwAccessType == WINHTTP_ACCESS_TYPE_NAMED_PROXY
-            && let Some(proxy) = resolved.as_deref().and_then(normalize_proxy_server)
+        for probe_url in
+            [w!("https://antigravity.google/"), w!("https://cloudcode-pa.googleapis.com/")]
         {
-            return Some(proxy);
+            let mut proxy_info = WINHTTP_PROXY_INFO::default();
+            let ok = unsafe {
+                WinHttpGetProxyForUrl(session.0, probe_url, &mut options, &mut proxy_info).is_ok()
+            };
+            let resolved = pwstr_to_string_and_free(proxy_info.lpszProxy);
+            let _ = pwstr_to_string_and_free(proxy_info.lpszProxyBypass);
+            if ok
+                && proxy_info.dwAccessType == WINHTTP_ACCESS_TYPE_NAMED_PROXY
+                && let Some(proxy) = resolved.as_deref().and_then(normalize_proxy_server)
+            {
+                return Some(proxy);
+            }
         }
     }
 
@@ -490,6 +508,43 @@ fn normalize_proxy_server(raw: &str) -> Option<String> {
     None
 }
 
+struct KillOnCloseJob(HANDLE);
+
+impl KillOnCloseJob {
+    fn attach(child: &Child) -> Option<Self> {
+        unsafe {
+            let job = CreateJobObjectW(None, None).ok()?;
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&raw const limits).cast(),
+                std::mem::size_of_val(&limits) as u32,
+            )
+            .is_err()
+            {
+                let _ = CloseHandle(job);
+                return None;
+            }
+            let process = HANDLE(child.as_raw_handle());
+            if AssignProcessToJobObject(job, process).is_err() {
+                let _ = CloseHandle(job);
+                return None;
+            }
+            Some(Self(job))
+        }
+    }
+}
+
+impl Drop for KillOnCloseJob {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
 fn run_agy_json(
     binary: &Path,
     slash_cmd: &str,
@@ -511,6 +566,7 @@ fn run_agy_json(
 
     let mut child =
         cmd.spawn().map_err(|_| local_error("Could not launch Antigravity CLI (agy)"))?;
+    let _job = KillOnCloseJob::attach(&child);
 
     let stdout_handle = child.stdout.take().map(|mut pipe| {
         std::thread::spawn(move || {
@@ -591,7 +647,22 @@ fn extract_agy_credits(value: &Value) -> Option<CreditBalance> {
         .map(|s| CreditBalance::Amount(s.to_owned()))
 }
 
-fn fetch_via_agy_cli(binary: &Path) -> Result<AppServerSnapshot, AppServerFailure> {
+fn agy_failure(error: AppServerError) -> AppServerFailure {
+    let is_auth = matches!(&error, AppServerError::Rpc { message, .. } if {
+        let lower = message.to_ascii_lowercase();
+        lower.contains("sign in") || lower.contains("login") || lower.contains("auth")
+    });
+    AppServerFailure {
+        error,
+        account_key: (!is_auth).then(|| AGY_ACCOUNT_KEY.to_owned()),
+        token_usage: None,
+    }
+}
+
+fn fetch_via_agy_cli(
+    binary: &Path,
+    state: &Mutex<GeminiState>,
+) -> Result<AppServerSnapshot, AppServerFailure> {
     let has_env_proxy = std::env::var_os("HTTPS_PROXY")
         .or_else(|| std::env::var_os("https_proxy"))
         .or_else(|| std::env::var_os("HTTP_PROXY"))
@@ -602,27 +673,43 @@ fn fetch_via_agy_cli(binary: &Path) -> Result<AppServerSnapshot, AppServerFailur
     let proxy = if has_env_proxy { None } else { resolve_windows_proxy_for_url() };
     let proxy_ref = proxy.as_deref();
 
-    let (usage_res, credits_res) = std::thread::scope(|scope| {
-        let usage_handle =
-            scope.spawn(|| run_agy_json(binary, "/usage", proxy_ref, Duration::from_secs(20)));
-        let credits_handle =
-            scope.spawn(|| run_agy_json(binary, "/credits", proxy_ref, Duration::from_secs(15)));
-        let usage = usage_handle
-            .join()
-            .unwrap_or_else(|_| Err(local_error("Antigravity CLI (agy) worker panicked")));
-        let credits = credits_handle.join().ok().and_then(Result::ok);
-        (usage, credits)
-    });
+    let now = Instant::now();
+    let cached_credits = state.lock().ok().and_then(|guard| guard.fresh_credits(now));
 
-    let usage_value = usage_res.map_err(failure)?;
-    let credits = credits_res.and_then(|v| extract_agy_credits(&v));
+    let (usage_res, fresh_credits_res) = if cached_credits.is_some() {
+        (run_agy_json(binary, "/usage", proxy_ref, Duration::from_secs(20)), None)
+    } else {
+        std::thread::scope(|scope| {
+            let usage_handle =
+                scope.spawn(|| run_agy_json(binary, "/usage", proxy_ref, Duration::from_secs(20)));
+            let credits_handle = scope
+                .spawn(|| run_agy_json(binary, "/credits", proxy_ref, Duration::from_secs(18)));
+            let usage = usage_handle
+                .join()
+                .unwrap_or_else(|_| Err(local_error("Antigravity CLI (agy) worker panicked")));
+            let credits = credits_handle.join().ok().and_then(Result::ok);
+            (usage, credits)
+        })
+    };
+
+    let usage_value = usage_res.map_err(agy_failure)?;
+    let credits = match cached_credits {
+        Some(balance) => balance,
+        None => {
+            let parsed = fresh_credits_res.and_then(|v| extract_agy_credits(&v));
+            if let Ok(mut guard) = state.lock() {
+                guard.record_credits(Instant::now(), parsed.clone());
+            }
+            parsed
+        }
+    };
     let mut snapshot = parse_quota_snapshot(&usage_value, None, chrono::Utc::now().timestamp())
-        .map_err(failure)?;
+        .map_err(agy_failure)?;
     snapshot.account.credit_balance = credits;
     Ok(AppServerSnapshot {
         quota: snapshot,
         token_usage: None,
-        account_key: Some("gemini:agy-cli".to_owned()),
+        account_key: Some(AGY_ACCOUNT_KEY.to_owned()),
         supplement_allowed: false,
     })
 }

@@ -2,6 +2,21 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.6.17] - 2026-11-21
+
+- Cache `agy -p /credits` results for 30 minutes so routine Gemini refreshes
+  spawn only a single `agy -p /usage` process, cutting peak transient memory and
+  CPU usage roughly in half while keeping idle overhead at zero.
+- Attach a Windows `JobObject` (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) to `agy`
+  child processes so timeouts or app exit cleanly terminate the entire process
+  tree without orphan processes.
+- Preserve the Gemini `agy` account key on transient non-auth errors so valid
+  cached quota stays visible instead of flashing unavailable on brief network
+  hiccups.
+- Add `https://cloudcode-pa.googleapis.com/` as a secondary PAC probe URL when
+  `https://antigravity.google/` resolves to `DIRECT`, and give `/credits` an
+  18s outer timeout margin over `--print-timeout 15s`.
+
 ## [0.6.16] - 2026-11-21
 
 - Resolve Windows proxy settings via WinHTTP (`WinHttpGetIEProxyConfigForCurrentUser`
