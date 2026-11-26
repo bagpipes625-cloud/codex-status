@@ -4,34 +4,22 @@ use crate::app_server::{AppServerError, AppServerFailure, AppServerSnapshot};
 use crate::model::{
     AccountSummary, QuotaSnapshot, QuotaWindow, SESSION_MINUTES, SecondaryQuotas, WEEK_MINUTES,
 };
-use crate::winhttp::{ProxyMode, Request, Session, Timeouts, WinHttpError};
+use crate::process::{IsolationPolicy, ProcessError, run_captured};
+use crate::winhttp::{ProxyMode, Request, Session, Timeouts, WinHttpError, is_rate_limit_message};
+use crate::winutil::wide0;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::io::Read;
-use std::os::windows::io::AsRawHandle;
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Mutex, mpsc};
+use std::process::Command;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{CloseHandle, GlobalFree, HANDLE, HGLOBAL};
+use windows::Win32::Foundation::{GlobalFree, HGLOBAL};
 use windows::Win32::Networking::WinHttp::{
     WINHTTP_ACCESS_TYPE_NAMED_PROXY, WINHTTP_AUTO_DETECT_TYPE_DHCP, WINHTTP_AUTO_DETECT_TYPE_DNS_A,
     WINHTTP_AUTOPROXY_AUTO_DETECT, WINHTTP_AUTOPROXY_CONFIG_URL, WINHTTP_AUTOPROXY_OPTIONS,
     WINHTTP_CURRENT_USER_IE_PROXY_CONFIG, WINHTTP_PROXY_INFO,
     WinHttpGetIEProxyConfigForCurrentUser, WinHttpGetProxyForUrl,
-};
-use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
-};
-use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JobObjectExtendedLimitInformation, SetInformationJobObject,
-};
-use windows::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 use winreg::RegKey;
@@ -47,7 +35,6 @@ const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 const TOTAL_DEADLINE: Duration = Duration::from_secs(20);
 const PROCESS_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 const NETSTAT_TIMEOUT: Duration = Duration::from_secs(5);
-const READER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 const PROXY_CACHE_TTL: Duration = Duration::from_secs(300);
 const AGY_RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(300);
 // `agy -p /usage --output-format json` currently omits email/account_id fields.
@@ -140,9 +127,9 @@ fn system32_executable(relative: &str) -> PathBuf {
 fn discover_local_processes() -> Result<Vec<LocalProcess>, AppServerError> {
     let mut cmd = Command::new(system32_executable(r"WindowsPowerShell\v1.0\powershell.exe"));
     cmd.args(["-NoProfile", "-NonInteractive", "-Command", PROCESS_QUERY]);
-    let output = run_isolated_command(
+    let output = run_captured(
         &mut cmd,
-        false,
+        IsolationPolicy::PROCESS_TREE,
         PROCESS_DISCOVERY_TIMEOUT,
         MAX_DISCOVERY_BYTES,
         8 * 1024,
@@ -231,9 +218,13 @@ fn split_command_line(command_line: &str) -> Vec<String> {
 fn listening_ports(pid: u32) -> Vec<u16> {
     let mut cmd = Command::new(system32_executable("netstat.exe"));
     cmd.args(["-ano", "-p", "tcp"]);
-    let Ok(output) =
-        run_isolated_command(&mut cmd, false, NETSTAT_TIMEOUT, MAX_DISCOVERY_BYTES, 4 * 1024)
-    else {
+    let Ok(output) = run_captured(
+        &mut cmd,
+        IsolationPolicy::PROCESS_TREE,
+        NETSTAT_TIMEOUT,
+        MAX_DISCOVERY_BYTES,
+        4 * 1024,
+    ) else {
         return Vec::new();
     };
     if !output.status.success() || output.stdout.len() > MAX_DISCOVERY_BYTES {
@@ -418,8 +409,7 @@ fn resolve_windows_proxy_for_url() -> Option<String> {
     if auto_config_url.is_some() || auto_detect {
         let session =
             Session::open("CodexStatus Proxy Resolver", ProxyMode::NoProxy, Timeouts::API).ok()?;
-        let pac_wide: Option<Vec<u16>> =
-            auto_config_url.as_deref().map(|s| s.encode_utf16().chain(Some(0)).collect());
+        let pac_wide: Option<Vec<u16>> = auto_config_url.as_deref().map(wide0);
         let mut options =
             WINHTTP_AUTOPROXY_OPTIONS { fAutoLogonIfChallenged: true.into(), ..Default::default() };
         if let Some(ref wide) = pac_wide {
@@ -555,197 +545,6 @@ fn normalize_proxy_server(raw: &str) -> Option<String> {
     None
 }
 
-struct SuspendedThread(HANDLE);
-
-impl SuspendedThread {
-    fn find(process_id: u32) -> windows::core::Result<Self> {
-        unsafe {
-            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)?;
-            let mut entry = THREADENTRY32 {
-                dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
-                ..Default::default()
-            };
-            let result = (|| {
-                Thread32First(snapshot, &mut entry)?;
-                loop {
-                    if entry.th32OwnerProcessID == process_id {
-                        return OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID)
-                            .map(Self);
-                    }
-                    if Thread32Next(snapshot, &mut entry).is_err() {
-                        return Err(windows::core::Error::from_thread());
-                    }
-                }
-            })();
-            let _ = CloseHandle(snapshot);
-            result
-        }
-    }
-
-    fn resume(&self) -> windows::core::Result<()> {
-        let previous_count = unsafe { ResumeThread(self.0) };
-        if previous_count == u32::MAX { Err(windows::core::Error::from_thread()) } else { Ok(()) }
-    }
-}
-
-impl Drop for SuspendedThread {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = CloseHandle(self.0);
-        }
-    }
-}
-
-struct KillOnCloseJob(HANDLE);
-
-impl KillOnCloseJob {
-    fn attach(child: &Child, single_process: bool) -> windows::core::Result<Self> {
-        unsafe {
-            let job = CreateJobObjectW(None, None)?;
-            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            if single_process {
-                // Prevent agy.exe from spawning detached background helpers (such as
-                // `agy.exe --bg-updater`, which lacks CREATE_NO_WINDOW and flashes
-                // Windows Terminal every ~15 minutes on Windows 11).
-                limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
-                limits.BasicLimitInformation.ActiveProcessLimit = 1;
-            }
-            if let Err(error) = SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                (&raw const limits).cast(),
-                std::mem::size_of_val(&limits) as u32,
-            ) {
-                let _ = CloseHandle(job);
-                return Err(error);
-            }
-            let process = HANDLE(child.as_raw_handle());
-            if let Err(error) = AssignProcessToJobObject(job, process) {
-                let _ = CloseHandle(job);
-                return Err(error);
-            }
-            Ok(Self(job))
-        }
-    }
-}
-
-impl Drop for KillOnCloseJob {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = CloseHandle(self.0);
-        }
-    }
-}
-
-struct CommandOutput {
-    status: ExitStatus,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-}
-
-enum IsolatedCommandError {
-    Spawn,
-    Isolation,
-    Timeout,
-    Wait,
-}
-
-fn terminate_child(child: &mut Child) {
-    if child.try_wait().ok().flatten().is_none() {
-        let _ = child.kill();
-    }
-    let _ = child.wait();
-}
-
-fn run_isolated_command(
-    cmd: &mut Command,
-    single_process: bool,
-    timeout: Duration,
-    max_stdout: usize,
-    max_stderr: usize,
-) -> Result<CommandOutput, IsolatedCommandError> {
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .creation_flags(CREATE_NO_WINDOW.0 | CREATE_SUSPENDED.0);
-
-    let mut child = cmd.spawn().map_err(|_| IsolatedCommandError::Spawn)?;
-    let suspended_thread = match SuspendedThread::find(child.id()) {
-        Ok(thread) => thread,
-        Err(_) => {
-            terminate_child(&mut child);
-            return Err(IsolatedCommandError::Isolation);
-        }
-    };
-    let job = match KillOnCloseJob::attach(&child, single_process) {
-        Ok(job) => job,
-        Err(_) => {
-            terminate_child(&mut child);
-            return Err(IsolatedCommandError::Isolation);
-        }
-    };
-    if suspended_thread.resume().is_err() {
-        drop(job);
-        terminate_child(&mut child);
-        return Err(IsolatedCommandError::Isolation);
-    }
-    drop(suspended_thread);
-
-    let (stdout_tx, stdout_rx) = mpsc::sync_channel(1);
-    let stdout_handle = child.stdout.take().map(|mut pipe| {
-        std::thread::Builder::new()
-            .name("codex-status-gemini-stdout".into())
-            .stack_size(256 * 1024)
-            .spawn(move || {
-                let mut buf = Vec::new();
-                let _ = (&mut pipe).take(max_stdout as u64 + 1).read_to_end(&mut buf);
-                let _ = stdout_tx.send(buf);
-            })
-            .ok()
-    });
-    let (stderr_tx, stderr_rx) = mpsc::sync_channel(1);
-    let stderr_handle = child.stderr.take().map(|mut pipe| {
-        std::thread::Builder::new()
-            .name("codex-status-gemini-stderr".into())
-            .stack_size(256 * 1024)
-            .spawn(move || {
-                let mut buf = Vec::new();
-                let _ = (&mut pipe).take(max_stderr as u64).read_to_end(&mut buf);
-                let _ = stderr_tx.send(buf);
-            })
-            .ok()
-    });
-
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    break Err(IsolatedCommandError::Timeout);
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(_) => break Err(IsolatedCommandError::Wait),
-        }
-    };
-
-    // Close the job first to terminate the entire process tree so any inherited
-    // stdout/stderr pipes close before boundedly reclaiming the reader threads.
-    drop(job);
-    if status.is_err() {
-        terminate_child(&mut child);
-    }
-    let stdout = stdout_rx.recv_timeout(READER_CLEANUP_TIMEOUT).unwrap_or_default();
-    let stderr = stderr_rx.recv_timeout(READER_CLEANUP_TIMEOUT).unwrap_or_default();
-    drop(stdout_handle);
-    drop(stderr_handle);
-
-    let status = status?;
-    Ok(CommandOutput { status, stdout, stderr })
-}
-
 fn run_agy_json(
     binary: &Path,
     slash_cmd: &str,
@@ -763,15 +562,24 @@ fn run_agy_json(
         cmd.env("HTTPS_PROXY", proxy);
     }
 
-    let output = run_isolated_command(&mut cmd, true, timeout, MAX_RESPONSE_BYTES, 16 * 1024)
-        .map_err(|error| match error {
-            IsolatedCommandError::Spawn => local_error("Could not launch Antigravity CLI (agy)"),
-            IsolatedCommandError::Isolation => {
-                local_error("Could not isolate Antigravity CLI (agy) process")
-            }
-            IsolatedCommandError::Timeout => local_error("Antigravity CLI (agy) timed out"),
-            IsolatedCommandError::Wait => local_error("Failed waiting for Antigravity CLI (agy)"),
-        })?;
+    // Prevent agy.exe from spawning detached background helpers (such as
+    // `agy.exe --bg-updater`, which lacks CREATE_NO_WINDOW and flashes
+    // Windows Terminal every ~15 minutes on Windows 11).
+    let output = run_captured(
+        &mut cmd,
+        IsolationPolicy::SINGLE_PROCESS,
+        timeout,
+        MAX_RESPONSE_BYTES,
+        16 * 1024,
+    )
+    .map_err(|error| match error {
+        ProcessError::Spawn(_) => local_error("Could not launch Antigravity CLI (agy)"),
+        ProcessError::Isolation(_) => {
+            local_error("Could not isolate Antigravity CLI (agy) process")
+        }
+        ProcessError::Timeout => local_error("Antigravity CLI (agy) timed out"),
+        ProcessError::Wait(_) => local_error("Failed waiting for Antigravity CLI (agy)"),
+    })?;
 
     if output.stdout.len() > MAX_RESPONSE_BYTES {
         return Err(local_error("Antigravity CLI (agy) response exceeded size limit"));
@@ -782,7 +590,7 @@ fn run_agy_json(
         if detail.contains("login") || detail.contains("auth") || detail.contains("sign in") {
             return Err(local_error("Sign in to Antigravity CLI (agy), then refresh"));
         }
-        if is_rate_limit_text(&detail) {
+        if is_rate_limit_message(&detail) {
             return Err(local_error("Antigravity CLI (agy) was rate-limited"));
         }
         return Err(local_error("Antigravity CLI (agy) failed to fetch quota"));
@@ -797,22 +605,13 @@ fn run_agy_json(
             .get("error")
             .or_else(|| value.get("message"))
             .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if is_rate_limit_text(&err_text) {
+            .unwrap_or_default();
+        if is_rate_limit_message(err_text) {
             return Err(local_error("Antigravity CLI (agy) was rate-limited"));
         }
         return Err(local_error("Antigravity CLI (agy) reported an error"));
     }
     Ok(value)
-}
-
-fn is_rate_limit_text(text: &str) -> bool {
-    text.split(|c: char| !c.is_ascii_alphanumeric()).any(|part| part == "429")
-        || text.contains("rate limit")
-        || text.contains("rate-limit")
-        || text.contains("too many requests")
-        || text.contains("resource_exhausted")
 }
 
 fn agy_failure(error: AppServerError, state: &Mutex<GeminiState>) -> AppServerFailure {
@@ -868,7 +667,7 @@ fn fetch_via_agy_cli(
                     if !has_env_proxy {
                         guard.invalidate_proxy();
                     }
-                    if is_rate_limit_text(&error.to_string().to_ascii_lowercase()) {
+                    if is_rate_limit_message(&error.to_string()) {
                         guard.block(AGY_RATE_LIMIT_BACKOFF);
                     }
                 }
@@ -1367,9 +1166,9 @@ mod tests {
             "error: rate limit exceeded",
             "status: RESOURCE_EXHAUSTED",
         ] {
-            assert!(is_rate_limit_text(&text.to_ascii_lowercase()), "{text}");
+            assert!(is_rate_limit_message(text), "{text}");
         }
-        assert!(!is_rate_limit_text("connection timed out"));
+        assert!(!is_rate_limit_message("connection timed out"));
 
         let mut state = GeminiState::default();
         let now = Instant::now();

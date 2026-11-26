@@ -1,5 +1,6 @@
 //! Shared WinHTTP RAII client for official API reads, local loopback probes, and updater downloads.
 
+use crate::winutil::wide0;
 use std::ffi::c_void;
 use std::ptr;
 use std::time::{Duration, Instant};
@@ -122,7 +123,7 @@ impl Session {
         proxy: ProxyMode,
         timeouts: Timeouts,
     ) -> Result<Self, WinHttpError> {
-        let agent = wide_null(user_agent);
+        let agent = wide0(user_agent);
         let access_type = match proxy {
             ProxyMode::Automatic => WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
             ProxyMode::NoProxy => WINHTTP_ACCESS_TYPE_NO_PROXY,
@@ -156,7 +157,7 @@ impl Session {
         if request.allow_loopback_self_signed && !is_loopback_host(request.host) {
             return Err(WinHttpError::InvalidConfig);
         }
-        let host = wide_null(request.host);
+        let host = wide0(request.host);
         let connection = unsafe {
             InternetHandle::from_raw(WinHttpConnect(
                 self.handle.as_raw(),
@@ -165,8 +166,8 @@ impl Session {
                 0,
             ))?
         };
-        let method = wide_null(request.method);
-        let path = wide_null(request.path);
+        let method = wide0(request.method);
+        let path = wide0(request.path);
         let flags =
             if request.secure { WINHTTP_FLAG_SECURE } else { WINHTTP_OPEN_REQUEST_FLAGS(0) };
         let req = unsafe {
@@ -346,8 +347,33 @@ pub(crate) fn parse_retry_after(value: &str, now_timestamp: i64) -> Duration {
     Duration::from_secs(seconds.clamp(MIN_RETRY_AFTER_SECS, MAX_RETRY_AFTER_SECS))
 }
 
-fn wide_null(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain(std::iter::once(0)).collect()
+fn has_ascii_token(lower: &str, tokens: &[&str]) -> bool {
+    lower.split(|c: char| !c.is_ascii_alphanumeric()).any(|part| tokens.contains(&part))
+}
+
+/// Returns true when an error message signals rate limiting (HTTP 429 or quota throttling).
+pub fn is_rate_limit_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    has_ascii_token(&lower, &["429"])
+        || ["rate limit", "rate-limit", "too many requests", "resource_exhausted"]
+            .iter()
+            .any(|needle| lower.contains(needle))
+}
+
+/// Returns true when an error message signals an auth/rate-limit block (401/403/429) that should
+/// suppress fallback HTTP requests. Intentionally avoids matching generic `"rate limit"` phrases.
+pub fn is_blocked_http_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    has_ascii_token(&lower, &["429", "401", "403"])
+        || [
+            "unauthorized",
+            "forbidden",
+            "too many requests",
+            "connector_rate_limit",
+            "fallback suppressed",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
 }
 
 #[cfg(test)]
@@ -438,5 +464,19 @@ mod tests {
         assert_eq!(disable_feature_flags(true, true), WINHTTP_DISABLE_COOKIES);
         assert_eq!(disable_feature_flags(false, false), WINHTTP_DISABLE_REDIRECTS);
         assert_eq!(disable_feature_flags(true, false), 0);
+    }
+
+    #[test]
+    fn classifies_rate_limit_and_blocked_http_messages_distinctly() {
+        assert!(is_rate_limit_message("HTTP 429 Too Many Requests"));
+        assert!(is_rate_limit_message("RESOURCE_EXHAUSTED"));
+        assert!(is_rate_limit_message("error: rate-limit exceeded"));
+        assert!(!is_rate_limit_message("connection timed out"));
+
+        assert!(is_blocked_http_message("401 Unauthorized"));
+        assert!(is_blocked_http_message("403 Forbidden"));
+        assert!(is_blocked_http_message("HTTP 429"));
+        assert!(is_blocked_http_message("connector_rate_limit"));
+        assert!(!is_blocked_http_message("failed to fetch codex rate limits: timed out"));
     }
 }

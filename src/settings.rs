@@ -1,9 +1,9 @@
 use crate::history::UsageLedger;
 use crate::model::{ProviderKind, QuotaKind};
+use crate::winutil::wide0;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Write};
-use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -272,10 +272,6 @@ fn replace_file(temporary: &Path, destination: &Path) -> io::Result<()> {
         }
     };
     result.map_err(|_| io::Error::last_os_error())
-}
-
-fn wide0(path: &Path) -> Vec<u16> {
-    path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 use crate::winhttp::{ProxyMode, Request, Session, Timeouts, WinHttpError};
+use crate::winutil::wide0;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
@@ -769,11 +770,6 @@ fn split_https_url(url: &str) -> Option<(&str, &str)> {
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn wide0(value: impl AsRef<OsStr>) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-    value.as_ref().encode_wide().chain(std::iter::once(0)).collect()
 }
 
 #[cfg(test)]

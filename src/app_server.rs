@@ -1,6 +1,7 @@
 use crate::model::{
     ParseError, QuotaSnapshot, TokenUsageSnapshot, parse_snapshot, parse_token_usage,
 };
+use crate::process::{IsolatedChild, IsolationPolicy, ProcessError};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -8,25 +9,11 @@ use std::collections::{HashMap, hash_map::Entry};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
-use std::os::windows::io::AsRawHandle;
-use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
-use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
-};
-use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-    SetInformationJobObject,
-};
-use windows::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
-};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const OPTIONAL_USAGE_GRACE: Duration = Duration::from_millis(900);
@@ -246,21 +233,24 @@ fn with_session_observed<T>(
     ) -> Result<T, AppServerError>,
     supplement_allowed: &mut bool,
 ) -> Result<T, AppServerError> {
-    let (mut child, suspended_thread) = spawn_suspended(command)?;
-    let job = match JobGuard::assign(&child) {
-        Ok(job) => job,
-        Err(error) => {
-            terminate(&mut child);
-            return Err(AppServerError::ProcessIsolation(error.to_string()));
-        }
-    };
-    if let Err(error) = suspended_thread.resume() {
-        terminate(&mut child);
-        return Err(AppServerError::ProcessIsolation(error.to_string()));
-    }
-    let stdout = child.stdout.take().ok_or(AppServerError::Closed)?;
-    let stderr = child.stderr.take().ok_or(AppServerError::Closed)?;
-    let mut stdin = child.stdin.take().ok_or(AppServerError::Closed)?;
+    let mut cmd = Command::new(&command.program);
+    cmd.args(&command.args)
+        .arg("app-server")
+        .arg("--stdio")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut isolated = IsolatedChild::spawn(&mut cmd, IsolationPolicy::PROCESS_TREE).map_err(
+        |error| match error {
+            ProcessError::Spawn(source) => AppServerError::Spawn(source),
+            ProcessError::Isolation(message) => AppServerError::ProcessIsolation(message),
+            ProcessError::Timeout => AppServerError::Timeout,
+            ProcessError::Wait(source) => AppServerError::Io(source),
+        },
+    )?;
+    let stdout = isolated.child.stdout.take().ok_or(AppServerError::Closed)?;
+    let stderr = isolated.child.stderr.take().ok_or(AppServerError::Closed)?;
+    let mut stdin = isolated.child.stdin.take().ok_or(AppServerError::Closed)?;
     let (sender, receiver) = mpsc::channel::<String>();
     let reader = thread::Builder::new()
         .name("codex-status-stdout".to_owned())
@@ -302,8 +292,7 @@ fn with_session_observed<T>(
     // Closing the job first terminates the complete app-server process tree. A
     // descendant can inherit stdout/stderr, so joining readers before this
     // close could otherwise block forever even after the direct child exits.
-    drop(job);
-    terminate(&mut child);
+    isolated.terminate();
     let stderr = error_receiver.recv_timeout(READER_CLEANUP_TIMEOUT).unwrap_or_default();
     *supplement_allowed = !crate::refresh::blocked_error(&stderr);
     // Dropping a JoinHandle detaches it. The job close normally makes both
@@ -471,33 +460,6 @@ fn parse_account_responses(
         })
     })();
     (snapshot, account_key)
-}
-
-fn spawn_suspended(spec: &CommandSpec) -> Result<(Child, SuspendedThread), AppServerError> {
-    let mut command = Command::new(&spec.program);
-    command
-        .args(&spec.args)
-        .arg("app-server")
-        .arg("--stdio")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .creation_flags(CREATE_NO_WINDOW.0 | CREATE_SUSPENDED.0);
-    let mut child = command.spawn().map_err(AppServerError::Spawn)?;
-    match SuspendedThread::find(child.id()) {
-        Ok(thread) => Ok((child, thread)),
-        Err(error) => {
-            terminate(&mut child);
-            Err(AppServerError::ProcessIsolation(error.to_string()))
-        }
-    }
-}
-
-fn terminate(child: &mut Child) {
-    if child.try_wait().ok().flatten().is_none() {
-        let _ = child.kill();
-    }
-    let _ = child.wait();
 }
 
 fn write_json(writer: &mut impl Write, value: &Value) -> Result<(), AppServerError> {
@@ -883,82 +845,6 @@ fn find_node() -> Option<PathBuf> {
 
 fn path_directories() -> Vec<PathBuf> {
     env::var_os("PATH").map(|path| env::split_paths(&path).collect()).unwrap_or_default()
-}
-
-struct JobGuard(HANDLE);
-
-struct SuspendedThread(HANDLE);
-
-impl SuspendedThread {
-    fn find(process_id: u32) -> windows::core::Result<Self> {
-        unsafe {
-            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)?;
-            let mut entry = THREADENTRY32 {
-                dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
-                ..Default::default()
-            };
-            let result = (|| {
-                Thread32First(snapshot, &mut entry)?;
-                loop {
-                    if entry.th32OwnerProcessID == process_id {
-                        return OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID)
-                            .map(Self);
-                    }
-                    if Thread32Next(snapshot, &mut entry).is_err() {
-                        return Err(windows::core::Error::from_thread());
-                    }
-                }
-            })();
-            let _ = CloseHandle(snapshot);
-            result
-        }
-    }
-
-    fn resume(&self) -> windows::core::Result<()> {
-        let previous_count = unsafe { ResumeThread(self.0) };
-        if previous_count == u32::MAX { Err(windows::core::Error::from_thread()) } else { Ok(()) }
-    }
-}
-
-impl Drop for SuspendedThread {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = CloseHandle(self.0);
-        }
-    }
-}
-
-impl JobGuard {
-    fn assign(child: &Child) -> windows::core::Result<Self> {
-        unsafe {
-            let job = CreateJobObjectW(None, None)?;
-            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            if let Err(error) = SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                &limits as *const _ as *const _,
-                std::mem::size_of_val(&limits) as u32,
-            ) {
-                let _ = CloseHandle(job);
-                return Err(error);
-            }
-            let process = HANDLE(child.as_raw_handle());
-            if let Err(error) = AssignProcessToJobObject(job, process) {
-                let _ = CloseHandle(job);
-                return Err(error);
-            }
-            Ok(Self(job))
-        }
-    }
-}
-
-impl Drop for JobGuard {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = CloseHandle(self.0);
-        }
-    }
 }
 
 #[cfg(test)]

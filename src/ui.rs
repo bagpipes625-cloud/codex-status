@@ -3,6 +3,7 @@ use crate::model::{
     AccountSummary, DisplayState, ProviderKind, QuotaAvailability, QuotaKind, QuotaWindow,
     RefreshState,
 };
+use crate::winutil::wide0;
 use chrono::{DateTime, Datelike, Local};
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -2109,10 +2110,6 @@ pub fn scale(value: i32, dpi: u32) -> i32 {
 
 const fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
     COLORREF(red as u32 | ((green as u32) << 8) | ((blue as u32) << 16))
-}
-
-fn wide0(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 #[cfg(test)]

@@ -271,19 +271,7 @@ fn account_changed() -> AppServerFailure {
 }
 
 pub(crate) fn blocked_error(message: &str) -> bool {
-    let message = message.to_ascii_lowercase();
-    message
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|part| matches!(part, "429" | "401" | "403"))
-        || [
-            "unauthorized",
-            "forbidden",
-            "too many requests",
-            "connector_rate_limit",
-            "fallback suppressed",
-        ]
-        .iter()
-        .any(|word| message.contains(word))
+    crate::winhttp::is_blocked_http_message(message)
 }
 
 fn missing(primary: &Result<AppServerSnapshot, AppServerFailure>) -> Vec<Endpoint> {

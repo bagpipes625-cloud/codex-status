@@ -5,6 +5,7 @@ use crate::icon::{OwnedIcon, create_icon, tone_for};
 use crate::model::QuotaSnapshot;
 use crate::model::{DisplayState, ProviderKind, QuotaAvailability, QuotaKind, RefreshState};
 use crate::settings::{AppStore, Settings};
+use crate::winutil::wide0;
 use crate::{startup, ui, updater};
 use chrono::{Datelike, Local, Utc};
 use std::cell::Cell;
@@ -2545,10 +2546,6 @@ fn copy_utf16<const N: usize>(target: &mut [u16; N], value: &str) {
     {
         *destination = source;
     }
-}
-
-fn wide0(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 fn friendly_error(error: &str, locale: ui::Locale) -> String {
