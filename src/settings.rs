@@ -1,5 +1,5 @@
 use crate::history::UsageLedger;
-use crate::model::{ProviderKind, QuotaKind, QuotaSnapshot};
+use crate::model::{ProviderKind, QuotaKind};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Write};
@@ -31,6 +31,7 @@ pub struct Settings {
     pub theme: String,
     pub onboarding_shown: bool,
     pub last_alert_reset: Option<i64>,
+    pub last_alert_reset_gemini: Option<i64>,
 }
 
 impl Default for Settings {
@@ -44,11 +45,26 @@ impl Default for Settings {
             theme: "system".to_owned(),
             onboarding_shown: false,
             last_alert_reset: None,
+            last_alert_reset_gemini: None,
         }
     }
 }
 
 impl Settings {
+    pub fn last_alert_reset_for(&self, provider: ProviderKind) -> Option<i64> {
+        match provider {
+            ProviderKind::Codex => self.last_alert_reset,
+            ProviderKind::Gemini => self.last_alert_reset_gemini,
+        }
+    }
+
+    pub fn set_last_alert_reset_for(&mut self, provider: ProviderKind, value: Option<i64>) {
+        match provider {
+            ProviderKind::Codex => self.last_alert_reset = value,
+            ProviderKind::Gemini => self.last_alert_reset_gemini = value,
+        }
+    }
+
     pub fn normalize(&mut self) {
         if !matches!(self.refresh_minutes, 1 | 5 | 15) {
             self.refresh_minutes = 5;
@@ -63,15 +79,6 @@ impl Settings {
             self.theme = "system".to_owned();
         }
     }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(default, rename_all = "camelCase")]
-pub struct PersistedSnapshots {
-    pub provider: ProviderKind,
-    pub codex: Option<QuotaSnapshot>,
-    pub gemini: Option<QuotaSnapshot>,
-    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -147,24 +154,6 @@ impl AppStore {
 
     pub fn save_usage_history(&self, history: &UsageLedger) -> io::Result<()> {
         write_json_atomic(&self.directory.join("usage-history.json"), history)
-    }
-
-    pub fn save_snapshots(
-        &self,
-        provider: ProviderKind,
-        codex: Option<&QuotaSnapshot>,
-        gemini: Option<&QuotaSnapshot>,
-        updated_at: i64,
-    ) -> io::Result<()> {
-        let path = self.directory.join("snapshot.json");
-        let existing = read_json::<PersistedSnapshots>(&path, SMALL_STATE_LIMIT);
-        let payload = PersistedSnapshots {
-            provider,
-            codex: codex.cloned().or_else(|| existing.as_ref().and_then(|s| s.codex.clone())),
-            gemini: gemini.cloned().or_else(|| existing.as_ref().and_then(|s| s.gemini.clone())),
-            updated_at,
-        };
-        write_json_atomic(&path, &payload)
     }
 
     pub fn updates_directory(&self) -> PathBuf {
@@ -312,10 +301,22 @@ mod tests {
         let settings: Settings = serde_json::from_value(serde_json::json!({
             "refreshMinutes": 5,
             "locale": "auto",
-            "theme": "system"
+            "theme": "system",
+            "lastAlertReset": 1_700_000_000
         }))
         .unwrap();
         assert_eq!(settings.display_quota, QuotaKind::FiveHour);
+        assert_eq!(settings.last_alert_reset_for(ProviderKind::Codex), Some(1_700_000_000));
+        assert_eq!(settings.last_alert_reset_for(ProviderKind::Gemini), None);
+    }
+
+    #[test]
+    fn alert_reset_timestamps_are_isolated_per_provider() {
+        let mut settings = Settings::default();
+        settings.set_last_alert_reset_for(ProviderKind::Codex, Some(100));
+        settings.set_last_alert_reset_for(ProviderKind::Gemini, Some(200));
+        assert_eq!(settings.last_alert_reset_for(ProviderKind::Codex), Some(100));
+        assert_eq!(settings.last_alert_reset_for(ProviderKind::Gemini), Some(200));
     }
 
     #[test]

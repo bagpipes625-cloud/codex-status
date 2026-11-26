@@ -27,8 +27,8 @@ $info.Environment['LOCALAPPDATA']=$fixture
 $process=[Diagnostics.Process]::Start($info)
 try {
  Start-Sleep -Seconds 3
- $main=[ResetFlowNative]::FindWindow("CodexStatus.$Channel.MainWindow.v1",'CodexStatus')
- $flyout=[ResetFlowNative]::FindWindow("CodexStatus.$Channel.FlyoutWindow.v1",'CodexStatus')
+ $main=[ResetFlowNative]::FindWindow("CodexStatus.$Channel.MainWindow.v1",'AgentStatus')
+ $flyout=[ResetFlowNative]::FindWindow("CodexStatus.$Channel.FlyoutWindow.v1",'AgentStatus')
  [uint32]$windowPid=0
  [void][ResetFlowNative]::GetWindowThreadProcessId($main,[ref]$windowPid)
  if ($windowPid -ne $process.Id) { throw 'Fixture window PID mismatch; refusing UI interaction' }
@@ -87,7 +87,7 @@ try {
  Write-Output "PASS: real AppState + isolated fake RPC; cancel sends nothing, explicit confirm consumes one fixture, hide/reopen preserves completion feedback, pending clears, automatic refresh runs. $fixture"
 } finally {
  if (!$process.HasExited) {
-  $main=[ResetFlowNative]::FindWindow("CodexStatus.$Channel.MainWindow.v1",'CodexStatus')
+  $main=[ResetFlowNative]::FindWindow("CodexStatus.$Channel.MainWindow.v1",'AgentStatus')
   [uint32]$windowPid=0
   [void][ResetFlowNative]::GetWindowThreadProcessId($main,[ref]$windowPid)
   if ($windowPid -eq $process.Id) { [void][ResetFlowNative]::PostMessage($main,0x10,0,0) }

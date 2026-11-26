@@ -602,6 +602,10 @@ pub fn release_card_renderer() {
     direct2d::release_all();
 }
 
+pub fn reset_card_renderer_fallback() {
+    direct2d::reset_fallback();
+}
+
 unsafe fn draw_card(
     hdc: HDC,
     state: &DisplayState,

@@ -44,7 +44,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CS_DROPSHADOW, CS_HREDRAW, CS_VREDRAW, CreatePopupMenu, CreateWindowExW,
     DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW, GetCursorPos,
     GetMessageW, GetWindowRect, HMENU, IDC_ARROW, IsWindowVisible, KillTimer, LoadCursorW,
-    MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, PostQuitMessage,
+    MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, PostQuitMessage,
     RegisterClassExW, RegisterWindowMessageW, SM_CXSMICON, SW_HIDE, SW_SHOWNORMAL, SWP_NOACTIVATE,
     SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
     TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
@@ -470,7 +470,7 @@ struct AppState {
     hovered_history_values: bool,
     refresh_button_pressed: bool,
     history_wheel: HistoryWheelState,
-    reset_refresh: ResetRefreshState,
+    reset_refresh: [ResetRefreshState; 2],
 }
 
 pub fn run() -> Result<(), AppError> {
@@ -613,7 +613,7 @@ pub fn run() -> Result<(), AppError> {
         hovered_history_values: false,
         refresh_button_pressed: false,
         history_wheel: HistoryWheelState::default(),
-        reset_refresh: ResetRefreshState::default(),
+        reset_refresh: Default::default(),
     });
     let raw = Box::into_raw(state);
     STATE.with(|slot| slot.set(raw));
@@ -782,6 +782,12 @@ unsafe extern "system" fn main_window_proc(
                 return LRESULT(0);
             }
             WM_DESTROY => {
+                let state_ptr = STATE.with(Cell::get);
+                if !state_ptr.is_null()
+                    && let Some(_state_borrow) = StateBorrow::acquire(state_ptr)
+                {
+                    (&mut *state_ptr).cleanup_window_resources();
+                }
                 ui::release_card_renderer();
                 PostQuitMessage(0);
                 return LRESULT(0);
@@ -858,6 +864,7 @@ unsafe extern "system" fn main_window_proc(
                     return LRESULT(0);
                 }
                 WM_RECONCILE_DISPLAY => {
+                    ui::reset_card_renderer_fallback();
                     state.theme = ui::detect_theme(&state.settings.theme);
                     ui::configure_flyout(state.flyout, state.theme);
                     let _ = state.update_tray(false);
@@ -904,6 +911,7 @@ unsafe extern "system" fn main_window_proc(
                     return LRESULT(0);
                 }
                 WM_SETTINGCHANGE | WM_DISPLAYCHANGE => {
+                    ui::reset_card_renderer_fallback();
                     state.theme = ui::detect_theme(&state.settings.theme);
                     ui::configure_flyout(state.flyout, state.theme);
                     let _ = state.update_tray(false);
@@ -1494,14 +1502,15 @@ impl AppState {
                     self.provider_caches[idx].failures = 0;
                     self.provider_caches[idx].active_account_key = snapshot.account_key.clone();
                     self.provider_caches[idx].display = Some(DisplayState::live(snapshot.quota));
-                    self.usage_history.record_refresh(
-                        snapshot.account_key.as_deref(),
-                        snapshot.token_usage.as_ref(),
-                        Utc::now().timestamp(),
-                    );
-                    self.history_dirty = true;
-                    self.persist_usage_history(false);
-                    self.persist_snapshots();
+                    if outcome.provider == ProviderKind::Codex {
+                        self.usage_history.record_refresh(
+                            snapshot.account_key.as_deref(),
+                            snapshot.token_usage.as_ref(),
+                            Utc::now().timestamp(),
+                        );
+                        self.history_dirty = true;
+                        self.persist_usage_history(false);
+                    }
                 }
                 Err(error) => {
                     self.provider_caches[idx].failures =
@@ -1543,16 +1552,17 @@ impl AppState {
             Ok(snapshot) => {
                 self.failures = 0;
                 self.active_account_key = snapshot.account_key.clone();
-                self.usage_history.record_refresh(
-                    snapshot.account_key.as_deref(),
-                    snapshot.token_usage.as_ref(),
-                    Utc::now().timestamp(),
-                );
-                self.history_dirty = true;
-                self.refresh_history_view_cache();
-                self.persist_usage_history(false);
+                if outcome.provider == ProviderKind::Codex {
+                    self.usage_history.record_refresh(
+                        snapshot.account_key.as_deref(),
+                        snapshot.token_usage.as_ref(),
+                        Utc::now().timestamp(),
+                    );
+                    self.history_dirty = true;
+                    self.refresh_history_view_cache();
+                    self.persist_usage_history(false);
+                }
                 self.display = DisplayState::live(snapshot.quota);
-                self.persist_snapshots();
                 if outcome.complete {
                     self.reset_refresh_timer(self.settings.refresh_minutes.saturating_mul(60_000));
                 }
@@ -1627,25 +1637,6 @@ impl AppState {
         }
     }
 
-    fn persist_snapshots(&self) {
-        let snapshot_for = |provider: ProviderKind| {
-            if self.settings.provider == provider {
-                self.display.snapshot.as_ref()
-            } else {
-                self.provider_caches[provider_index(provider)]
-                    .display
-                    .as_ref()
-                    .and_then(|display| display.snapshot.as_ref())
-            }
-        };
-        let _ = self.store.save_snapshots(
-            self.settings.provider,
-            snapshot_for(ProviderKind::Codex),
-            snapshot_for(ProviderKind::Gemini),
-            Utc::now().timestamp(),
-        );
-    }
-
     fn finish_ready_background_work(&mut self) {
         self.finish_reset_if_ready();
         while let Ok(outcome) = self.refresh_results.try_recv() {
@@ -1658,7 +1649,8 @@ impl AppState {
 
     fn refresh_time_sensitive_state(&mut self) {
         let now = Utc::now().timestamp();
-        if self.reset_refresh.begin_if_due(&self.display, now, self.refreshing) {
+        let idx = provider_index(self.settings.provider);
+        if self.reset_refresh[idx].begin_if_due(&self.display, now, self.refreshing) {
             self.start_refresh(false);
         }
         if self
@@ -1934,17 +1926,20 @@ impl AppState {
             return;
         };
         let alert_key = alert_cycle_key(alert);
+        let provider = self.settings.provider;
         if alert.percent >= threshold {
             // A quota window without a reset timestamp uses a stable synthetic
             // key. Clear it after recovery so a later low-quota event can alert
             // again instead of being suppressed forever.
-            if alert.reset.is_none() && self.settings.last_alert_reset == Some(alert_key) {
-                self.settings.last_alert_reset = None;
+            if alert.reset.is_none()
+                && self.settings.last_alert_reset_for(provider) == Some(alert_key)
+            {
+                self.settings.set_last_alert_reset_for(provider, None);
                 self.persist_internal_settings();
             }
             return;
         }
-        if self.settings.last_alert_reset == Some(alert_key) {
+        if self.settings.last_alert_reset_for(provider) == Some(alert_key) {
             return;
         }
         let quota_label = match (self.locale, alert.kind) {
@@ -1953,14 +1948,14 @@ impl AppState {
             (_, QuotaKind::FiveHour) => "5-hour remaining:",
             (_, QuotaKind::Weekly) => "Weekly remaining:",
         };
-        let title = match self.settings.provider {
+        let title = match provider {
             ProviderKind::Codex => self.locale.text("Codex quota is running low", "Codex 额度偏低"),
             ProviderKind::Gemini => {
                 self.locale.text("Gemini quota is running low", "Gemini 额度偏低")
             }
         };
         self.show_balloon(title, &format!("{quota_label} {}%", alert.percent));
-        self.settings.last_alert_reset = Some(alert_key);
+        self.settings.set_last_alert_reset_for(provider, Some(alert_key));
         self.persist_internal_settings();
     }
 
@@ -2165,17 +2160,20 @@ impl AppState {
         let menu = owned_menu.0;
         let startup_enabled = startup::is_enabled();
         unsafe {
-            append(
+            let allow_provider_switch = !self.reset_panel.busy;
+            append_item(
                 menu,
                 CMD_PROVIDER_CODEX,
                 "Codex",
                 self.settings.provider == ProviderKind::Codex,
+                allow_provider_switch,
             )?;
-            append(
+            append_item(
                 menu,
                 CMD_PROVIDER_GEMINI,
                 "Gemini",
                 self.settings.provider == ProviderKind::Gemini,
+                allow_provider_switch,
             )?;
             separator(menu)?;
             append(menu, CMD_REFRESH, self.locale.text("Refresh now", "立即刷新"), false)?;
@@ -2287,7 +2285,7 @@ impl AppState {
     }
 
     fn switch_provider(&mut self, next: ProviderKind) {
-        if self.settings.provider == next {
+        if self.settings.provider == next || self.reset_panel.busy {
             return;
         }
         let current_idx = provider_index(self.settings.provider);
@@ -2372,6 +2370,7 @@ impl AppState {
                         _ => None,
                     };
                     self.settings.last_alert_reset = None;
+                    self.settings.last_alert_reset_gemini = None;
                     self.persist_settings();
                     self.maybe_alert();
                 }
@@ -2452,10 +2451,7 @@ impl AppState {
             );
         }
     }
-}
-
-impl Drop for AppState {
-    fn drop(&mut self) {
+    fn cleanup_window_resources(&mut self) {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH);
             let _ = KillTimer(Some(self.hwnd), TIMER_STARTUP);
@@ -2466,8 +2462,15 @@ impl Drop for AppState {
             if self.tray_added {
                 let data = self.notify_data();
                 let _ = Shell_NotifyIconW(NIM_DELETE, &data);
+                self.tray_added = false;
             }
         }
+    }
+}
+
+impl Drop for AppState {
+    fn drop(&mut self) {
+        self.cleanup_window_resources();
     }
 }
 
@@ -2477,9 +2480,25 @@ unsafe fn append(
     label: &str,
     checked: bool,
 ) -> windows::core::Result<()> {
+    unsafe { append_item(menu, command, label, checked, true) }
+}
+
+unsafe fn append_item(
+    menu: HMENU,
+    command: u32,
+    label: &str,
+    checked: bool,
+    enabled: bool,
+) -> windows::core::Result<()> {
     unsafe {
         let text = wide0(label);
-        let flags = if checked { MF_STRING | MF_CHECKED } else { MF_STRING };
+        let mut flags = MF_STRING;
+        if checked {
+            flags |= MF_CHECKED;
+        }
+        if !enabled {
+            flags |= MF_GRAYED;
+        }
         AppendMenuW(menu, flags, command as usize, PCWSTR(text.as_ptr()))
     }
 }
@@ -2643,6 +2662,29 @@ mod tests {
         assert!(!state.begin_if_due(&display, 100, true));
         assert!(state.begin_if_due(&display, 100, false));
         assert!(!state.begin_if_due(&display, 100, false));
+    }
+
+    #[test]
+    fn reset_refresh_boundaries_are_isolated_per_provider() {
+        let mut states = [ResetRefreshState::default(), ResetRefreshState::default()];
+        let codex_display = display_with_reset_times(Some(500), None);
+        let gemini_display = display_with_reset_times(Some(200), None);
+
+        assert!(states[provider_index(ProviderKind::Codex)].begin_if_due(
+            &codex_display,
+            500,
+            false
+        ));
+        assert!(states[provider_index(ProviderKind::Gemini)].begin_if_due(
+            &gemini_display,
+            500,
+            false
+        ));
+        assert!(!states[provider_index(ProviderKind::Gemini)].begin_if_due(
+            &gemini_display,
+            500,
+            false
+        ));
     }
 
     #[test]

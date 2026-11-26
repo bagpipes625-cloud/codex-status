@@ -12,18 +12,23 @@ use std::io::Read;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::ptr;
-use std::sync::Mutex;
+use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{CloseHandle, GlobalFree, HANDLE, HGLOBAL};
 use windows::Win32::Networking::WinHttp::*;
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JobObjectExtendedLimitInformation, SetInformationJobObject,
 };
-use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+use windows::Win32::System::Threading::{
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
+};
 use windows::core::{PCWSTR, PWSTR, w};
 use winreg::RegKey;
 use winreg::enums::HKEY_CURRENT_USER;
@@ -32,18 +37,27 @@ const LOOPBACK_HOST: PCWSTR = w!("127.0.0.1");
 const GET_USER_STATUS_PATH: &str = "/exa.language_server_pb.LanguageServerService/GetUserStatus";
 const RETRIEVE_QUOTA_PATH: &str =
     "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary";
-const PROCESS_QUERY: &str = r#"$items = @(Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'language_server.exe' -or $_.Name -eq 'language_server_windows_x64.exe') -and $_.CommandLine -like '*--csrf_token*' } | Select-Object ProcessId, Name, CommandLine); ConvertTo-Json -InputObject $items -Compress"#;
+const PROCESS_QUERY: &str = r#"[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $items = @(Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'language_server.exe' -or $_.Name -eq 'language_server_windows_x64.exe') -and $_.CommandLine -like '*--csrf_token*' } | Select-Object ProcessId, Name, CommandLine); ConvertTo-Json -InputObject $items -Compress"#;
 const MAX_DISCOVERY_BYTES: usize = 256 * 1024;
 const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 const TOTAL_DEADLINE: Duration = Duration::from_secs(20);
+const PROCESS_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
+const NETSTAT_TIMEOUT: Duration = Duration::from_secs(5);
+const READER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 const PROXY_CACHE_TTL: Duration = Duration::from_secs(300);
 const AGY_RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(300);
+// `agy -p /usage --output-format json` currently omits email/account_id fields.
+// When no account identifier is present, cap transient-error cache retention to
+// 15 minutes so a switched account cannot keep stale quota across long periods.
+const AGY_UNVERIFIED_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 const AGY_ACCOUNT_KEY: &str = "gemini:agy-cli";
 
 #[derive(Default)]
 pub struct GeminiState {
     blocked_until: Option<Instant>,
     cached_proxy: Option<(Option<String>, Instant)>,
+    last_agy_success: Option<Instant>,
+    last_agy_account_key: Option<String>,
 }
 
 impl GeminiState {
@@ -74,6 +88,24 @@ impl GeminiState {
     fn invalidate_proxy(&mut self) {
         self.cached_proxy = None;
     }
+
+    fn record_agy_success(&mut self, account_key: String, now: Instant) {
+        self.last_agy_account_key = Some(account_key);
+        self.last_agy_success = Some(now);
+    }
+
+    fn clear_agy_session(&mut self) {
+        self.last_agy_account_key = None;
+        self.last_agy_success = None;
+    }
+
+    fn fallback_agy_account_key(&self, now: Instant) -> Option<String> {
+        let key = self.last_agy_account_key.as_deref()?;
+        let observed = self.last_agy_success?;
+        (key == AGY_ACCOUNT_KEY
+            && now.saturating_duration_since(observed) < AGY_UNVERIFIED_CACHE_TTL)
+            .then(|| key.to_owned())
+    }
 }
 
 // Never Debug/Serialize the command line or CSRF token. They live only for one refresh.
@@ -91,12 +123,27 @@ struct ProcessRecord {
     command_line: Option<String>,
 }
 
+fn system32_executable(relative: &str) -> PathBuf {
+    if let Some(root) = std::env::var_os("SystemRoot").or_else(|| std::env::var_os("WINDIR")) {
+        let candidate = PathBuf::from(root).join("System32").join(relative);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    Path::new(relative).file_name().map_or_else(|| PathBuf::from(relative), PathBuf::from)
+}
+
 fn discover_local_processes() -> Result<Vec<LocalProcess>, AppServerError> {
-    let output = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", PROCESS_QUERY])
-        .creation_flags(CREATE_NO_WINDOW.0)
-        .output()
-        .map_err(|_| local_error("Could not inspect the running Antigravity process"))?;
+    let mut cmd = Command::new(system32_executable(r"WindowsPowerShell\v1.0\powershell.exe"));
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", PROCESS_QUERY]);
+    let output = run_isolated_command(
+        &mut cmd,
+        false,
+        PROCESS_DISCOVERY_TIMEOUT,
+        MAX_DISCOVERY_BYTES,
+        8 * 1024,
+    )
+    .map_err(|_| local_error("Could not inspect the running Antigravity process"))?;
     if !output.status.success() || output.stdout.len() > MAX_DISCOVERY_BYTES {
         return Err(local_error("Could not inspect the running Antigravity process"));
     }
@@ -178,10 +225,10 @@ fn split_command_line(command_line: &str) -> Vec<String> {
 }
 
 fn listening_ports(pid: u32) -> Vec<u16> {
-    let Ok(output) = Command::new("netstat.exe")
-        .args(["-ano", "-p", "tcp"])
-        .creation_flags(CREATE_NO_WINDOW.0)
-        .output()
+    let mut cmd = Command::new(system32_executable("netstat.exe"));
+    cmd.args(["-ano", "-p", "tcp"]);
+    let Ok(output) =
+        run_isolated_command(&mut cmd, false, NETSTAT_TIMEOUT, MAX_DISCOVERY_BYTES, 4 * 1024)
     else {
         return Vec::new();
     };
@@ -516,36 +563,77 @@ fn normalize_proxy_server(raw: &str) -> Option<String> {
     None
 }
 
+struct SuspendedThread(HANDLE);
+
+impl SuspendedThread {
+    fn find(process_id: u32) -> windows::core::Result<Self> {
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)?;
+            let mut entry = THREADENTRY32 {
+                dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+                ..Default::default()
+            };
+            let result = (|| {
+                Thread32First(snapshot, &mut entry)?;
+                loop {
+                    if entry.th32OwnerProcessID == process_id {
+                        return OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID)
+                            .map(Self);
+                    }
+                    if Thread32Next(snapshot, &mut entry).is_err() {
+                        return Err(windows::core::Error::from_thread());
+                    }
+                }
+            })();
+            let _ = CloseHandle(snapshot);
+            result
+        }
+    }
+
+    fn resume(&self) -> windows::core::Result<()> {
+        let previous_count = unsafe { ResumeThread(self.0) };
+        if previous_count == u32::MAX { Err(windows::core::Error::from_thread()) } else { Ok(()) }
+    }
+}
+
+impl Drop for SuspendedThread {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
 struct KillOnCloseJob(HANDLE);
 
 impl KillOnCloseJob {
-    fn attach(child: &Child) -> Option<Self> {
+    fn attach(child: &Child, single_process: bool) -> windows::core::Result<Self> {
         unsafe {
-            let job = CreateJobObjectW(None, None).ok()?;
+            let job = CreateJobObjectW(None, None)?;
             let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-            // Prevent agy.exe from spawning detached background helpers (such as
-            // `agy.exe --bg-updater`, which lacks CREATE_NO_WINDOW and flashes
-            // Windows Terminal every ~15 minutes on Windows 11).
-            limits.BasicLimitInformation.LimitFlags =
-                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
-            limits.BasicLimitInformation.ActiveProcessLimit = 1;
-            if SetInformationJobObject(
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if single_process {
+                // Prevent agy.exe from spawning detached background helpers (such as
+                // `agy.exe --bg-updater`, which lacks CREATE_NO_WINDOW and flashes
+                // Windows Terminal every ~15 minutes on Windows 11).
+                limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+                limits.BasicLimitInformation.ActiveProcessLimit = 1;
+            }
+            if let Err(error) = SetInformationJobObject(
                 job,
                 JobObjectExtendedLimitInformation,
                 (&raw const limits).cast(),
                 std::mem::size_of_val(&limits) as u32,
-            )
-            .is_err()
-            {
+            ) {
                 let _ = CloseHandle(job);
-                return None;
+                return Err(error);
             }
             let process = HANDLE(child.as_raw_handle());
-            if AssignProcessToJobObject(job, process).is_err() {
+            if let Err(error) = AssignProcessToJobObject(job, process) {
                 let _ = CloseHandle(job);
-                return None;
+                return Err(error);
             }
-            Some(Self(job))
+            Ok(Self(job))
         }
     }
 }
@@ -558,6 +646,114 @@ impl Drop for KillOnCloseJob {
     }
 }
 
+struct CommandOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+enum IsolatedCommandError {
+    Spawn,
+    Isolation,
+    Timeout,
+    Wait,
+}
+
+fn terminate_child(child: &mut Child) {
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
+fn run_isolated_command(
+    cmd: &mut Command,
+    single_process: bool,
+    timeout: Duration,
+    max_stdout: usize,
+    max_stderr: usize,
+) -> Result<CommandOutput, IsolatedCommandError> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW.0 | CREATE_SUSPENDED.0);
+
+    let mut child = cmd.spawn().map_err(|_| IsolatedCommandError::Spawn)?;
+    let suspended_thread = match SuspendedThread::find(child.id()) {
+        Ok(thread) => thread,
+        Err(_) => {
+            terminate_child(&mut child);
+            return Err(IsolatedCommandError::Isolation);
+        }
+    };
+    let job = match KillOnCloseJob::attach(&child, single_process) {
+        Ok(job) => job,
+        Err(_) => {
+            terminate_child(&mut child);
+            return Err(IsolatedCommandError::Isolation);
+        }
+    };
+    if suspended_thread.resume().is_err() {
+        drop(job);
+        terminate_child(&mut child);
+        return Err(IsolatedCommandError::Isolation);
+    }
+    drop(suspended_thread);
+
+    let (stdout_tx, stdout_rx) = mpsc::sync_channel(1);
+    let stdout_handle = child.stdout.take().map(|mut pipe| {
+        std::thread::Builder::new()
+            .name("codex-status-gemini-stdout".into())
+            .stack_size(256 * 1024)
+            .spawn(move || {
+                let mut buf = Vec::new();
+                let _ = (&mut pipe).take(max_stdout as u64 + 1).read_to_end(&mut buf);
+                let _ = stdout_tx.send(buf);
+            })
+            .ok()
+    });
+    let (stderr_tx, stderr_rx) = mpsc::sync_channel(1);
+    let stderr_handle = child.stderr.take().map(|mut pipe| {
+        std::thread::Builder::new()
+            .name("codex-status-gemini-stderr".into())
+            .stack_size(256 * 1024)
+            .spawn(move || {
+                let mut buf = Vec::new();
+                let _ = (&mut pipe).take(max_stderr as u64).read_to_end(&mut buf);
+                let _ = stderr_tx.send(buf);
+            })
+            .ok()
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    break Err(IsolatedCommandError::Timeout);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => break Err(IsolatedCommandError::Wait),
+        }
+    };
+
+    // Close the job first to terminate the entire process tree so any inherited
+    // stdout/stderr pipes close before boundedly reclaiming the reader threads.
+    drop(job);
+    if status.is_err() {
+        terminate_child(&mut child);
+    }
+    let stdout = stdout_rx.recv_timeout(READER_CLEANUP_TIMEOUT).unwrap_or_default();
+    let stderr = stderr_rx.recv_timeout(READER_CLEANUP_TIMEOUT).unwrap_or_default();
+    drop(stdout_handle);
+    drop(stderr_handle);
+
+    let status = status?;
+    Ok(CommandOutput { status, stdout, stderr })
+}
+
 fn run_agy_json(
     binary: &Path,
     slash_cmd: &str,
@@ -568,63 +764,29 @@ fn run_agy_json(
     cmd.args(["-p", slash_cmd, "--output-format", "json", "--print-timeout", "15s"])
         .current_dir(std::env::temp_dir())
         .env("AGY_DISABLE_AUTO_UPDATE", "1")
-        .env("AGY_CLI_DISABLE_AUTO_UPDATE", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .creation_flags(CREATE_NO_WINDOW.0);
+        .env("AGY_CLI_DISABLE_AUTO_UPDATE", "1");
 
     if let Some(proxy) = proxy {
         cmd.env("HTTP_PROXY", proxy);
         cmd.env("HTTPS_PROXY", proxy);
     }
 
-    let mut child =
-        cmd.spawn().map_err(|_| local_error("Could not launch Antigravity CLI (agy)"))?;
-    let _job = KillOnCloseJob::attach(&child);
-
-    let stdout_handle = child.stdout.take().map(|mut pipe| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = (&mut pipe).take(MAX_RESPONSE_BYTES as u64 + 1).read_to_end(&mut buf);
-            buf
-        })
-    });
-    let stderr_handle = child.stderr.take().map(|mut pipe| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = (&mut pipe).take(16 * 1024).read_to_end(&mut buf);
-            buf
-        })
-    });
-
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(local_error("Antigravity CLI (agy) timed out"));
-                }
-                std::thread::sleep(Duration::from_millis(50));
+    let output = run_isolated_command(&mut cmd, true, timeout, MAX_RESPONSE_BYTES, 16 * 1024)
+        .map_err(|error| match error {
+            IsolatedCommandError::Spawn => local_error("Could not launch Antigravity CLI (agy)"),
+            IsolatedCommandError::Isolation => {
+                local_error("Could not isolate Antigravity CLI (agy) process")
             }
-            Err(_) => {
-                let _ = child.kill();
-                return Err(local_error("Failed waiting for Antigravity CLI (agy)"));
-            }
-        }
-    };
+            IsolatedCommandError::Timeout => local_error("Antigravity CLI (agy) timed out"),
+            IsolatedCommandError::Wait => local_error("Failed waiting for Antigravity CLI (agy)"),
+        })?;
 
-    let stdout = stdout_handle.and_then(|h| h.join().ok()).unwrap_or_default();
-    let stderr = stderr_handle.and_then(|h| h.join().ok()).unwrap_or_default();
-    if stdout.len() > MAX_RESPONSE_BYTES {
+    if output.stdout.len() > MAX_RESPONSE_BYTES {
         return Err(local_error("Antigravity CLI (agy) response exceeded size limit"));
     }
 
-    if !status.success() {
-        let detail = String::from_utf8_lossy(&stderr).to_ascii_lowercase();
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
         if detail.contains("login") || detail.contains("auth") || detail.contains("sign in") {
             return Err(local_error("Sign in to Antigravity CLI (agy), then refresh"));
         }
@@ -634,7 +796,7 @@ fn run_agy_json(
         return Err(local_error("Antigravity CLI (agy) failed to fetch quota"));
     }
 
-    let value: Value = serde_json::from_slice(&stdout)
+    let value: Value = serde_json::from_slice(&output.stdout)
         .map_err(|_| local_error("Invalid JSON from Antigravity CLI (agy)"))?;
     if let Some(st) = value.get("status").and_then(Value::as_str)
         && !st.eq_ignore_ascii_case("SUCCESS")
@@ -661,16 +823,22 @@ fn is_rate_limit_text(text: &str) -> bool {
         || text.contains("resource_exhausted")
 }
 
-fn agy_failure(error: AppServerError) -> AppServerFailure {
+fn agy_failure(error: AppServerError, state: &Mutex<GeminiState>) -> AppServerFailure {
     let is_auth = matches!(&error, AppServerError::Rpc { message, .. } if {
         let lower = message.to_ascii_lowercase();
         lower.contains("sign in") || lower.contains("login") || lower.contains("auth")
     });
-    AppServerFailure {
-        error,
-        account_key: (!is_auth).then(|| AGY_ACCOUNT_KEY.to_owned()),
-        token_usage: None,
-    }
+    let account_key = if let Ok(mut guard) = state.lock() {
+        if is_auth {
+            guard.clear_agy_session();
+            None
+        } else {
+            guard.fallback_agy_account_key(Instant::now())
+        }
+    } else {
+        None
+    };
+    AppServerFailure { error, account_key, token_usage: None }
 }
 
 fn fetch_via_agy_cli(
@@ -712,15 +880,22 @@ fn fetch_via_agy_cli(
                         guard.block(AGY_RATE_LIMIT_BACKOFF);
                     }
                 }
-                return Err(agy_failure(error));
+                return Err(agy_failure(error, state));
             }
         };
     let snapshot = parse_quota_snapshot(&usage_value, None, chrono::Utc::now().timestamp())
-        .map_err(agy_failure)?;
+        .map_err(|error| agy_failure(error, state))?;
+    // Prefer a hashed account identifier if `agy` includes one; otherwise fall back to
+    // the shared `AGY_ACCOUNT_KEY` whose error-time reuse is bounded by AGY_UNVERIFIED_CACHE_TTL.
+    let account_key =
+        extract_agy_account_key(&usage_value).unwrap_or_else(|| AGY_ACCOUNT_KEY.to_owned());
+    if let Ok(mut guard) = state.lock() {
+        guard.record_agy_success(account_key.clone(), Instant::now());
+    }
     Ok(AppServerSnapshot {
         quota: snapshot,
         token_usage: None,
-        account_key: Some(AGY_ACCOUNT_KEY.to_owned()),
+        account_key: Some(account_key),
         supplement_allowed: false,
     })
 }
@@ -918,6 +1093,23 @@ fn extract_account_key(value: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(hash_account_email)
+}
+
+fn extract_agy_account_key(value: &Value) -> Option<String> {
+    extract_account_key(value).or_else(|| {
+        [
+            "/command/data/email",
+            "/command/data/account_id",
+            "/command/data/accountId",
+            "/account_id",
+            "/accountId",
+        ]
+        .into_iter()
+        .find_map(|pointer| value.pointer(pointer).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(hash_account_email)
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1317,6 +1509,46 @@ mod tests {
         state.block_at(now, AGY_RATE_LIMIT_BACKOFF);
         assert!(!state.can_attempt(now + Duration::from_secs(60)));
         assert!(state.can_attempt(now + AGY_RATE_LIMIT_BACKOFF));
+    }
+
+    #[test]
+    fn process_query_forces_utf8_output_and_system32_resolves_windows_tools() {
+        assert!(
+            PROCESS_QUERY
+                .starts_with("[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false);")
+        );
+        let ps = system32_executable(r"WindowsPowerShell\v1.0\powershell.exe");
+        assert!(ps.to_string_lossy().to_ascii_lowercase().ends_with("powershell.exe"));
+        let netstat = system32_executable("netstat.exe");
+        assert!(netstat.to_string_lossy().to_ascii_lowercase().ends_with("netstat.exe"));
+    }
+
+    #[test]
+    fn agy_account_key_hashes_explicit_identity_and_expires_unverified_fallback() {
+        assert_eq!(
+            extract_agy_account_key(&json!({"status": "SUCCESS", "command": {"data": {}}})),
+            None
+        );
+        let hashed = extract_agy_account_key(&json!({
+            "command": {"data": {"account_id": "acct-42"}}
+        }))
+        .unwrap();
+        assert!(hashed.starts_with("gemini:"));
+        assert!(!hashed.contains("acct-42"));
+
+        let mut state = GeminiState::default();
+        let now = Instant::now();
+        assert_eq!(state.fallback_agy_account_key(now), None);
+
+        state.record_agy_success(AGY_ACCOUNT_KEY.to_owned(), now);
+        assert_eq!(
+            state.fallback_agy_account_key(now + Duration::from_secs(60)).as_deref(),
+            Some(AGY_ACCOUNT_KEY)
+        );
+        assert_eq!(state.fallback_agy_account_key(now + AGY_UNVERIFIED_CACHE_TTL), None);
+
+        state.clear_agy_session();
+        assert_eq!(state.fallback_agy_account_key(now + Duration::from_secs(10)), None);
     }
 
     #[test]

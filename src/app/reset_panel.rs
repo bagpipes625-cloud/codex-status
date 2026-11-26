@@ -280,17 +280,26 @@ impl AppState {
                 self.reset_panel.pending = None;
             }
         }
+        let codex_active = self.settings.provider == ProviderKind::Codex;
         match result {
             Ok(ResetOutcome::Reset | ResetOutcome::AlreadyRedeemed) => {
                 self.reset_panel.confirmation = None;
                 self.reset_panel.confirmation_account = None;
                 self.reset_panel.message = None;
-                self.reset_panel.success = true;
-                self.reset_panel.success_notified = false;
-                self.reset_panel.success_interactive = false;
-                self.reset_panel.open = true;
-                self.history_navigation.page = ui::HistoryPage::Main;
-                if !unsafe { IsWindowVisible(self.flyout) }.as_bool() || !self.full_history_render {
+                if codex_active {
+                    self.reset_panel.success = true;
+                    self.reset_panel.success_notified = false;
+                    self.reset_panel.success_interactive = false;
+                    self.reset_panel.open = true;
+                    self.history_navigation.page = ui::HistoryPage::Main;
+                    if !unsafe { IsWindowVisible(self.flyout) }.as_bool()
+                        || !self.full_history_render
+                    {
+                        self.show_reset_success_balloon();
+                        self.reset_panel.success_notified = true;
+                    }
+                } else {
+                    self.reset_panel.close();
                     self.show_reset_success_balloon();
                     self.reset_panel.success_notified = true;
                 }
@@ -325,16 +334,20 @@ impl AppState {
                 };
             }
         }
-        if !self.full_history_render {
+        if !codex_active || !self.full_history_render {
             let notice = self.reset_panel.message.clone();
             self.reset_panel.close();
             if let Some(message) = notice {
                 self.show_balloon(self.locale.text("Reset not completed", "重置未完成"), &message);
             }
         }
-        self.refresh_pending = false;
-        self.start_refresh(true);
-        self.reset_invalidate();
+        if codex_active {
+            self.refresh_pending = false;
+            self.start_refresh(true);
+            self.reset_invalidate();
+        } else {
+            self.prefetch_other_provider(true);
+        }
     }
 
     pub(super) fn show_reset_success_balloon(&self) {

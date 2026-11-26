@@ -51,9 +51,34 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN;
 use windows::core::{PCWSTR, Result, w};
 use windows_numerics::{Matrix3x2, Vector2};
 
+const MAX_CONSECUTIVE_FAILURES: u8 = 3;
+const DXGI_ERROR_DEVICE_REMOVED: windows::core::HRESULT =
+    windows::core::HRESULT(0x887A_0005_u32 as i32);
+const DXGI_ERROR_DEVICE_RESET: windows::core::HRESULT =
+    windows::core::HRESULT(0x887A_0007_u32 as i32);
+
 thread_local! {
     static RENDERER: RefCell<Option<Renderer>> = const { RefCell::new(None) };
     static PERMANENT_FALLBACK: Cell<bool> = const { Cell::new(false) };
+    static CONSECUTIVE_FAILURES: Cell<u8> = const { Cell::new(0) };
+}
+
+fn is_recoverable_device_loss(code: windows::core::HRESULT) -> bool {
+    matches!(code, D2DERR_RECREATE_TARGET | DXGI_ERROR_DEVICE_REMOVED | DXGI_ERROR_DEVICE_RESET)
+}
+
+fn record_paint_failure(code: windows::core::HRESULT) -> bool {
+    let failures = CONSECUTIVE_FAILURES.with(|count| {
+        let next = count.get().saturating_add(1);
+        count.set(next);
+        next
+    });
+    if !is_recoverable_device_loss(code) || failures >= MAX_CONSECUTIVE_FAILURES {
+        PERMANENT_FALLBACK.with(|fallback| fallback.set(true));
+        true
+    } else {
+        false
+    }
 }
 
 pub(super) struct PaintInput<'a> {
@@ -79,18 +104,23 @@ pub(super) fn paint(input: PaintInput<'_>) -> bool {
         let mut slot = slot.borrow_mut();
         let renderer = match ensure_renderer(&mut slot) {
             Ok(renderer) => renderer,
-            Err(_) => {
-                PERMANENT_FALLBACK.with(|fallback| fallback.set(true));
+            Err(error) => {
+                record_paint_failure(error.code());
                 return false;
             }
         };
         match renderer.paint(&input) {
-            Ok(()) => true,
+            Ok(()) => {
+                CONSECUTIVE_FAILURES.with(|count| count.set(0));
+                true
+            }
             Err(error) => {
+                let code = error.code();
                 renderer.surface = None;
-                if error.code() != D2DERR_RECREATE_TARGET {
-                    PERMANENT_FALLBACK.with(|fallback| fallback.set(true));
+                if matches!(code, DXGI_ERROR_DEVICE_REMOVED | DXGI_ERROR_DEVICE_RESET) {
+                    *slot = None;
                 }
+                record_paint_failure(code);
                 false
             }
         }
@@ -108,9 +138,14 @@ fn ensure_renderer(slot: &mut Option<Renderer>) -> Result<&mut Renderer> {
     Ok(slot.as_mut().expect("renderer initialized"))
 }
 
+pub(super) fn reset_fallback() {
+    PERMANENT_FALLBACK.with(|fallback| fallback.set(false));
+    CONSECUTIVE_FAILURES.with(|count| count.set(0));
+}
+
 pub(super) fn release_all() {
     RENDERER.with(|slot| *slot.borrow_mut() = None);
-    PERMANENT_FALLBACK.with(|fallback| fallback.set(false));
+    reset_fallback();
 }
 
 struct Renderer {
@@ -2065,5 +2100,27 @@ mod tests {
         assert_eq!(heat_color(10, 10, 30, false), super::super::rgb(99, 190, 123));
         assert_eq!(heat_color(30, 10, 30, false), super::super::rgb(248, 105, 107));
         assert_eq!(heat_color(20, 10, 30, false), super::super::rgb(255, 235, 132));
+    }
+
+    #[test]
+    fn recoverable_device_loss_retries_before_fallback_and_resets_on_display_change() {
+        reset_fallback();
+        assert!(is_recoverable_device_loss(D2DERR_RECREATE_TARGET));
+        assert!(is_recoverable_device_loss(DXGI_ERROR_DEVICE_REMOVED));
+        assert!(is_recoverable_device_loss(DXGI_ERROR_DEVICE_RESET));
+        assert!(!is_recoverable_device_loss(windows::Win32::Foundation::E_FAIL));
+
+        assert!(!record_paint_failure(DXGI_ERROR_DEVICE_REMOVED));
+        assert!(!PERMANENT_FALLBACK.with(Cell::get));
+        assert!(!record_paint_failure(DXGI_ERROR_DEVICE_RESET));
+        assert!(!PERMANENT_FALLBACK.with(Cell::get));
+        assert!(record_paint_failure(D2DERR_RECREATE_TARGET));
+        assert!(PERMANENT_FALLBACK.with(Cell::get));
+
+        reset_fallback();
+        assert!(!PERMANENT_FALLBACK.with(Cell::get));
+        assert!(record_paint_failure(windows::Win32::Foundation::E_FAIL));
+        assert!(PERMANENT_FALLBACK.with(Cell::get));
+        reset_fallback();
     }
 }

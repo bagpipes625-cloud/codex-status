@@ -115,9 +115,16 @@ fn repair(
     let Some(credentials) = before else {
         return primary;
     };
-    let Some(identity) = current().filter(|c| credentials.same_account(c)) else {
-        return Err(account_changed());
+    let Some(identity) = current() else {
+        return if primary.as_ref().is_ok_and(|s| s.account_key.is_some()) {
+            primary
+        } else {
+            Err(account_changed())
+        };
     };
+    if !credentials.same_account(&identity) {
+        return Err(account_changed());
+    }
     // A normal credential rotation is not an account switch. Keep valid primary data,
     // but do not issue authenticated fallback requests with the old bearer token.
     if !credentials.same_identity(&identity) {
@@ -170,9 +177,16 @@ fn repair(
             .collect();
         jobs.into_iter().filter_map(|job| job.join().ok()).collect::<Vec<_>>()
     });
-    let Some(identity) = current().filter(|c| credentials.same_account(c)) else {
-        return Err(account_changed());
+    let Some(identity) = current() else {
+        return if primary.as_ref().is_ok_and(|s| s.account_key.is_some()) {
+            primary
+        } else {
+            Err(account_changed())
+        };
     };
+    if !credentials.same_account(&identity) {
+        return Err(account_changed());
+    }
     if !credentials.same_identity(&identity) {
         return primary;
     }
@@ -509,6 +523,40 @@ mod tests {
             |_| {},
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn transient_unreadable_auth_keeps_verified_primary_without_supplementing() {
+        let primary = scoped(snapshot(Some(2), None, true));
+        let expected_credits = primary.quota.account.reset_credits;
+        let result = repair(
+            Ok(primary),
+            Some(credentials("acct", 1)),
+            &Mutex::default(),
+            &|| None,
+            &|_, _| panic!("fallback must not run when auth.json is transiently unreadable"),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(result.quota.account.reset_credits, expected_credits);
+
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let result = repair(
+            Ok(scoped(snapshot(Some(2), None, true))),
+            Some(credentials("acct", 1)),
+            &Mutex::default(),
+            &|| {
+                if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    Some(credentials("acct", 1))
+                } else {
+                    None
+                }
+            },
+            &|_, _| Ok(json!({"available_count":0,"credits":[]})),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(result.quota.account.reset_credits, Some(2));
     }
 
     #[test]

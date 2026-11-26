@@ -33,6 +33,7 @@ const OPTIONAL_USAGE_GRACE: Duration = Duration::from_millis(900);
 const READER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 const ERROR_LIMIT: usize = 240;
 const STDOUT_LINE_LIMIT: usize = 256 * 1024;
+const MAX_FORWARDED_RESPONSE_IDS: usize = 16;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppServerError {
@@ -671,7 +672,7 @@ fn forward_bounded_lines(mut reader: impl Read, sender: mpsc::Sender<String>) {
     let mut chunk = [0_u8; 4096];
     let mut line = Vec::with_capacity(4096);
     let mut overflow = false;
-    let mut forwarded = [false; 4];
+    let mut forwarded = std::collections::HashSet::with_capacity(MAX_FORWARDED_RESPONSE_IDS);
     while let Ok(read) = reader.read(&mut chunk) {
         if read == 0 {
             break;
@@ -684,12 +685,11 @@ fn forward_bounded_lines(mut reader: impl Read, sender: mpsc::Sender<String>) {
                     }
                     let value = String::from_utf8_lossy(&line).into_owned();
                     if let Some(id) = expected_response_id(&value)
-                        && !forwarded[id]
+                        && forwarded.len() < MAX_FORWARDED_RESPONSE_IDS
+                        && forwarded.insert(id)
+                        && sender.send(value).is_err()
                     {
-                        forwarded[id] = true;
-                        if sender.send(value).is_err() {
-                            return;
-                        }
+                        return;
                     }
                 }
                 line.clear();
@@ -707,21 +707,21 @@ fn forward_bounded_lines(mut reader: impl Read, sender: mpsc::Sender<String>) {
     if !overflow && !line.is_empty() {
         let value = String::from_utf8_lossy(&line).into_owned();
         if let Some(id) = expected_response_id(&value)
-            && !forwarded[id]
+            && forwarded.len() < MAX_FORWARDED_RESPONSE_IDS
+            && forwarded.insert(id)
         {
             let _ = sender.send(value);
         }
     }
 }
 
-fn expected_response_id(line: &str) -> Option<usize> {
+fn expected_response_id(line: &str) -> Option<u64> {
     let value = serde_json::from_str::<Value>(line).ok()?;
     let object = value.as_object()?;
     if !object.contains_key("result") && !object.contains_key("error") {
         return None;
     }
-    let id = object.get("id")?.as_u64()?;
-    usize::try_from(id).ok().filter(|id| *id < 4)
+    object.get("id")?.as_u64()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1323,5 +1323,25 @@ mod tests {
                 r#"{"id":3,"result":{}}"#,
             ]
         );
+    }
+
+    #[test]
+    fn stdout_forwarder_accepts_ids_above_three_up_to_bounded_capacity() {
+        let mut source = Vec::new();
+        for id in 0..(MAX_FORWARDED_RESPONSE_IDS as u64 + 4) {
+            source.extend_from_slice(format!(r#"{{"id":{id},"result":{{"n":{id}}}}}"#).as_bytes());
+            source.push(b'\n');
+            // Duplicate of the same ID must be dropped.
+            source
+                .extend_from_slice(format!(r#"{{"id":{id},"result":{{"dup":true}}}}"#).as_bytes());
+            source.push(b'\n');
+        }
+        let (sender, receiver) = mpsc::channel();
+        forward_bounded_lines(std::io::Cursor::new(source), sender);
+        let forwarded: Vec<_> = receiver.into_iter().collect();
+        assert_eq!(forwarded.len(), MAX_FORWARDED_RESPONSE_IDS);
+        assert!(forwarded.iter().any(|line| line.contains(r#""id":4"#)));
+        assert!(forwarded.iter().any(|line| line.contains(r#""id":15"#)));
+        assert!(!forwarded.iter().any(|line| line.contains(r#""id":16"#)));
     }
 }
