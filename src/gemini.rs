@@ -972,13 +972,15 @@ fn parse_window_minutes(bucket: &Value) -> Option<u64> {
 
 fn parse_reset_time(bucket: &Value) -> Option<i64> {
     let field = bucket.get("resetTime").or_else(|| bucket.get("reset_time"))?;
-    if let Some(ts) = field.as_i64() {
-        return Some(ts);
-    }
-    field
-        .as_str()
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.timestamp())
+    let ts = if let Some(ts) = field.as_i64() {
+        Some(ts)
+    } else {
+        field
+            .as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.timestamp())
+    };
+    ts.filter(|value| *value > 0)
 }
 
 fn parse_bucket_window(bucket: &Value) -> Option<QuotaWindow> {
@@ -1238,6 +1240,19 @@ mod tests {
         let claude = snap.account.claude_quotas.as_ref().unwrap();
         assert_eq!(claude.weekly.as_ref().unwrap().display_percent(), 100);
         assert_eq!(claude.five_hour.as_ref().unwrap().display_percent(), 100);
+    }
+
+    #[test]
+    fn parse_reset_time_treats_epoch_zero_and_non_positive_as_none() {
+        assert_eq!(parse_reset_time(&json!({ "reset_time": "1970-01-01T00:00:00Z" })), None);
+        assert_eq!(parse_reset_time(&json!({ "resetTime": "1970-01-01T00:00:00Z" })), None);
+        assert_eq!(parse_reset_time(&json!({ "reset_time": 0 })), None);
+        assert_eq!(parse_reset_time(&json!({ "reset_time": -1 })), None);
+        assert_eq!(
+            parse_reset_time(&json!({ "reset_time": "2026-11-17T17:14:00Z" })),
+            Some(1_794_935_640)
+        );
+        assert_eq!(parse_reset_time(&json!({ "reset_time": 1_794_935_640 })), Some(1_794_935_640));
     }
 
     #[test]

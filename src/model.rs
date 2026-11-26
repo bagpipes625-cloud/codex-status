@@ -5,6 +5,14 @@ use serde_json::Value;
 pub const WEEK_MINUTES: u64 = 7 * 24 * 60;
 pub const SESSION_MINUTES: u64 = 5 * 60;
 
+pub fn is_five_hour_window(window_minutes: u64) -> bool {
+    ((4 * 60)..=(6 * 60)).contains(&window_minutes)
+}
+
+pub fn is_weekly_window(window_minutes: u64) -> bool {
+    ((6 * 24 * 60)..=(8 * 24 * 60)).contains(&window_minutes)
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ProviderKind {
@@ -61,8 +69,9 @@ impl QuotaWindow {
     }
 
     pub fn is_unused(&self, now: i64) -> bool {
-        self.window_minutes == SESSION_MINUTES
-            && self.display_percent() == 100
+        (is_five_hour_window(self.window_minutes) || is_weekly_window(self.window_minutes))
+            && self.used_percent <= 0.0
+            && self.remaining_percent >= 100.0
             && self.resets_at.is_none_or(|reset| reset <= now)
     }
 
@@ -332,12 +341,10 @@ pub fn parse_snapshot(
         }
     }
 
-    let weekly_index =
-        windows.iter().position(|window| window.window_minutes == WEEK_MINUTES).or_else(|| {
-            windows
-                .iter()
-                .position(|window| ((6 * 24 * 60)..=(8 * 24 * 60)).contains(&window.window_minutes))
-        });
+    let weekly_index = windows
+        .iter()
+        .position(|window| window.window_minutes == WEEK_MINUTES)
+        .or_else(|| windows.iter().position(|window| is_weekly_window(window.window_minutes)));
     let weekly = weekly_index.map(|index| windows[index].clone());
 
     let session = windows
@@ -350,7 +357,7 @@ pub fn parse_snapshot(
                 .iter()
                 .enumerate()
                 .filter(|(index, _)| Some(*index) != weekly_index)
-                .find(|(_, window)| ((4 * 60)..=(6 * 60)).contains(&window.window_minutes))
+                .find(|(_, window)| is_five_hour_window(window.window_minutes))
         })
         .map(|(_, window)| window.clone());
 
@@ -787,5 +794,62 @@ mod tests {
         };
         assert!(!consumed.is_unused(200));
         assert!(!consumed.is_cache_valid(200, 150));
+    }
+
+    #[test]
+    fn unused_weekly_window_stays_visible_with_none_or_legacy_zero_reset() {
+        for resets_at in [None, Some(0)] {
+            let unused = QuotaWindow {
+                used_percent: 0.0,
+                remaining_percent: 100.0,
+                window_minutes: WEEK_MINUTES,
+                resets_at,
+            };
+            assert!(unused.is_unused(200));
+            assert!(unused.is_cache_valid(200, 150));
+            assert!(!unused.is_cache_valid(2000, 150));
+        }
+
+        let consumed = QuotaWindow {
+            used_percent: 10.0,
+            remaining_percent: 90.0,
+            window_minutes: WEEK_MINUTES,
+            resets_at: Some(0),
+        };
+        assert!(!consumed.is_unused(200));
+        assert!(!consumed.is_cache_valid(200, 150));
+    }
+
+    #[test]
+    fn slightly_used_window_is_not_misclassified_as_unused() {
+        let slightly_used = QuotaWindow {
+            used_percent: 0.3,
+            remaining_percent: 99.7,
+            window_minutes: WEEK_MINUTES,
+            resets_at: Some(100),
+        };
+        assert_eq!(slightly_used.display_percent(), 100);
+        assert!(!slightly_used.is_unused(200));
+        assert!(!slightly_used.is_cache_valid(200, 150));
+    }
+
+    #[test]
+    fn unused_check_accepts_fallback_five_hour_and_weekly_window_durations() {
+        for window_minutes in [4 * 60, 6 * 60, 6 * 24 * 60, WEEK_MINUTES + 1, 8 * 24 * 60] {
+            let window = QuotaWindow {
+                used_percent: 0.0,
+                remaining_percent: 100.0,
+                window_minutes,
+                resets_at: None,
+            };
+            assert!(window.is_unused(200), "expected {window_minutes} to be recognized");
+        }
+        let short = QuotaWindow {
+            used_percent: 0.0,
+            remaining_percent: 100.0,
+            window_minutes: 60,
+            resets_at: None,
+        };
+        assert!(!short.is_unused(200));
     }
 }

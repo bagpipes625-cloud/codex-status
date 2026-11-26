@@ -1787,7 +1787,10 @@ fn version_text() -> String {
 }
 
 fn reset_details(window: &QuotaWindow, locale: Locale) -> (String, String) {
-    let now = Local::now().timestamp();
+    reset_details_at(window, Local::now().timestamp(), locale)
+}
+
+fn reset_details_at(window: &QuotaWindow, now: i64, locale: Locale) -> (String, String) {
     if window.is_unused(now) {
         return (
             locale.text("Unused", "未使用").to_owned(),
@@ -2250,12 +2253,12 @@ mod tests {
     #[test]
     fn reset_countdown_never_goes_negative() {
         let window = QuotaWindow {
-            used_percent: 0.0,
-            remaining_percent: 100.0,
+            used_percent: 20.0,
+            remaining_percent: 80.0,
             window_minutes: 10_080,
             resets_at: Some(1),
         };
-        let (countdown, _) = reset_details(&window, Locale::English);
+        let (countdown, _) = reset_details_at(&window, 100, Locale::English);
         assert!(!countdown.contains('-'));
     }
 
@@ -2272,6 +2275,7 @@ mod tests {
         use chrono::TimeZone;
 
         let reset = Local.with_ymd_and_hms(2026, 8, 2, 11, 0, 0).single().unwrap().timestamp();
+        let now = reset - 3_600;
         let window = QuotaWindow {
             used_percent: 0.0,
             remaining_percent: 100.0,
@@ -2279,8 +2283,12 @@ mod tests {
             resets_at: Some(reset),
         };
 
-        assert_eq!(reset_details(&window, Locale::Chinese).1, "8月2日 11:00");
-        assert_eq!(reset_details(&window, Locale::English).1, "08/02 11:00");
+        assert_eq!(reset_details_at(&window, now, Locale::Chinese).1, "8月2日 11:00");
+        assert_eq!(reset_details_at(&window, now, Locale::English).1, "08/02 11:00");
+        assert_eq!(
+            reset_details_at(&window, reset, Locale::Chinese),
+            ("未使用".to_owned(), "使用后计时".to_owned())
+        );
     }
 
     #[test]
@@ -2426,5 +2434,48 @@ mod tests {
         assert_eq!(format_tokens(1_230_000_000, Locale::Chinese), "12.3亿");
         assert_eq!(format_tokens(78_983_000, Locale::Chinese), "7898万");
         assert_eq!(format_tokens(120_000_000, Locale::Chinese), "1.2亿");
+    }
+
+    #[test]
+    fn claude_summary_rows_displays_unused_for_five_hour_and_weekly_windows() {
+        use crate::model::SecondaryQuotas;
+
+        let now = chrono::Utc::now().timestamp();
+        for resets_at in [None, Some(0)] {
+            let state = DisplayState::live(QuotaSnapshot {
+                weekly: Some(quota(80.0, WEEK_MINUTES)),
+                session: Some(quota(90.0, SESSION_MINUTES)),
+                account: AccountSummary {
+                    claude_quotas: Some(SecondaryQuotas {
+                        five_hour: Some(QuotaWindow {
+                            used_percent: 0.0,
+                            remaining_percent: 100.0,
+                            window_minutes: SESSION_MINUTES,
+                            resets_at,
+                        }),
+                        weekly: Some(QuotaWindow {
+                            used_percent: 0.0,
+                            remaining_percent: 100.0,
+                            window_minutes: WEEK_MINUTES,
+                            resets_at,
+                        }),
+                    }),
+                    ..AccountSummary::default()
+                },
+                fetched_at: now,
+            });
+
+            let zh = claude_summary_rows(&state, Locale::Chinese);
+            assert_eq!(zh.five_hour.percent, Some(100));
+            assert_eq!(zh.five_hour.reset_hint, "未使用");
+            assert_eq!(zh.weekly.percent, Some(100));
+            assert_eq!(zh.weekly.reset_hint, "未使用");
+
+            let en = claude_summary_rows(&state, Locale::English);
+            assert_eq!(en.five_hour.percent, Some(100));
+            assert_eq!(en.five_hour.reset_hint, "Unused");
+            assert_eq!(en.weekly.percent, Some(100));
+            assert_eq!(en.weekly.reset_hint, "Unused");
+        }
     }
 }
