@@ -1,10 +1,12 @@
+use super::flyout::pointer_coordinates;
 use super::*;
 use crate::model::ResetCredit;
 use crate::reset::{ResetAttempt, ResetHit, ResetOutcome, ResetPanel};
 
 impl AppState {
     fn reset_credits(&self) -> &[ResetCredit] {
-        self.display
+        self.active_slot()
+            .display
             .snapshot
             .as_ref()
             .and_then(|s| s.account.reset_credit_details.as_deref())
@@ -25,7 +27,10 @@ impl AppState {
                 || ui::history_hit_test(
                     &self.history_navigation,
                     None,
-                    matches!(self.display.quota_availability(), QuotaAvailability::Single(_)),
+                    matches!(
+                        self.active_slot().display.quota_availability(),
+                        QuotaAvailability::Single(_)
+                    ),
                     x,
                     y,
                     dpi as u32,
@@ -35,7 +40,7 @@ impl AppState {
             return None;
         }
         self.reset_panel.hit(
-            matches!(self.display.quota_availability(), QuotaAvailability::Single(_)),
+            matches!(self.active_slot().display.quota_availability(), QuotaAvailability::Single(_)),
             self.reset_credits().len(),
             x as f32 * 96.0 / dpi,
             y as f32 * 96.0 / dpi,
@@ -98,7 +103,7 @@ impl AppState {
         if self.reset_panel.confirmation.is_some() || self.reset_panel.busy {
             return;
         }
-        let height = ui::flyout_dimensions(&self.display).height as f32;
+        let height = ui::flyout_dimensions(&self.active_slot().display).height as f32;
         let max = ResetPanel::max_scroll(self.reset_credits().len(), height);
         let scroll = (self.reset_panel.scroll - delta as f32 / 120.0 * 45.0).clamp(0.0, max);
         if scroll != self.reset_panel.scroll {
@@ -122,7 +127,8 @@ impl AppState {
                     c.id.is_some() && c.expires_at.is_none_or(|time| time > Utc::now().timestamp())
                 }) {
                     self.reset_panel.confirmation = Some(credit);
-                    self.reset_panel.confirmation_account = self.active_account_key.clone();
+                    self.reset_panel.confirmation_account =
+                        self.active_slot().active_account_key.clone();
                     self.reset_panel.message = None;
                 }
             }
@@ -153,12 +159,12 @@ impl AppState {
         if self.reset_panel.busy {
             return;
         }
-        if self.refreshing {
+        if self.active_slot().refreshing {
             self.reset_panel.message =
                 Some(self.locale.text("Refreshing; please wait", "正在刷新，请稍后确认").into());
             return;
         }
-        let Some(account_key) = self.active_account_key.clone() else {
+        let Some(account_key) = self.active_slot().active_account_key.clone() else {
             self.reset_panel.message = Some(
                 self.locale.text("Refresh to verify the account", "请先刷新，确认当前账户").into(),
             );
@@ -190,7 +196,7 @@ impl AppState {
             if !self.reset_credits().iter().any(|c| c == &credit)
                 || credit.id.is_none()
                 || credit.expires_at.is_some_and(|t| t <= Utc::now().timestamp())
-                || self.display.refresh_state != RefreshState::Live
+                || self.active_slot().display.refresh_state != RefreshState::Live
             {
                 self.reset_panel.message = Some(
                     self.locale
@@ -342,7 +348,7 @@ impl AppState {
             }
         }
         if codex_active {
-            self.refresh_pending = false;
+            self.active_slot_mut().refresh_pending = false;
             self.start_refresh(true);
             self.reset_invalidate();
         } else {

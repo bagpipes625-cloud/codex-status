@@ -1,13 +1,10 @@
 use crate::app_server::{AppServerClient, AppServerFailure, AppServerSnapshot};
 use crate::history::UsageLedger;
-use crate::icon::{OwnedIcon, create_icon, tone_for};
-#[cfg(test)]
-use crate::model::QuotaSnapshot;
+use crate::icon::OwnedIcon;
 use crate::model::{DisplayState, ProviderKind, QuotaAvailability, QuotaKind, RefreshState};
 use crate::settings::{AppStore, Settings};
-use crate::winutil::wide0;
 use crate::{startup, ui, updater};
-use chrono::{Datelike, Local, Utc};
+use chrono::Utc;
 use std::cell::Cell;
 use std::mem::size_of;
 use std::path::PathBuf;
@@ -17,48 +14,40 @@ use std::thread;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT,
-    POINT, RECT, SetLastError, WIN32_ERROR, WPARAM,
+    RECT, SetLastError, WIN32_ERROR, WPARAM,
 };
-use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, HBRUSH, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromPoint,
-};
+use windows::Win32::Graphics::Gdi::{HBRUSH, InvalidateRect};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, GetDpiForSystem, GetDpiForWindow,
-    GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI, SetProcessDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::Ime::ImmDisableIME;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, VK_BROWSER_BACK, VK_ESCAPE,
-};
-#[cfg(any(codex_status_channel = "stable", codex_status_channel = "beta"))]
-use windows::Win32::UI::Shell::NIF_GUID;
-use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIIF_RESPECT_QUIET_TIME,
-    NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NOTIFYICON_VERSION_4,
-    NOTIFYICONDATAW, NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect, Shell_NotifyIconW,
-    ShellExecuteW,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_ESCAPE};
+use windows::Win32::UI::Shell::{NIM_DELETE, NIN_SELECT, Shell_NotifyIconW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CS_DROPSHADOW, CS_HREDRAW, CS_VREDRAW, CreatePopupMenu, CreateWindowExW,
-    DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW, GetCursorPos,
-    GetMessageW, GetWindowRect, HMENU, IDC_ARROW, IsWindowVisible, KillTimer, LoadCursorW,
-    MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, PostQuitMessage,
-    RegisterClassExW, RegisterWindowMessageW, SM_CXSMICON, SW_HIDE, SW_SHOWNORMAL, SWP_NOACTIVATE,
-    SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
-    TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-    TranslateMessage, WA_INACTIVE, WHEEL_DELTA, WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP,
-    WM_APPCOMMAND, WM_CAPTURECHANGED, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE,
-    WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_PAINT, WM_QUERYENDSESSION, WM_RBUTTONUP,
-    WM_SETTINGCHANGE, WM_TIMER, WM_XBUTTONUP, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_OVERLAPPED, WS_POPUP, XBUTTON1,
+    CS_DROPSHADOW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
+    DispatchMessageW, FindWindowW, GetMessageW, IDC_ARROW, IsWindowVisible, KillTimer, LoadCursorW,
+    MSG, PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SW_HIDE,
+    SWP_NOACTIVATE, SWP_NOZORDER, SetTimer, SetWindowPos, ShowWindow, TranslateMessage,
+    WA_INACTIVE, WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_CONTEXTMENU,
+    WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
+    WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
 };
 #[cfg(any(codex_status_channel = "stable", codex_status_channel = "beta"))]
 use windows::core::GUID;
 use windows::core::{PCWSTR, w};
+
+mod flyout;
+mod menu;
+mod reset_panel;
+mod tray;
+
+use flyout::{HistoryWheelState, pointer_coordinates, standard_back_message, wheel_delta};
+use menu::show_context_menu;
+use tray::TrayQuotaState;
 
 const CHANNEL_NAME: &str = env!("CODEX_STATUS_CHANNEL");
 const TRAY_ID: u32 = 1;
@@ -123,37 +112,8 @@ const TIMER_RESET_RESULT: usize = 6;
 const REFRESH_ANIMATION_INTERVAL_MS: u32 = 16;
 const RESET_RESULT_POLL_INTERVAL_MS: u32 = 250;
 
-const TRAY_ACTIVATION_DEBOUNCE: Duration = Duration::from_millis(300);
-const FLYOUT_ACTIVATION_GUARD: Duration = Duration::from_millis(220);
-const TRAY_CLOSE_COALESCE: Duration = Duration::from_millis(250);
-const REFRESH_ANIMATION_DURATION: Duration = Duration::from_millis(600);
 const HISTORY_SAVE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const BACKGROUND_PREFETCH_INTERVAL: Duration = Duration::from_secs(15 * 60);
-const HISTORY_WHEEL_THROTTLE: Duration = Duration::from_millis(400);
-const APPCOMMAND_BROWSER_BACKWARD_ID: u32 = 1;
-
-const CMD_REFRESH: u32 = 100;
-const CMD_USAGE: u32 = 101;
-const CMD_PROVIDER_CODEX: u32 = 102;
-const CMD_PROVIDER_GEMINI: u32 = 103;
-const CMD_DISPLAY_FIVE_HOUR: u32 = 105;
-const CMD_DISPLAY_WEEKLY: u32 = 106;
-const CMD_INTERVAL_1: u32 = 111;
-const CMD_INTERVAL_5: u32 = 115;
-const CMD_INTERVAL_15: u32 = 125;
-const CMD_ALERT_OFF: u32 = 130;
-const CMD_ALERT_10: u32 = 131;
-const CMD_ALERT_20: u32 = 132;
-const CMD_ALERT_30: u32 = 133;
-const CMD_STARTUP: u32 = 140;
-const CMD_UPDATE: u32 = 150;
-const CMD_THEME_SYSTEM: u32 = 160;
-const CMD_THEME_LIGHT: u32 = 161;
-const CMD_THEME_DARK: u32 = 162;
-const CMD_EXIT: u32 = 199;
-
-const USAGE_URL: &str = "https://chatgpt.com/codex/settings/usage";
-const GEMINI_USAGE_URL: &str = "https://aistudio.google.com/usage";
 
 thread_local! {
     static STATE: Cell<*mut AppState> = const { Cell::new(ptr::null_mut()) };
@@ -199,94 +159,11 @@ impl Drop for InstanceHandle {
     }
 }
 
-struct MenuHandle(HMENU);
-
-impl MenuHandle {
-    fn into_raw(self) -> HMENU {
-        let handle = self.0;
-        std::mem::forget(self);
-        handle
-    }
-}
-
-impl Drop for MenuHandle {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = DestroyMenu(self.0);
-        }
-    }
-}
-
 struct RefreshOutcome {
     provider: ProviderKind,
     result: Result<AppServerSnapshot, String>,
     account_key: Option<String>,
     complete: bool,
-}
-
-#[derive(Default)]
-struct ProviderCache {
-    display: Option<DisplayState>,
-    active_account_key: Option<String>,
-    failures: u8,
-    refreshing: bool,
-    refresh_pending: bool,
-    last_prefetched: Option<Instant>,
-}
-
-fn should_background_prefetch(cache: &ProviderCache, force: bool, now: Instant) -> bool {
-    if cache.refreshing {
-        return false;
-    }
-    if force {
-        return true;
-    }
-    let has_snapshot = cache.display.as_ref().is_some_and(|d| d.snapshot.is_some());
-    if !has_snapshot && cache.failures == 0 {
-        return true;
-    }
-    cache
-        .last_prefetched
-        .is_none_or(|last| now.saturating_duration_since(last) >= BACKGROUND_PREFETCH_INTERVAL)
-}
-
-#[derive(Default)]
-struct HistoryWheelState {
-    remainder: i32,
-    last_triggered: Option<Instant>,
-}
-
-impl HistoryWheelState {
-    fn reset(&mut self) {
-        *self = Self::default();
-    }
-
-    fn push(&mut self, delta: i32, now: Instant) -> Option<i32> {
-        if delta == 0 {
-            return None;
-        }
-        if self.remainder != 0 && self.remainder.signum() != delta.signum() {
-            self.remainder = 0;
-        }
-        if self
-            .last_triggered
-            .is_some_and(|last| now.saturating_duration_since(last) < HISTORY_WHEEL_THROTTLE)
-        {
-            self.remainder = 0;
-            return None;
-        }
-        self.remainder = self.remainder.saturating_add(delta);
-        if self.remainder.unsigned_abs() < WHEEL_DELTA {
-            return None;
-        }
-        let direction = if self.remainder > 0 { -1 } else { 1 };
-        self.remainder = 0;
-        Some(direction)
-    }
-
-    fn commit(&mut self, now: Instant) {
-        self.last_triggered = Some(now);
-    }
 }
 
 impl RefreshOutcome {
@@ -319,56 +196,57 @@ struct UpdateOutcome {
     result: Result<Option<updater::StagedUpdate>, updater::UpdateError>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TrayQuotaState {
-    primary_kind: QuotaKind,
-    primary_percent: Option<u8>,
-    indicator_percent: Option<u8>,
-    refresh_state: RefreshState,
+struct ProviderSlot {
+    display: DisplayState,
+    active_account_key: Option<String>,
+    failures: u8,
+    refreshing: bool,
+    refresh_pending: bool,
+    last_prefetched: Option<Instant>,
+    reset_refresh: ResetRefreshState,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct LowQuotaAlert {
-    kind: QuotaKind,
-    percent: u8,
-    reset: Option<i64>,
-}
-
-fn tray_quota_state(display: &DisplayState, preferred: QuotaKind) -> TrayQuotaState {
-    let primary_kind = display.resolved_quota_kind(preferred);
-    let primary_percent = display.quota_percent(primary_kind);
-    let indicator_percent = match display.quota_availability() {
-        QuotaAvailability::Single(_) => primary_percent,
-        QuotaAvailability::Both => display.quota_percent(primary_kind.other()),
-        QuotaAvailability::None => None,
-    };
-    TrayQuotaState {
-        primary_kind,
-        primary_percent,
-        indicator_percent,
-        refresh_state: display.refresh_state,
+impl Default for ProviderSlot {
+    fn default() -> Self {
+        // A persisted quota snapshot cannot be verified against the account that is
+        // active now. Start empty; in-process refresh failures still retain the
+        // latest account-verified live snapshot through DisplayState::after_error.
+        Self {
+            display: DisplayState::loading(None),
+            active_account_key: None,
+            failures: 0,
+            refreshing: false,
+            refresh_pending: false,
+            last_prefetched: None,
+            reset_refresh: ResetRefreshState::default(),
+        }
     }
 }
 
-fn quota_switching_available(display: &DisplayState) -> bool {
-    !matches!(display.quota_availability(), QuotaAvailability::Single(_))
+fn should_background_prefetch(slot: &ProviderSlot, force: bool, now: Instant) -> bool {
+    if slot.refreshing {
+        return false;
+    }
+    if force {
+        return true;
+    }
+    let has_snapshot = slot.display.snapshot.is_some();
+    if !has_snapshot && slot.failures == 0 {
+        return true;
+    }
+    slot.last_prefetched
+        .is_none_or(|last| now.saturating_duration_since(last) >= BACKGROUND_PREFETCH_INTERVAL)
 }
 
 fn same_verified_account(active: Option<&str>, observed: Option<&str>) -> bool {
     observed.is_some() && active == observed
 }
 
-fn quota_alert_state(display: &DisplayState, preferred: QuotaKind) -> Option<LowQuotaAlert> {
-    let kind = display.resolved_quota_kind(preferred);
-    let window = display.quota_window(kind)?;
-    Some(LowQuotaAlert { kind, percent: window.display_percent(), reset: window.resets_at })
-}
-
-fn alert_cycle_key(alert: LowQuotaAlert) -> i64 {
-    alert.reset.unwrap_or(match alert.kind {
-        QuotaKind::FiveHour => i64::MIN,
-        QuotaKind::Weekly => i64::MIN + 1,
-    })
+fn provider_index(provider: ProviderKind) -> usize {
+    match provider {
+        ProviderKind::Codex => 0,
+        ProviderKind::Gemini => 1,
+    }
 }
 
 enum LaunchMode {
@@ -422,8 +300,6 @@ impl ResetRefreshState {
     }
 }
 
-mod reset_panel;
-
 struct AppState {
     reset_panel: crate::reset::ResetPanel,
     reset_results: Receiver<Result<crate::reset::ResetOutcome, crate::app_server::ResetFailure>>,
@@ -434,7 +310,6 @@ struct AppState {
     taskbar_created: u32,
     store: AppStore,
     usage_history: UsageLedger,
-    active_account_key: Option<String>,
     history_view_cache: Option<crate::history::UsageHistoryView>,
     history_dirty: bool,
     last_history_save: Option<Instant>,
@@ -443,11 +318,10 @@ struct AppState {
     settings: Settings,
     locale: ui::Locale,
     theme: ui::Theme,
-    display: DisplayState,
     client: AppServerClient,
     fallback: std::sync::Arc<std::sync::Mutex<crate::refresh::FallbackState>>,
     gemini: std::sync::Arc<std::sync::Mutex<crate::gemini::GeminiState>>,
-    provider_caches: [ProviderCache; 2],
+    providers: [ProviderSlot; 2],
     refresh_results: Receiver<RefreshOutcome>,
     refresh_results_tx: SyncSender<RefreshOutcome>,
     update_results: Receiver<UpdateOutcome>,
@@ -456,12 +330,9 @@ struct AppState {
     tray_quota_state: Option<TrayQuotaState>,
     tray_added: bool,
     tray_failure_logged: bool,
-    refreshing: bool,
-    refresh_pending: bool,
     refresh_feedback: bool,
     refresh_animation_started: Option<Instant>,
     update_checking: bool,
-    failures: u8,
     last_tray_activation: Option<Instant>,
     flyout_ignore_inactive_until: Option<Instant>,
     flyout_hidden_for_tray_activation: Option<Instant>,
@@ -471,7 +342,6 @@ struct AppState {
     hovered_history_values: bool,
     refresh_button_pressed: bool,
     history_wheel: HistoryWheelState,
-    reset_refresh: [ResetRefreshState; 2],
 }
 
 pub fn run() -> Result<(), AppError> {
@@ -547,16 +417,8 @@ pub fn run() -> Result<(), AppError> {
     let store = AppStore::discover();
     let settings = store.load_settings();
     let usage_history = store.load_usage_history();
-    // The active Codex account is not known until account/read completes. Do not
-    // expose the previous account's history during startup.
-    let active_account_key = None;
     let locale = ui::Locale::detect(&settings.locale);
     let theme = ui::detect_theme(&settings.theme);
-    let history_view_cache = None;
-    // A persisted quota snapshot cannot be verified against the account that is
-    // active now. Start empty; in-process refresh failures still retain the
-    // latest account-verified live snapshot through DisplayState::after_error.
-    let display = DisplayState::loading(None);
     let taskbar_created = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
     TASKBAR_CREATED_MESSAGE.with(|slot| slot.set(taskbar_created));
     let (refresh_results_tx, refresh_results) = sync_channel(8);
@@ -577,8 +439,7 @@ pub fn run() -> Result<(), AppError> {
         taskbar_created,
         store,
         usage_history,
-        active_account_key,
-        history_view_cache,
+        history_view_cache: None,
         history_dirty: false,
         last_history_save: None,
         history_navigation: ui::HistoryNavigation::default(),
@@ -586,11 +447,10 @@ pub fn run() -> Result<(), AppError> {
         settings,
         locale,
         theme,
-        display,
         client: AppServerClient::new(),
         fallback: Default::default(),
         gemini: Default::default(),
-        provider_caches: Default::default(),
+        providers: Default::default(),
         refresh_results,
         refresh_results_tx,
         update_results,
@@ -599,12 +459,9 @@ pub fn run() -> Result<(), AppError> {
         tray_quota_state: None,
         tray_added: false,
         tray_failure_logged: false,
-        refreshing: false,
-        refresh_pending: false,
         refresh_feedback: false,
         refresh_animation_started: None,
         update_checking: false,
-        failures: 0,
         last_tray_activation: None,
         flyout_ignore_inactive_until: None,
         flyout_hidden_for_tray_activation: None,
@@ -614,7 +471,6 @@ pub fn run() -> Result<(), AppError> {
         hovered_history_values: false,
         refresh_button_pressed: false,
         history_wheel: HistoryWheelState::default(),
-        reset_refresh: Default::default(),
     });
     let raw = Box::into_raw(state);
     STATE.with(|slot| slot.set(raw));
@@ -704,32 +560,6 @@ fn parse_arguments() -> Result<LaunchMode, AppError> {
         }
         _ => Err(AppError::InvalidArguments),
     }
-}
-
-fn pointer_coordinates(lparam: LPARAM) -> (i32, i32) {
-    let packed = lparam.0 as u32;
-    let x = i32::from(packed as u16 as i16);
-    let y = i32::from((packed >> 16) as u16 as i16);
-    (x, y)
-}
-
-fn standard_back_message(message: u32, wparam: WPARAM, lparam: LPARAM) -> bool {
-    match message {
-        WM_KEYDOWN => wparam.0 as u16 == VK_BROWSER_BACK.0,
-        WM_XBUTTONUP => ((wparam.0 >> 16) & 0xffff) as u16 == XBUTTON1,
-        WM_APPCOMMAND => ((lparam.0 as u32 >> 16) & 0x0fff) == APPCOMMAND_BROWSER_BACKWARD_ID,
-        _ => false,
-    }
-}
-
-fn wheel_delta(wparam: WPARAM) -> i32 {
-    i32::from(((wparam.0 >> 16) as u16) as i16)
-}
-
-fn refresh_rotation_degrees(elapsed: Duration) -> f32 {
-    (elapsed.as_secs_f32() % REFRESH_ANIMATION_DURATION.as_secs_f32())
-        / REFRESH_ANIMATION_DURATION.as_secs_f32()
-        * 360.0
 }
 
 fn register_classes(instance: HINSTANCE) -> windows::core::Result<()> {
@@ -839,7 +669,7 @@ unsafe extern "system" fn main_window_proc(
                     let history = state.history_view();
                     ui::prewarm_card_renderer(
                         state.flyout,
-                        &state.display,
+                        &state.active_slot().display,
                         state.settings.display_quota,
                         state.locale,
                         state.theme,
@@ -926,44 +756,6 @@ unsafe extern "system" fn main_window_proc(
     }
 }
 
-unsafe fn show_context_menu(state_ptr: *mut AppState) {
-    // TrackPopupMenu runs a nested message loop, so no AppState reference may live
-    // across it. Build first, then reacquire the state only after the menu closes.
-    let (menu, hwnd) = {
-        let Some(_state_borrow) = StateBorrow::acquire(state_ptr) else {
-            return;
-        };
-        let state = unsafe { &*state_ptr };
-        let Ok(menu) = state.build_menu() else {
-            return;
-        };
-        (menu, state.hwnd)
-    };
-
-    let mut point = POINT::default();
-    let command = unsafe {
-        let _ = GetCursorPos(&mut point);
-        let _ = SetForegroundWindow(hwnd);
-        let command = TrackPopupMenu(
-            menu,
-            TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
-            point.x,
-            point.y,
-            None,
-            hwnd,
-            None,
-        )
-        .0 as u32;
-        let _ = DestroyMenu(menu);
-        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
-        command
-    };
-
-    if let Some(_state_borrow) = StateBorrow::acquire(state_ptr) {
-        unsafe { (&mut *state_ptr).handle_command(command) };
-    }
-}
-
 unsafe extern "system" fn flyout_window_proc(
     hwnd: HWND,
     message: u32,
@@ -997,7 +789,7 @@ unsafe extern "system" fn flyout_window_proc(
                 let history = state.history_view();
                 let full_history_render = ui::paint_card(
                     hwnd,
-                    &state.display,
+                    &state.active_slot().display,
                     state.settings.display_quota,
                     state.locale,
                     state.theme,
@@ -1062,17 +854,18 @@ unsafe extern "system" fn flyout_window_proc(
                 }
                 let (x, y) = pointer_coordinates(lparam);
                 let dpi = GetDpiForWindow(hwnd).max(96);
+                let active_display = &state.active_slot().display;
                 if (state.history_navigation.page == ui::HistoryPage::Main
                     || state.full_history_render)
-                    && !state.refreshing
+                    && !state.active_slot().refreshing
                     && !state.refresh_feedback
-                    && ui::refresh_button_hit_test(&state.display, x, y, dpi)
+                    && ui::refresh_button_hit_test(active_display, x, y, dpi)
                 {
                     state.refresh_button_pressed = true;
                     let _ = SetCapture(hwnd);
                     return LRESULT(0);
                 }
-                if let Some(kind) = ui::quota_card_hit_test(&state.display, x, y, dpi) {
+                if let Some(kind) = ui::quota_card_hit_test(active_display, x, y, dpi) {
                     if state.history_navigation.page == ui::HistoryPage::Main {
                         state.pressed_quota = Some(kind);
                         let _ = SetCapture(hwnd);
@@ -1082,7 +875,7 @@ unsafe extern "system" fn flyout_window_proc(
                 }
                 let history = state.history_view();
                 let compact =
-                    matches!(state.display.quota_availability(), QuotaAvailability::Single(_));
+                    matches!(active_display.quota_availability(), QuotaAvailability::Single(_));
                 if let Some(hit) = ui::history_hit_test(
                     &state.history_navigation,
                     history,
@@ -1105,10 +898,11 @@ unsafe extern "system" fn flyout_window_proc(
                 if state.refresh_button_pressed {
                     let (x, y) = pointer_coordinates(lparam);
                     let dpi = GetDpiForWindow(hwnd).max(96);
-                    let activate = ui::refresh_button_hit_test(&state.display, x, y, dpi);
+                    let activate =
+                        ui::refresh_button_hit_test(&state.active_slot().display, x, y, dpi);
                     state.refresh_button_pressed = false;
                     let _ = ReleaseCapture();
-                    if activate && !state.refreshing && !state.refresh_feedback {
+                    if activate && !state.active_slot().refreshing && !state.refresh_feedback {
                         state.start_refresh(true);
                         state.prefetch_other_provider(true);
                     }
@@ -1117,8 +911,8 @@ unsafe extern "system" fn flyout_window_proc(
                 if let Some(pressed) = state.pressed_quota {
                     let (x, y) = pointer_coordinates(lparam);
                     let dpi = GetDpiForWindow(hwnd).max(96);
-                    let activate =
-                        ui::quota_card_hit_test(&state.display, x, y, dpi) == Some(pressed);
+                    let activate = ui::quota_card_hit_test(&state.active_slot().display, x, y, dpi)
+                        == Some(pressed);
                     state.pressed_quota = None;
                     let _ = ReleaseCapture();
                     if activate {
@@ -1132,8 +926,10 @@ unsafe extern "system" fn flyout_window_proc(
                     let (x, y) = pointer_coordinates(lparam);
                     let dpi = GetDpiForWindow(hwnd).max(96);
                     let history = state.history_view();
-                    let compact =
-                        matches!(state.display.quota_availability(), QuotaAvailability::Single(_));
+                    let compact = matches!(
+                        state.active_slot().display.quota_availability(),
+                        QuotaAvailability::Single(_)
+                    );
                     let activate = ui::history_hit_test(
                         &state.history_navigation,
                         history,
@@ -1159,8 +955,10 @@ unsafe extern "system" fn flyout_window_proc(
                 let (x, y) = pointer_coordinates(lparam);
                 let dpi = GetDpiForWindow(hwnd).max(96);
                 let history = state.history_view();
-                let compact =
-                    matches!(state.display.quota_availability(), QuotaAvailability::Single(_));
+                let compact = matches!(
+                    state.active_slot().display.quota_availability(),
+                    QuotaAvailability::Single(_)
+                );
                 let hovered = ui::hovered_history_day(
                     &state.history_navigation,
                     history,
@@ -1269,130 +1067,29 @@ fn deferred_main_message(message: u32, taskbar_created: u32) -> Option<u32> {
 }
 
 impl AppState {
+    fn slot(&self, provider: ProviderKind) -> &ProviderSlot {
+        &self.providers[provider_index(provider)]
+    }
+
+    fn slot_mut(&mut self, provider: ProviderKind) -> &mut ProviderSlot {
+        &mut self.providers[provider_index(provider)]
+    }
+
+    fn active_slot(&self) -> &ProviderSlot {
+        self.slot(self.settings.provider)
+    }
+
+    fn active_slot_mut(&mut self) -> &mut ProviderSlot {
+        self.slot_mut(self.settings.provider)
+    }
+
     fn history_view(&self) -> Option<&crate::history::UsageHistoryView> {
         self.history_view_cache.as_ref()
     }
 
-    fn activate_history_hit(&mut self, hit: ui::HistoryHit) {
-        self.history_wheel.reset();
-        if self.settings.provider != ProviderKind::Codex {
-            return;
-        }
-        match hit {
-            ui::HistoryHit::ToggleResourcePage => {
-                if self.settings.provider == ProviderKind::Codex {
-                    self.history_navigation.resource_page =
-                        self.history_navigation.resource_page.toggle();
-                }
-                self.reset_panel.pressed = None;
-                self.reset_panel.hovered = None;
-            }
-            ui::HistoryHit::Back => {
-                self.history_navigation.page = ui::HistoryPage::Main;
-                self.hovered_history_day = None;
-            }
-            ui::HistoryHit::ToggleSummaryWeek => {
-                self.history_navigation.summary_week =
-                    self.history_navigation.summary_week.toggle();
-            }
-            ui::HistoryHit::OpenHistory => {
-                self.history_navigation.open_current_week(self.history_view_cache.as_ref());
-                self.hovered_history_day = None;
-            }
-            ui::HistoryHit::PreviousMonth | ui::HistoryHit::PreviousWeek => {
-                self.history_navigation.shift_visible_period(-1, Local::now().date_naive());
-            }
-            ui::HistoryHit::NextMonth | ui::HistoryHit::NextWeek => {
-                self.history_navigation.shift_visible_period(1, Local::now().date_naive());
-            }
-            ui::HistoryHit::MonthTab => {
-                self.history_navigation.month =
-                    self.history_navigation.selected_week.with_day(1).expect("week month start");
-                self.history_navigation.page = ui::HistoryPage::Month;
-            }
-            ui::HistoryHit::WeekTab => {
-                self.history_navigation.open_selected_week();
-            }
-            ui::HistoryHit::Week(start) => {
-                self.history_navigation.selected_week = start;
-                self.history_navigation.page = ui::HistoryPage::Week;
-                self.hovered_history_day = None;
-            }
-        }
-    }
-
-    fn handle_history_wheel(&mut self, delta: i32) -> Option<bool> {
-        if self.history_navigation.page == ui::HistoryPage::Main || !self.full_history_render {
-            self.history_wheel.reset();
-            return None;
-        }
-        let now = Instant::now();
-        let Some(direction) = self.history_wheel.push(delta, now) else {
-            return Some(false);
-        };
-        let today = self
-            .history_view_cache
-            .as_ref()
-            .map(|view| view.today)
-            .unwrap_or_else(|| Local::now().date_naive());
-        let changed = self.history_navigation.shift_visible_period(direction, today);
-        if changed {
-            self.history_wheel.commit(now);
-            self.hovered_history_day = None;
-        }
-        Some(changed)
-    }
-
-    fn start_refresh_animation(&mut self) {
-        self.refresh_animation_started = Some(Instant::now());
-        unsafe {
-            let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_ANIMATION);
-            let timer = SetTimer(
-                Some(self.hwnd),
-                TIMER_REFRESH_ANIMATION,
-                REFRESH_ANIMATION_INTERVAL_MS,
-                None,
-            );
-            if timer == 0 {
-                self.refresh_animation_started = None;
-            }
-        }
-    }
-
-    fn advance_refresh_animation(&mut self) {
-        if self.refresh_animation_started.is_none() {
-            unsafe {
-                let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_ANIMATION);
-            }
-            return;
-        }
-        if !self.refreshing {
-            self.stop_refresh_feedback();
-            return;
-        }
-        if unsafe { IsWindowVisible(self.flyout) }.as_bool() {
-            unsafe {
-                let _ = InvalidateRect(Some(self.flyout), None, false);
-            }
-        }
-    }
-
-    fn refresh_rotation_degrees(&self) -> f32 {
-        self.refresh_animation_started
-            .map_or(0.0, |started| refresh_rotation_degrees(started.elapsed()))
-    }
-
-    fn stop_refresh_feedback(&mut self) {
-        self.refresh_feedback = false;
-        self.refresh_animation_started = None;
-        unsafe {
-            let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_ANIMATION);
-        }
-    }
-
     fn start_refresh(&mut self, force: bool) {
         if self.reset_panel.busy {
-            self.refresh_pending = true;
+            self.active_slot_mut().refresh_pending = true;
             return;
         }
         diagnostic("refresh:start");
@@ -1404,8 +1101,8 @@ impl AppState {
                 self.start_refresh_animation();
             }
         }
-        if self.refreshing {
-            self.refresh_pending |= force;
+        if self.active_slot().refreshing {
+            self.active_slot_mut().refresh_pending |= force;
             if force {
                 unsafe {
                     let _ = InvalidateRect(Some(self.flyout), None, false);
@@ -1413,10 +1110,13 @@ impl AppState {
             }
             return;
         }
-        self.refreshing = true;
-        self.display.error = None;
-        if self.display.snapshot.is_none() {
-            self.display.refresh_state = RefreshState::Loading;
+        {
+            let slot = self.active_slot_mut();
+            slot.refreshing = true;
+            slot.display.error = None;
+            if slot.display.snapshot.is_none() {
+                slot.display.refresh_state = RefreshState::Loading;
+            }
         }
         let _ = self.update_tray(false);
         unsafe {
@@ -1434,15 +1134,17 @@ impl AppState {
 
     fn prefetch_other_provider(&mut self, force: bool) {
         let other = self.settings.provider.other();
-        let idx = provider_index(other);
         let now = Instant::now();
-        if !should_background_prefetch(&self.provider_caches[idx], force, now) {
+        if !should_background_prefetch(self.slot(other), force, now) {
             return;
         }
-        self.provider_caches[idx].refreshing = true;
-        self.provider_caches[idx].last_prefetched = Some(now);
+        {
+            let slot = self.slot_mut(other);
+            slot.refreshing = true;
+            slot.last_prefetched = Some(now);
+        }
         if self.spawn_refresh_worker(other).is_err() {
-            self.provider_caches[idx].refreshing = false;
+            self.slot_mut(other).refreshing = false;
         }
     }
 
@@ -1495,64 +1197,23 @@ impl AppState {
     }
 
     fn finish_refresh(&mut self, outcome: RefreshOutcome) {
-        if outcome.provider != self.settings.provider {
-            let idx = provider_index(outcome.provider);
-            self.provider_caches[idx].refreshing = !outcome.complete;
-            match outcome.result {
-                Ok(snapshot) => {
-                    self.provider_caches[idx].failures = 0;
-                    self.provider_caches[idx].active_account_key = snapshot.account_key.clone();
-                    self.provider_caches[idx].display = Some(DisplayState::live(snapshot.quota));
-                    if outcome.provider == ProviderKind::Codex {
-                        self.usage_history.record_refresh(
-                            snapshot.account_key.as_deref(),
-                            snapshot.token_usage.as_ref(),
-                            Utc::now().timestamp(),
-                        );
-                        self.history_dirty = true;
-                        self.persist_usage_history(false);
-                    }
-                }
-                Err(error) => {
-                    self.provider_caches[idx].failures =
-                        self.provider_caches[idx].failures.saturating_add(1);
-                    let now = Utc::now().timestamp();
-                    let same = same_verified_account(
-                        self.provider_caches[idx].active_account_key.as_deref(),
-                        outcome.account_key.as_deref(),
-                    );
-                    let prev = if same {
-                        self.provider_caches[idx].display.take().and_then(|d| d.snapshot)
-                    } else {
-                        self.provider_caches[idx].active_account_key = None;
-                        None
-                    };
-                    self.provider_caches[idx].display = Some(DisplayState::after_error(
-                        prev,
-                        friendly_error(&error, self.locale),
-                        now,
-                    ));
-                }
+        let is_active = outcome.provider == self.settings.provider;
+        if is_active {
+            self.reset_panel.pressed = None;
+            self.reset_panel.hovered = None;
+            if outcome.complete || outcome.result.is_ok() {
+                self.stop_refresh_feedback();
             }
-            if outcome.complete && self.provider_caches[idx].refresh_pending {
-                self.provider_caches[idx].refresh_pending = false;
-                self.provider_caches[idx].refreshing = true;
-                if self.spawn_refresh_worker(outcome.provider).is_err() {
-                    self.provider_caches[idx].refreshing = false;
-                }
-            }
-            return;
         }
-        self.reset_panel.pressed = None;
-        self.reset_panel.hovered = None;
-        self.refreshing = !outcome.complete;
-        if outcome.complete || outcome.result.is_ok() {
-            self.stop_refresh_feedback();
-        }
+        self.slot_mut(outcome.provider).refreshing = !outcome.complete;
         match outcome.result {
             Ok(snapshot) => {
-                self.failures = 0;
-                self.active_account_key = snapshot.account_key.clone();
+                {
+                    let slot = self.slot_mut(outcome.provider);
+                    slot.failures = 0;
+                    slot.active_account_key = snapshot.account_key.clone();
+                    slot.display = DisplayState::live(snapshot.quota);
+                }
                 if outcome.provider == ProviderKind::Codex {
                     self.usage_history.record_refresh(
                         snapshot.account_key.as_deref(),
@@ -1560,69 +1221,97 @@ impl AppState {
                         Utc::now().timestamp(),
                     );
                     self.history_dirty = true;
-                    self.refresh_history_view_cache();
+                    if is_active {
+                        self.refresh_history_view_cache();
+                    }
                     self.persist_usage_history(false);
                 }
-                self.display = DisplayState::live(snapshot.quota);
-                if outcome.complete {
-                    self.reset_refresh_timer(self.settings.refresh_minutes.saturating_mul(60_000));
+                if is_active {
+                    if outcome.complete {
+                        self.reset_refresh_timer(
+                            self.settings.refresh_minutes.saturating_mul(60_000),
+                        );
+                    }
+                    self.maybe_alert();
                 }
-                self.maybe_alert();
             }
             Err(error) => {
-                self.failures = self.failures.saturating_add(1);
                 let now = Utc::now().timestamp();
-                let same_verified_account = same_verified_account(
-                    self.active_account_key.as_deref(),
-                    outcome.account_key.as_deref(),
-                );
-                let snapshot =
-                    if same_verified_account { self.display.snapshot.take() } else { None };
-                if !same_verified_account {
-                    // A partial refresh may identify a different account, but its
-                    // persisted history is not activated until the full snapshot
-                    // succeeds. This prevents stale cross-account UI on failure.
-                    self.active_account_key = None;
-                    self.history_view_cache = None;
-                }
-                self.display =
-                    DisplayState::after_error(snapshot, friendly_error(&error, self.locale), now);
-                let backoff = match self.failures {
-                    1 => 60_000,
-                    2 => 5 * 60_000,
-                    _ => 15 * 60_000,
+                let locale = self.locale;
+                let (failures, same_account) = {
+                    let slot = self.slot_mut(outcome.provider);
+                    slot.failures = slot.failures.saturating_add(1);
+                    let same = same_verified_account(
+                        slot.active_account_key.as_deref(),
+                        outcome.account_key.as_deref(),
+                    );
+                    let snapshot = if same {
+                        slot.display.snapshot.take()
+                    } else {
+                        // A partial refresh may identify a different account, but its
+                        // persisted history is not activated until the full snapshot
+                        // succeeds. This prevents stale cross-account UI on failure.
+                        slot.active_account_key = None;
+                        None
+                    };
+                    slot.display =
+                        DisplayState::after_error(snapshot, friendly_error(&error, locale), now);
+                    (slot.failures, same)
                 };
-                self.reset_refresh_timer(backoff);
-                if same_verified_account {
-                    self.refresh_history_view_cache();
+                if is_active {
+                    if !same_account {
+                        self.history_view_cache = None;
+                    }
+                    let backoff = match failures {
+                        1 => 60_000,
+                        2 => 5 * 60_000,
+                        _ => 15 * 60_000,
+                    };
+                    self.reset_refresh_timer(backoff);
+                    if same_account {
+                        self.refresh_history_view_cache();
+                    }
                 }
             }
+        }
+        if !is_active {
+            if outcome.complete && self.slot(outcome.provider).refresh_pending {
+                {
+                    let slot = self.slot_mut(outcome.provider);
+                    slot.refresh_pending = false;
+                    slot.refreshing = true;
+                }
+                if self.spawn_refresh_worker(outcome.provider).is_err() {
+                    self.slot_mut(outcome.provider).refreshing = false;
+                }
+            }
+            return;
         }
         let _ = self.update_tray(false);
         self.sync_visible_flyout_layout();
         self.reset_panel.scroll =
             self.reset_panel.scroll.min(crate::reset::ResetPanel::max_scroll(
-                self.display
+                self.active_slot()
+                    .display
                     .snapshot
                     .as_ref()
                     .and_then(|s| s.account.reset_credit_details.as_ref())
                     .map_or(0, Vec::len),
-                ui::flyout_dimensions(&self.display).height as f32,
+                ui::flyout_dimensions(&self.active_slot().display).height as f32,
             ));
         unsafe {
             let _ = InvalidateRect(Some(self.flyout), None, false);
         }
-        if outcome.complete && self.refresh_pending {
-            self.refresh_pending = false;
+        if outcome.complete && self.active_slot().refresh_pending {
+            self.active_slot_mut().refresh_pending = false;
             self.start_refresh(true);
         }
     }
 
     fn refresh_history_view_cache(&mut self) {
-        self.history_view_cache = self
-            .usage_history
-            .history_for(self.active_account_key.as_deref())
-            .map(|history| history.view(Utc::now().timestamp()));
+        let key = self.active_slot().active_account_key.as_deref();
+        self.history_view_cache =
+            self.usage_history.history_for(key).map(|history| history.view(Utc::now().timestamp()));
     }
 
     fn persist_usage_history(&mut self, force: bool) {
@@ -1650,8 +1339,11 @@ impl AppState {
 
     fn refresh_time_sensitive_state(&mut self) {
         let now = Utc::now().timestamp();
-        let idx = provider_index(self.settings.provider);
-        if self.reset_refresh[idx].begin_if_due(&self.display, now, self.refreshing) {
+        let due_reset = {
+            let slot = self.active_slot_mut();
+            slot.reset_refresh.begin_if_due(&slot.display, now, slot.refreshing)
+        };
+        if due_reset {
             self.start_refresh(false);
         }
         if self
@@ -1661,11 +1353,14 @@ impl AppState {
         {
             self.refresh_history_view_cache();
         }
-        if self.display.refresh_state != RefreshState::Live
-            && self.display.snapshot.as_ref().is_some_and(|value| !value.is_cache_valid(now))
         {
-            self.display.snapshot = None;
-            self.display.refresh_state = RefreshState::Unavailable;
+            let display = &mut self.active_slot_mut().display;
+            if display.refresh_state != RefreshState::Live
+                && display.snapshot.as_ref().is_some_and(|value| !value.is_cache_valid(now))
+            {
+                display.snapshot = None;
+                display.refresh_state = RefreshState::Unavailable;
+            }
         }
         if self.tray_quota_state != Some(self.current_tray_quota_state()) {
             let _ = self.update_tray(false);
@@ -1757,658 +1452,6 @@ impl AppState {
         );
     }
 
-    fn update_tray(&mut self, force_add: bool) -> bool {
-        diagnostic("tray:render");
-        let dpi = unsafe { GetDpiForSystem().max(96) };
-        let size = unsafe { GetSystemMetricsForDpi(SM_CXSMICON, dpi).max(16) as u32 };
-        let quota_state = self.current_tray_quota_state();
-        let icon = match create_icon(
-            quota_state.primary_percent,
-            quota_state.indicator_percent,
-            tone_for(&self.display, quota_state.primary_percent),
-            size,
-            self.theme.high_contrast,
-            self.theme.tray_dark,
-        ) {
-            Ok(icon) => icon,
-            Err(error) => {
-                self.tray_added = false;
-                self.record_tray_failure("render", error.code().0 as u32, &error.to_string());
-                return false;
-            }
-        };
-        let mut data = self.notify_data();
-        data.uFlags |= NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
-        data.uCallbackMessage = WM_TRAY;
-        data.hIcon = icon.handle();
-        copy_utf16(
-            &mut data.szTip,
-            &ui::tooltip(&self.display, self.settings.display_quota, self.locale),
-        );
-        let add = force_add || !self.tray_added;
-        let operation = if add { NIM_ADD } else { NIM_MODIFY };
-        diagnostic(if add { "tray:add" } else { "tray:modify" });
-        unsafe {
-            SetLastError(WIN32_ERROR(0));
-        }
-        let mut succeeded = unsafe { Shell_NotifyIconW(operation, &data) }.as_bool();
-        if add && !succeeded {
-            // An abnormal termination can leave the old icon active briefly even though this
-            // channel's single-instance mutex is now unowned. Use the same tray identity for
-            // deletion and addition; a GUID bound to a different path remains protected.
-            diagnostic("tray:recover-after-unclean-exit");
-            let old = self.notify_data();
-            let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &old) };
-            unsafe {
-                SetLastError(WIN32_ERROR(0));
-            }
-            succeeded = unsafe { Shell_NotifyIconW(NIM_ADD, &data) }.as_bool();
-        }
-        if !succeeded {
-            let last_error = unsafe { GetLastError() };
-            self.tray_added = false;
-            diagnostic("tray:failed");
-            self.record_tray_failure(
-                if add { "NIM_ADD" } else { "NIM_MODIFY" },
-                last_error.0,
-                "Shell_NotifyIconW returned FALSE",
-            );
-            return false;
-        }
-        diagnostic("tray:ok");
-        self.tray_failure_logged = false;
-        self.tray_quota_state = Some(quota_state);
-        self.tray_icon = Some(icon);
-        if add {
-            self.tray_added = true;
-            let mut version = self.notify_data();
-            version.Anonymous.uVersion = NOTIFYICON_VERSION_4;
-            unsafe {
-                SetLastError(WIN32_ERROR(0));
-            }
-            if !unsafe { Shell_NotifyIconW(NIM_SETVERSION, &version) }.as_bool() {
-                let last_error = unsafe { GetLastError() };
-                self.record_tray_failure(
-                    "NIM_SETVERSION",
-                    last_error.0,
-                    "Shell_NotifyIconW returned FALSE",
-                );
-            }
-            if !self.settings.onboarding_shown {
-                self.show_balloon(
-                    self.locale.text("AgentStatus is ready", "AgentStatus 已就绪"),
-                    self.locale.text(
-                        "Your selected quota is shown in the tray. Drag the icon out of the overflow area to keep it visible.",
-                        "你选择的额度会直接显示在托盘图标中。可将图标从折叠区拖出，保持常显。",
-                    ),
-                );
-                self.settings.onboarding_shown = true;
-                self.persist_internal_settings();
-            }
-        }
-        true
-    }
-
-    fn current_tray_quota_state(&self) -> TrayQuotaState {
-        tray_quota_state(&self.display, self.settings.display_quota)
-    }
-
-    fn select_display_quota(&mut self, kind: QuotaKind) {
-        self.settings.display_quota = kind;
-        self.persist_settings();
-        let _ = self.update_tray(false);
-        unsafe {
-            let _ = InvalidateRect(Some(self.flyout), None, false);
-        }
-    }
-
-    fn notify_data(&self) -> NOTIFYICONDATAW {
-        #[cfg(any(codex_status_channel = "portable", codex_status_channel = "development"))]
-        {
-            NOTIFYICONDATAW {
-                cbSize: size_of::<NOTIFYICONDATAW>() as u32,
-                hWnd: self.hwnd,
-                uID: TRAY_ID,
-                ..Default::default()
-            }
-        }
-        #[cfg(any(codex_status_channel = "stable", codex_status_channel = "beta"))]
-        {
-            NOTIFYICONDATAW {
-                cbSize: size_of::<NOTIFYICONDATAW>() as u32,
-                hWnd: self.hwnd,
-                uID: TRAY_ID,
-                guidItem: TRAY_GUID,
-                uFlags: NIF_GUID,
-                ..Default::default()
-            }
-        }
-    }
-
-    fn record_tray_failure(&mut self, operation: &str, win32_error: u32, detail: &str) {
-        if self.tray_failure_logged {
-            return;
-        }
-        let executable = std::env::current_exe()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|_| "<unavailable>".to_owned());
-        let entry = format!(
-            "{} channel={} operation={} exe={executable:?} identity={} pid={} win32_error={} detail={detail:?}",
-            Utc::now().to_rfc3339(),
-            CHANNEL_NAME,
-            operation,
-            TRAY_IDENTITY_TEXT,
-            std::process::id(),
-            win32_error,
-        );
-        let _ = self.store.append_tray_error(&entry);
-        self.tray_failure_logged = true;
-    }
-
-    fn show_balloon(&self, title: &str, body: &str) {
-        if !self.tray_added {
-            return;
-        }
-        let mut data = self.notify_data();
-        data.uFlags |= NIF_INFO;
-        data.dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
-        copy_utf16(&mut data.szInfoTitle, title);
-        copy_utf16(&mut data.szInfo, body);
-        unsafe {
-            let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
-        }
-    }
-
-    fn maybe_alert(&mut self) {
-        let Some(threshold) = self.settings.alert_threshold else {
-            return;
-        };
-        let Some(alert) = quota_alert_state(&self.display, self.settings.display_quota) else {
-            return;
-        };
-        let alert_key = alert_cycle_key(alert);
-        let provider = self.settings.provider;
-        if alert.percent >= threshold {
-            // A quota window without a reset timestamp uses a stable synthetic
-            // key. Clear it after recovery so a later low-quota event can alert
-            // again instead of being suppressed forever.
-            if alert.reset.is_none()
-                && self.settings.last_alert_reset_for(provider) == Some(alert_key)
-            {
-                self.settings.set_last_alert_reset_for(provider, None);
-                self.persist_internal_settings();
-            }
-            return;
-        }
-        if self.settings.last_alert_reset_for(provider) == Some(alert_key) {
-            return;
-        }
-        let quota_label = match (self.locale, alert.kind) {
-            (ui::Locale::Chinese, QuotaKind::FiveHour) => "5 小时剩余：",
-            (ui::Locale::Chinese, QuotaKind::Weekly) => "本周剩余：",
-            (_, QuotaKind::FiveHour) => "5-hour remaining:",
-            (_, QuotaKind::Weekly) => "Weekly remaining:",
-        };
-        let title = match provider {
-            ProviderKind::Codex => self.locale.text("Codex quota is running low", "Codex 额度偏低"),
-            ProviderKind::Gemini => {
-                self.locale.text("Gemini quota is running low", "Gemini 额度偏低")
-            }
-        };
-        self.show_balloon(title, &format!("{quota_label} {}%", alert.percent));
-        self.settings.set_last_alert_reset_for(provider, Some(alert_key));
-        self.persist_internal_settings();
-    }
-
-    fn request_toggle_flyout(&mut self) {
-        let now = Instant::now();
-        if self
-            .flyout_hidden_for_tray_activation
-            .take()
-            .is_some_and(|hidden| now.duration_since(hidden) < TRAY_CLOSE_COALESCE)
-        {
-            // Clicking the icon transfers focus to Explorer before its tray
-            // callback arrives. If that focus loss already hid the card, the
-            // callback represents the same click and must not reopen it.
-            self.last_tray_activation = Some(now);
-            return;
-        }
-        if self
-            .last_tray_activation
-            .is_some_and(|previous| now.duration_since(previous) < TRAY_ACTIVATION_DEBOUNCE)
-        {
-            return;
-        }
-        self.last_tray_activation = Some(now);
-        unsafe {
-            // Showing from inside the Explorer callback lets the shell reclaim
-            // activation and used to make the card flash closed. Defer it until
-            // the notification callback has completely returned.
-            let _ = PostMessageW(Some(self.hwnd), WM_TOGGLE_FLYOUT, WPARAM(0), LPARAM(0));
-        }
-    }
-
-    fn toggle_flyout(&mut self) {
-        if unsafe { IsWindowVisible(self.flyout) }.as_bool() {
-            self.hide_flyout();
-        } else {
-            self.show_flyout();
-        }
-    }
-
-    fn hide_flyout(&mut self) {
-        if !self.reset_panel.busy && !self.reset_panel.success {
-            self.reset_panel.close();
-        } else if self.reset_panel.success {
-            self.reset_panel.success_interactive = false;
-        }
-        self.flyout_ignore_inactive_until = None;
-        self.flyout_hidden_for_tray_activation = None;
-        self.pressed_quota = None;
-        self.pressed_history = None;
-        self.hovered_history_day = None;
-        self.hovered_history_values = false;
-        self.history_wheel.reset();
-        self.history_navigation.page = ui::HistoryPage::Main;
-        self.history_navigation.selected_week =
-            crate::history::monday_of(Local::now().date_naive());
-        self.refresh_button_pressed = false;
-        self.refresh_animation_started = None;
-        if !self.refreshing {
-            self.refresh_feedback = false;
-        }
-        unsafe {
-            let _ = ReleaseCapture();
-            let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
-            let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH_ANIMATION);
-            let _ = ShowWindow(self.flyout, SW_HIDE);
-        }
-    }
-
-    fn handle_flyout_inactive(&mut self) {
-        let guarded =
-            self.flyout_ignore_inactive_until.is_some_and(|deadline| Instant::now() < deadline);
-        if guarded {
-            unsafe {
-                let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
-                let _ = SetTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE, 75, None);
-            }
-        } else {
-            let over_tray_icon = self.cursor_is_over_tray_icon();
-            self.hide_flyout();
-            if over_tray_icon {
-                self.flyout_hidden_for_tray_activation = Some(Instant::now());
-            }
-        }
-    }
-
-    fn finish_flyout_activation(&mut self) {
-        if !unsafe { IsWindowVisible(self.flyout) }.as_bool() {
-            self.flyout_ignore_inactive_until = None;
-            return;
-        }
-        unsafe {
-            let _ = SetForegroundWindow(self.flyout);
-        }
-        self.flyout_ignore_inactive_until = None;
-    }
-
-    fn cursor_is_over_tray_icon(&self) -> bool {
-        let Some(rect) = self.tray_rect() else {
-            return false;
-        };
-        let mut point = POINT::default();
-        unsafe {
-            let _ = GetCursorPos(&mut point);
-        }
-        point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom
-    }
-
-    fn show_flyout(&mut self) {
-        self.flyout_hidden_for_tray_activation = None;
-        self.theme = ui::detect_theme(&self.settings.theme);
-        ui::configure_flyout(self.flyout, self.theme);
-        self.position_flyout(true);
-        if self.refresh_feedback && self.refreshing && self.refresh_animation_started.is_none() {
-            self.start_refresh_animation();
-        }
-    }
-
-    fn sync_visible_flyout_layout(&mut self) {
-        if !unsafe { IsWindowVisible(self.flyout) }.as_bool() {
-            return;
-        }
-        let dpi = unsafe { GetDpiForWindow(self.flyout) }.max(96);
-        let dimensions = ui::flyout_dimensions(&self.display);
-        let desired_width = ui::scale(dimensions.width, dpi);
-        let desired_height = ui::scale(dimensions.height, dpi);
-        let mut current = RECT::default();
-        unsafe {
-            let _ = GetWindowRect(self.flyout, &mut current);
-        }
-        if current.right - current.left != desired_width
-            || current.bottom - current.top != desired_height
-        {
-            self.position_flyout(false);
-        }
-    }
-
-    fn position_flyout(&mut self, show: bool) {
-        let anchor = self.tray_rect().unwrap_or_else(cursor_rect);
-        let point =
-            POINT { x: (anchor.left + anchor.right) / 2, y: (anchor.top + anchor.bottom) / 2 };
-        let monitor = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST) };
-        let mut info =
-            MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
-        unsafe {
-            let _ = GetMonitorInfoW(monitor, &mut info);
-        }
-        let mut monitor_dpi_x = 96;
-        let mut monitor_dpi_y = 96;
-        let dpi = unsafe {
-            if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut monitor_dpi_x, &mut monitor_dpi_y)
-                .is_ok()
-            {
-                monitor_dpi_x.max(96)
-            } else {
-                GetDpiForWindow(self.flyout).max(96)
-            }
-        };
-        let dimensions = ui::flyout_dimensions(&self.display);
-        let width = ui::scale(dimensions.width, dpi);
-        let height = ui::scale(dimensions.height, dpi);
-        let gap = ui::scale(10, dpi);
-        let mut x = point.x - width / 2;
-        let mut y = anchor.top - height - gap;
-        if y < info.rcWork.top {
-            y = anchor.bottom + gap;
-        }
-        x = x.clamp(info.rcWork.left, (info.rcWork.right - width).max(info.rcWork.left));
-        y = y.clamp(info.rcWork.top, (info.rcWork.bottom - height).max(info.rcWork.top));
-        self.flyout_ignore_inactive_until = Some(Instant::now() + FLYOUT_ACTIVATION_GUARD);
-        unsafe {
-            let _ = KillTimer(Some(self.hwnd), TIMER_FLYOUT_ACTIVATE);
-            let flags = if show { SWP_SHOWWINDOW } else { SWP_NOACTIVATE | SWP_NOZORDER };
-            let _ = SetWindowPos(self.flyout, None, x, y, width, height, flags);
-            ui::apply_flyout_shape(self.flyout, dpi);
-            if show {
-                let _ = SetForegroundWindow(self.flyout);
-            }
-            let _ = InvalidateRect(Some(self.flyout), None, false);
-        }
-    }
-
-    fn tray_rect(&self) -> Option<RECT> {
-        #[cfg(any(codex_status_channel = "portable", codex_status_channel = "development"))]
-        let identifier = NOTIFYICONIDENTIFIER {
-            cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
-            hWnd: self.hwnd,
-            uID: TRAY_ID,
-            ..Default::default()
-        };
-        #[cfg(any(codex_status_channel = "stable", codex_status_channel = "beta"))]
-        let identifier = NOTIFYICONIDENTIFIER {
-            cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
-            hWnd: self.hwnd,
-            uID: TRAY_ID,
-            guidItem: TRAY_GUID,
-        };
-        unsafe { Shell_NotifyIconGetRect(&identifier).ok() }
-    }
-
-    fn build_menu(&self) -> windows::core::Result<HMENU> {
-        let owned_menu = MenuHandle(unsafe { CreatePopupMenu()? });
-        let menu = owned_menu.0;
-        let startup_enabled = startup::is_enabled();
-        unsafe {
-            let allow_provider_switch = !self.reset_panel.busy;
-            append_item(
-                menu,
-                CMD_PROVIDER_CODEX,
-                "Codex",
-                self.settings.provider == ProviderKind::Codex,
-                allow_provider_switch,
-            )?;
-            append_item(
-                menu,
-                CMD_PROVIDER_GEMINI,
-                "Gemini",
-                self.settings.provider == ProviderKind::Gemini,
-                allow_provider_switch,
-            )?;
-            separator(menu)?;
-            append(menu, CMD_REFRESH, self.locale.text("Refresh now", "立即刷新"), false)?;
-            let usage_label = match self.settings.provider {
-                ProviderKind::Codex => self.locale.text("Open Codex usage", "打开 Codex 用量页"),
-                ProviderKind::Gemini => self.locale.text("Open Gemini usage", "打开 Gemini 用量页"),
-            };
-            append(menu, CMD_USAGE, usage_label, false)?;
-            separator(menu)?;
-            if quota_switching_available(&self.display) {
-                append(
-                    menu,
-                    CMD_DISPLAY_FIVE_HOUR,
-                    self.locale.text("Show 5-hour quota", "显示5小时额度"),
-                    self.settings.display_quota == QuotaKind::FiveHour,
-                )?;
-                append(
-                    menu,
-                    CMD_DISPLAY_WEEKLY,
-                    self.locale.text("Show weekly quota", "显示周额度"),
-                    self.settings.display_quota == QuotaKind::Weekly,
-                )?;
-                separator(menu)?;
-            }
-
-            let refresh_sub = MenuHandle(CreatePopupMenu()?);
-            append(
-                refresh_sub.0,
-                CMD_INTERVAL_1,
-                self.locale.text("Refresh every 1 minute", "每 1 分钟刷新"),
-                self.settings.refresh_minutes == 1,
-            )?;
-            append(
-                refresh_sub.0,
-                CMD_INTERVAL_5,
-                self.locale.text("Refresh every 5 minutes", "每 5 分钟刷新"),
-                self.settings.refresh_minutes == 5,
-            )?;
-            append(
-                refresh_sub.0,
-                CMD_INTERVAL_15,
-                self.locale.text("Refresh every 15 minutes", "每 15 分钟刷新"),
-                self.settings.refresh_minutes == 15,
-            )?;
-            separator(refresh_sub.0)?;
-            append(
-                refresh_sub.0,
-                CMD_ALERT_OFF,
-                self.locale.text("Low-quota alerts off", "关闭低额度提醒"),
-                self.settings.alert_threshold.is_none(),
-            )?;
-            for (command, threshold) in [(CMD_ALERT_10, 10), (CMD_ALERT_20, 20), (CMD_ALERT_30, 30)]
-            {
-                let label = match (self.locale, threshold) {
-                    (ui::Locale::Chinese, value) => format!("剩余低于 {value}% 时提醒"),
-                    (_, value) => format!("Alert below {value}%"),
-                };
-                append(
-                    refresh_sub.0,
-                    command,
-                    &label,
-                    self.settings.alert_threshold == Some(threshold),
-                )?;
-            }
-            append_submenu(menu, refresh_sub, self.locale.text("Refresh & alerts", "刷新与提醒"))?;
-
-            let system_sub = MenuHandle(CreatePopupMenu()?);
-            append(
-                system_sub.0,
-                CMD_THEME_SYSTEM,
-                self.locale.text("Theme: system", "主题：跟随系统"),
-                self.settings.theme == "system",
-            )?;
-            append(
-                system_sub.0,
-                CMD_THEME_LIGHT,
-                self.locale.text("Theme: light", "主题：浅色"),
-                self.settings.theme == "light",
-            )?;
-            append(
-                system_sub.0,
-                CMD_THEME_DARK,
-                self.locale.text("Theme: dark", "主题：深色"),
-                self.settings.theme == "dark",
-            )?;
-            separator(system_sub.0)?;
-            append(
-                system_sub.0,
-                CMD_STARTUP,
-                self.locale.text("Start with Windows", "开机自动启动"),
-                startup_enabled,
-            )?;
-            append_submenu(
-                menu,
-                system_sub,
-                self.locale.text("Appearance & system", "界面与系统"),
-            )?;
-
-            separator(menu)?;
-            append(menu, CMD_UPDATE, self.locale.text("Check for updates", "检查更新"), false)?;
-            append(
-                menu,
-                CMD_EXIT,
-                self.locale.text("Exit AgentStatus", "退出 AgentStatus"),
-                false,
-            )?;
-        }
-        Ok(owned_menu.into_raw())
-    }
-
-    fn switch_provider(&mut self, next: ProviderKind) {
-        if self.settings.provider == next || self.reset_panel.busy {
-            return;
-        }
-        let current_idx = provider_index(self.settings.provider);
-        self.provider_caches[current_idx] = ProviderCache {
-            display: Some(self.display.clone()),
-            active_account_key: self.active_account_key.clone(),
-            failures: self.failures,
-            refreshing: self.refreshing,
-            refresh_pending: self.refresh_pending,
-            last_prefetched: self.display.snapshot.as_ref().map(|_| Instant::now()),
-        };
-        self.settings.provider = next;
-        self.persist_settings();
-        self.reset_panel.close();
-        self.history_navigation.page = ui::HistoryPage::Main;
-        self.hovered_history_day = None;
-
-        let next_cache = std::mem::take(&mut self.provider_caches[provider_index(next)]);
-        self.active_account_key = next_cache.active_account_key;
-        self.failures = next_cache.failures;
-        self.refreshing = next_cache.refreshing;
-        self.refresh_pending = next_cache.refresh_pending;
-        self.display = next_cache.display.unwrap_or_else(|| DisplayState::loading(None));
-        if !self.refreshing || self.display.snapshot.is_some() {
-            self.stop_refresh_feedback();
-        }
-        self.refresh_history_view_cache();
-        let _ = self.update_tray(false);
-        self.sync_visible_flyout_layout();
-        unsafe {
-            let _ = InvalidateRect(Some(self.flyout), None, false);
-        }
-        let stale = self.display.snapshot.as_ref().is_none_or(|snapshot| {
-            let max_age = i64::from(self.settings.refresh_minutes).saturating_mul(60);
-            Utc::now().timestamp().saturating_sub(snapshot.fetched_at) >= max_age
-        });
-        if stale && !self.refreshing {
-            self.start_refresh(false);
-        }
-    }
-
-    unsafe fn handle_command(&mut self, command: u32) {
-        unsafe {
-            match command {
-                0 => {}
-                CMD_PROVIDER_CODEX => self.switch_provider(ProviderKind::Codex),
-                CMD_PROVIDER_GEMINI => self.switch_provider(ProviderKind::Gemini),
-                CMD_REFRESH => {
-                    self.start_refresh(true);
-                    self.prefetch_other_provider(true);
-                }
-                CMD_USAGE => {
-                    let url = match self.settings.provider {
-                        ProviderKind::Codex => USAGE_URL,
-                        ProviderKind::Gemini => GEMINI_USAGE_URL,
-                    };
-                    self.open_url(url);
-                }
-                CMD_UPDATE => self.start_update_check(),
-                CMD_DISPLAY_FIVE_HOUR | CMD_DISPLAY_WEEKLY => {
-                    let kind = if command == CMD_DISPLAY_WEEKLY {
-                        QuotaKind::Weekly
-                    } else {
-                        QuotaKind::FiveHour
-                    };
-                    self.select_display_quota(kind);
-                }
-                CMD_INTERVAL_1 | CMD_INTERVAL_5 | CMD_INTERVAL_15 => {
-                    self.settings.refresh_minutes = match command {
-                        CMD_INTERVAL_1 => 1,
-                        CMD_INTERVAL_15 => 15,
-                        _ => 5,
-                    };
-                    self.persist_settings();
-                    self.reset_refresh_timer(self.settings.refresh_minutes * 60_000);
-                }
-                CMD_ALERT_OFF | CMD_ALERT_10 | CMD_ALERT_20 | CMD_ALERT_30 => {
-                    self.settings.alert_threshold = match command {
-                        CMD_ALERT_10 => Some(10),
-                        CMD_ALERT_20 => Some(20),
-                        CMD_ALERT_30 => Some(30),
-                        _ => None,
-                    };
-                    self.settings.last_alert_reset = None;
-                    self.settings.last_alert_reset_gemini = None;
-                    self.persist_settings();
-                    self.maybe_alert();
-                }
-                CMD_STARTUP => {
-                    let result = if startup::is_enabled() {
-                        startup::disable()
-                    } else {
-                        std::env::current_exe().and_then(|path| startup::enable(&path))
-                    };
-                    if let Err(error) = result {
-                        self.show_balloon(
-                            self.locale.text("Startup setting failed", "开机启动设置失败"),
-                            &error.to_string(),
-                        );
-                    }
-                }
-                CMD_THEME_SYSTEM | CMD_THEME_LIGHT | CMD_THEME_DARK => {
-                    self.settings.theme = match command {
-                        CMD_THEME_LIGHT => "light",
-                        CMD_THEME_DARK => "dark",
-                        _ => "system",
-                    }
-                    .to_owned();
-                    self.persist_settings();
-                    self.theme = ui::detect_theme(&self.settings.theme);
-                    ui::configure_flyout(self.flyout, self.theme);
-                    let _ = self.update_tray(false);
-                    let _ = InvalidateRect(Some(self.flyout), None, true);
-                }
-                CMD_EXIT => {
-                    let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
-                }
-                _ => {}
-            }
-        }
-    }
-
     fn persist_settings(&self) {
         self.save_settings(true);
     }
@@ -2432,26 +1475,6 @@ impl AppState {
         }
     }
 
-    fn open_url(&self, url: &str) {
-        let url = wide0(url);
-        let result = unsafe {
-            ShellExecuteW(
-                Some(self.hwnd),
-                w!("open"),
-                PCWSTR(url.as_ptr()),
-                PCWSTR::null(),
-                PCWSTR::null(),
-                SW_SHOWNORMAL,
-            )
-        };
-        if result.0 as isize <= 32 {
-            self.show_balloon(
-                self.locale.text("Could not open browser", "无法打开浏览器"),
-                self.locale
-                    .text("Copy the link from the project README.", "请从项目 README 复制链接。"),
-            );
-        }
-    }
     fn cleanup_window_resources(&mut self) {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH);
@@ -2472,79 +1495,6 @@ impl AppState {
 impl Drop for AppState {
     fn drop(&mut self) {
         self.cleanup_window_resources();
-    }
-}
-
-unsafe fn append(
-    menu: HMENU,
-    command: u32,
-    label: &str,
-    checked: bool,
-) -> windows::core::Result<()> {
-    unsafe { append_item(menu, command, label, checked, true) }
-}
-
-unsafe fn append_item(
-    menu: HMENU,
-    command: u32,
-    label: &str,
-    checked: bool,
-    enabled: bool,
-) -> windows::core::Result<()> {
-    unsafe {
-        let text = wide0(label);
-        let mut flags = MF_STRING;
-        if checked {
-            flags |= MF_CHECKED;
-        }
-        if !enabled {
-            flags |= MF_GRAYED;
-        }
-        AppendMenuW(menu, flags, command as usize, PCWSTR(text.as_ptr()))
-    }
-}
-
-unsafe fn append_submenu(
-    parent: HMENU,
-    submenu: MenuHandle,
-    label: &str,
-) -> windows::core::Result<()> {
-    unsafe {
-        let text = wide0(label);
-        let raw = submenu.into_raw();
-        if let Err(err) = AppendMenuW(parent, MF_POPUP, raw.0 as usize, PCWSTR(text.as_ptr())) {
-            let _ = DestroyMenu(raw);
-            return Err(err);
-        }
-        Ok(())
-    }
-}
-
-fn provider_index(provider: ProviderKind) -> usize {
-    match provider {
-        ProviderKind::Codex => 0,
-        ProviderKind::Gemini => 1,
-    }
-}
-
-unsafe fn separator(menu: HMENU) -> windows::core::Result<()> {
-    unsafe { AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null()) }
-}
-
-fn cursor_rect() -> RECT {
-    let mut point = POINT::default();
-    unsafe {
-        let _ = GetCursorPos(&mut point);
-    }
-    RECT { left: point.x, top: point.y, right: point.x + 1, bottom: point.y + 1 }
-}
-
-fn copy_utf16<const N: usize>(target: &mut [u16; N], value: &str) {
-    target.fill(0);
-    for (destination, source) in
-        target.iter_mut().take(N.saturating_sub(1)).zip(value.encode_utf16())
-    {
-        *destination = source;
     }
 }
 
@@ -2607,7 +1557,7 @@ fn diagnostic(_stage: &str) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{AccountSummary, QuotaWindow, SESSION_MINUTES, WEEK_MINUTES};
+    use crate::model::{AccountSummary, QuotaSnapshot, QuotaWindow, SESSION_MINUTES, WEEK_MINUTES};
 
     fn display_with_quotas(weekly: Option<u8>, five_hour: Option<u8>) -> DisplayState {
         let window = |percent: u8, window_minutes| QuotaWindow {
@@ -2663,25 +1613,18 @@ mod tests {
 
     #[test]
     fn reset_refresh_boundaries_are_isolated_per_provider() {
-        let mut states = [ResetRefreshState::default(), ResetRefreshState::default()];
-        let codex_display = display_with_reset_times(Some(500), None);
-        let gemini_display = display_with_reset_times(Some(200), None);
+        let mut providers = [ProviderSlot::default(), ProviderSlot::default()];
+        providers[provider_index(ProviderKind::Codex)].display =
+            display_with_reset_times(Some(500), None);
+        providers[provider_index(ProviderKind::Gemini)].display =
+            display_with_reset_times(Some(200), None);
 
-        assert!(states[provider_index(ProviderKind::Codex)].begin_if_due(
-            &codex_display,
-            500,
-            false
-        ));
-        assert!(states[provider_index(ProviderKind::Gemini)].begin_if_due(
-            &gemini_display,
-            500,
-            false
-        ));
-        assert!(!states[provider_index(ProviderKind::Gemini)].begin_if_due(
-            &gemini_display,
-            500,
-            false
-        ));
+        let codex = &mut providers[provider_index(ProviderKind::Codex)];
+        assert!(codex.reset_refresh.begin_if_due(&codex.display, 500, false));
+
+        let gemini = &mut providers[provider_index(ProviderKind::Gemini)];
+        assert!(gemini.reset_refresh.begin_if_due(&gemini.display, 500, false));
+        assert!(!gemini.reset_refresh.begin_if_due(&gemini.display, 500, false));
     }
 
     #[test]
@@ -2690,19 +1633,6 @@ mod tests {
             friendly_error("Codex is not installed", ui::Locale::Chinese),
             "未找到 Codex，请先安装并加入 PATH"
         );
-    }
-
-    #[test]
-    fn utf16_copy_always_reserves_a_terminator() {
-        let mut target = [9_u16; 4];
-        copy_utf16(&mut target, "abcdef");
-        assert_eq!(target[3], 0);
-    }
-
-    #[test]
-    fn pointer_coordinates_sign_extend_both_axes() {
-        let packed = u32::from(0xfffe_u16) | (u32::from(0xfffd_u16) << 16);
-        assert_eq!(pointer_coordinates(LPARAM(packed as isize)), (-2, -3));
     }
 
     #[test]
@@ -2745,172 +1675,23 @@ mod tests {
     }
 
     #[test]
-    fn history_wheel_accumulates_a_notch_and_throttles_momentum() {
-        let start = Instant::now();
-        let mut wheel = HistoryWheelState::default();
-        assert_eq!(wheel.push(60, start), None);
-        assert_eq!(wheel.push(60, start), Some(-1));
-        wheel.commit(start);
-        assert_eq!(wheel.push(-120, start + Duration::from_millis(399)), None);
-        assert_eq!(wheel.push(-120, start + Duration::from_millis(400)), Some(1));
-    }
-
-    #[test]
-    fn history_wheel_discards_partial_motion_when_direction_changes() {
-        let start = Instant::now();
-        let mut wheel = HistoryWheelState::default();
-        assert_eq!(wheel.push(80, start), None);
-        assert_eq!(wheel.push(-80, start), None);
-        assert_eq!(wheel.push(-40, start), Some(1));
-    }
-
-    #[test]
-    fn uncommitted_boundary_motion_does_not_throttle_the_reverse_direction() {
-        let start = Instant::now();
-        let mut wheel = HistoryWheelState::default();
-        assert_eq!(wheel.push(-120, start), Some(1));
-        assert_eq!(wheel.push(120, start + Duration::from_millis(1)), Some(-1));
-    }
-
-    #[test]
-    fn standard_windows_back_inputs_are_recognized() {
-        assert!(standard_back_message(WM_KEYDOWN, WPARAM(VK_BROWSER_BACK.0 as usize), LPARAM(0)));
-        assert!(standard_back_message(
-            WM_XBUTTONUP,
-            WPARAM(usize::from(XBUTTON1) << 16),
-            LPARAM(0)
-        ));
-        assert!(standard_back_message(
-            WM_APPCOMMAND,
-            WPARAM(0),
-            LPARAM((APPCOMMAND_BROWSER_BACKWARD_ID as isize) << 16)
-        ));
-        assert!(!standard_back_message(WM_KEYDOWN, WPARAM(VK_ESCAPE.0 as usize), LPARAM(0)));
-    }
-
-    #[test]
-    fn mouse_wheel_delta_is_sign_extended() {
-        assert_eq!(wheel_delta(WPARAM(120_usize << 16)), 120);
-        assert_eq!(wheel_delta(WPARAM((u16::MAX as usize - 119) << 16)), -120);
-    }
-
-    #[test]
-    fn refresh_rotation_repeats_every_animation_cycle() {
-        for (elapsed, expected) in [
-            (Duration::ZERO, 0.0),
-            (Duration::from_millis(300), 180.0),
-            (Duration::from_millis(600), 0.0),
-            (Duration::from_millis(900), 180.0),
-        ] {
-            assert!((refresh_rotation_degrees(elapsed) - expected).abs() < 0.001);
-        }
-    }
-
-    #[test]
-    fn tray_indicator_uses_weekly_quota_when_five_hour_is_unavailable() {
-        let display = display_with_quotas(Some(66), None);
-        for preferred in [QuotaKind::FiveHour, QuotaKind::Weekly] {
-            let state = tray_quota_state(&display, preferred);
-            assert_eq!(state.primary_kind, QuotaKind::Weekly);
-            assert_eq!(state.primary_percent, Some(66));
-            assert_eq!(state.indicator_percent, Some(66));
-        }
-        assert!(!quota_switching_available(&display));
-    }
-
-    #[test]
-    fn tray_indicator_uses_five_hour_quota_when_weekly_is_unavailable() {
-        let display = display_with_quotas(None, Some(85));
-        for preferred in [QuotaKind::FiveHour, QuotaKind::Weekly] {
-            let state = tray_quota_state(&display, preferred);
-            assert_eq!(state.primary_kind, QuotaKind::FiveHour);
-            assert_eq!(state.primary_percent, Some(85));
-            assert_eq!(state.indicator_percent, Some(85));
-        }
-        assert!(!quota_switching_available(&display));
-    }
-
-    #[test]
-    fn tray_indicator_uses_the_other_quota_when_both_are_available() {
-        let display = display_with_quotas(Some(66), Some(85));
-        let five_hour = tray_quota_state(&display, QuotaKind::FiveHour);
-        assert_eq!(five_hour.primary_percent, Some(85));
-        assert_eq!(five_hour.indicator_percent, Some(66));
-
-        let weekly = tray_quota_state(&display, QuotaKind::Weekly);
-        assert_eq!(weekly.primary_percent, Some(66));
-        assert_eq!(weekly.indicator_percent, Some(85));
-        assert!(quota_switching_available(&display));
-    }
-
-    #[test]
-    fn tray_has_no_quota_values_when_both_are_unavailable() {
-        let display = display_with_quotas(None, None);
-        let state = tray_quota_state(&display, QuotaKind::Weekly);
-        assert_eq!(state.primary_kind, QuotaKind::Weekly);
-        assert_eq!(state.primary_percent, None);
-        assert_eq!(state.indicator_percent, None);
-        assert!(quota_switching_available(&display));
-    }
-
-    #[test]
-    fn low_quota_alert_follows_selection_or_the_only_available_quota() {
-        let both = display_with_quotas(Some(18), Some(9));
-        assert_eq!(
-            quota_alert_state(&both, QuotaKind::FiveHour).map(|alert| alert.kind),
-            Some(QuotaKind::FiveHour)
-        );
-        assert_eq!(
-            quota_alert_state(&both, QuotaKind::Weekly).map(|alert| alert.kind),
-            Some(QuotaKind::Weekly)
-        );
-
-        let five_only = display_with_quotas(None, Some(9));
-        assert_eq!(
-            quota_alert_state(&five_only, QuotaKind::Weekly).map(|alert| alert.kind),
-            Some(QuotaKind::FiveHour)
-        );
-        let weekly_only = display_with_quotas(Some(18), None);
-        assert_eq!(
-            quota_alert_state(&weekly_only, QuotaKind::FiveHour).map(|alert| alert.kind),
-            Some(QuotaKind::Weekly)
-        );
-    }
-
-    #[test]
-    fn low_quota_alert_requires_remaining_quota_to_be_strictly_below_threshold() {
-        let display = display_with_quotas(Some(20), None);
-        let alert = quota_alert_state(&display, QuotaKind::Weekly).unwrap();
-        assert!(!(alert.percent < 20));
-        assert!(alert.percent < 30);
-    }
-
-    #[test]
-    fn missing_reset_alert_keys_are_stable_and_distinct_by_quota() {
-        let five_hour = LowQuotaAlert { kind: QuotaKind::FiveHour, percent: 9, reset: None };
-        let weekly = LowQuotaAlert { kind: QuotaKind::Weekly, percent: 9, reset: None };
-        assert_eq!(alert_cycle_key(five_hour), alert_cycle_key(five_hour));
-        assert_ne!(alert_cycle_key(five_hour), alert_cycle_key(weekly));
-    }
-
-    #[test]
     fn background_prefetch_throttles_periodic_runs_but_allows_forced_and_stale() {
         let now = Instant::now();
-        let mut cache = ProviderCache::default();
-        assert!(should_background_prefetch(&cache, false, now));
+        let mut slot = ProviderSlot::default();
+        assert!(should_background_prefetch(&slot, false, now));
 
-        cache.display = Some(display_with_quotas(Some(80), Some(90)));
-        cache.last_prefetched = Some(now);
-        assert!(!should_background_prefetch(&cache, false, now + Duration::from_secs(5 * 60)));
-        assert!(should_background_prefetch(&cache, true, now + Duration::from_secs(5 * 60)));
-        assert!(should_background_prefetch(&cache, false, now + BACKGROUND_PREFETCH_INTERVAL));
+        slot.display = display_with_quotas(Some(80), Some(90));
+        slot.last_prefetched = Some(now);
+        assert!(!should_background_prefetch(&slot, false, now + Duration::from_secs(5 * 60)));
+        assert!(should_background_prefetch(&slot, true, now + Duration::from_secs(5 * 60)));
+        assert!(should_background_prefetch(&slot, false, now + BACKGROUND_PREFETCH_INTERVAL));
 
-        cache.display = None;
-        cache.failures = 1;
-        assert!(!should_background_prefetch(&cache, false, now + Duration::from_secs(5 * 60)));
-        assert!(should_background_prefetch(&cache, false, now + BACKGROUND_PREFETCH_INTERVAL));
+        slot.display = DisplayState::loading(None);
+        slot.failures = 1;
+        assert!(!should_background_prefetch(&slot, false, now + Duration::from_secs(5 * 60)));
+        assert!(should_background_prefetch(&slot, false, now + BACKGROUND_PREFETCH_INTERVAL));
 
-        cache.refreshing = true;
-        assert!(!should_background_prefetch(&cache, true, now + BACKGROUND_PREFETCH_INTERVAL));
+        slot.refreshing = true;
+        assert!(!should_background_prefetch(&slot, true, now + BACKGROUND_PREFETCH_INTERVAL));
     }
 }
