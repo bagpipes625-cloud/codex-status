@@ -2,6 +2,12 @@
 
 All notable changes to CodexStatus are documented here.
 
+## [0.6.21] - 2026-11-27
+
+- Fix unused weekly quota window classification across Codex and Claude/Gemini snapshots and decouple reset-details formatting from the wall clock for deterministic rendering and tests.
+- Harden process, provider, renderer, and persistence reliability: enforce suspended `JobObject` child-tree containment, isolate per-provider state and low-quota reminders, recover cleanly from Direct2D device loss, and retry atomic settings writes on transient `ERROR_SHARING_VIOLATION` locks.
+- Consolidate shared infrastructure into dedicated `winhttp`, `process`, and `winutil` modules, unify `ProviderSlot` across split `app` modules, centralize UI layout geometry into `ui::layout` with cached Direct2D brushes, and add wake-from-sleep refresh plus Gemini click guards.
+
 ## [0.6.20] - 2026-11-21
 
 - Prefer the CLI daemon-managed Codex binary (`%CODEX_HOME%\packages\app-server-daemon\current\bin\codex.exe`) and npm native `codex.exe` over legacy Desktop plugin binaries and Node.js wrappers, and widen `OPTIONAL_USAGE_GRACE` to 900 ms to avoid unnecessary fallback token requests.
