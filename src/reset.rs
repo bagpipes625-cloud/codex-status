@@ -83,50 +83,58 @@ impl ResetPanel {
     }
 
     pub fn max_scroll(count: usize, height: f32) -> f32 {
-        (count as f32 * 60.0 - (height - 92.0)).max(0.0)
+        use crate::ui::layout::{RESET_LIST_BOTTOM_MARGIN, RESET_LIST_TOP, RESET_ROW_HEIGHT};
+        let viewport = height - (RESET_LIST_TOP + RESET_LIST_BOTTOM_MARGIN);
+        (count as f32 * RESET_ROW_HEIGHT - viewport).max(0.0)
     }
 
     pub fn hit(&self, compact: bool, count: usize, x: f32, y: f32) -> Option<ResetHit> {
-        let (w, h) = if compact { (336.0, 284.0) } else { (376.0, 352.0) };
+        use crate::ui::layout::{
+            RESET_BACK_HIT, RESET_LIST_TOP, RESET_ROW_HEIGHT, RESET_USE_BUTTON_BOTTOM_OFFSET,
+            RESET_USE_BUTTON_TOP_OFFSET, reset_panel_layout,
+        };
+        let layout = reset_panel_layout(compact);
         if !self.open {
-            return (if compact {
-                inside(x, y, 197.0, 198.0, 315.0, 262.0)
-            } else {
-                inside(x, y, 203.0, 298.0, 350.0, 335.0)
-            })
-            .then_some(ResetHit::Open);
+            return layout.open_hit.contains_f32(x, y).then_some(ResetHit::Open);
         }
         if self.success {
             if !self.success_interactive {
                 return None;
             }
-            let top = (h - 126.0) / 2.0;
-            return inside(x, y, 60.0, top + 76.0, w - 60.0, top + 108.0)
-                .then_some(ResetHit::DismissSuccess);
+            return inside_d2d(x, y, layout.success_dismiss).then_some(ResetHit::DismissSuccess);
         }
         if self.busy {
             return None;
         }
         if self.confirmation.is_some() {
-            let top = (h - 166.0) / 2.0;
-            if inside(x, y, 40.0, top + 119.0, w / 2.0 - 5.0, top + 151.0) {
+            if inside_d2d(x, y, layout.confirm_cancel) {
                 return Some(ResetHit::Cancel);
             }
-            if inside(x, y, w / 2.0 + 5.0, top + 119.0, w - 40.0, top + 151.0) {
+            if inside_d2d(x, y, layout.confirm_ok) {
                 return Some(ResetHit::Confirm);
             }
-            return (!inside(x, y, 24.0, top, w - 24.0, top + 166.0)).then_some(ResetHit::Cancel);
+            return (!inside_d2d(x, y, layout.confirm_dialog)).then_some(ResetHit::Cancel);
         }
-        if inside(x, y, 14.0, 8.0, 110.0, 38.0) {
+        if RESET_BACK_HIT.contains_f32(x, y) {
             return Some(ResetHit::Back);
         }
-        if self.pending.is_some() && inside(x, y, w - 150.0, 46.0, w - 28.0, 74.0) {
+        if self.pending.is_some() && inside_d2d(x, y, layout.retry_hit) {
             return Some(ResetHit::Retry);
         }
-        if inside(x, y, w - 111.0, 76.0, w - 32.0, h - 16.0) {
-            let row_y = y - 76.0 + self.scroll;
-            let index = (row_y / 60.0).floor() as usize;
-            if index < count && (9.0..=43.0).contains(&(row_y % 60.0)) {
+        if inside(
+            x,
+            y,
+            layout.use_column_left,
+            RESET_LIST_TOP,
+            layout.use_column_right,
+            layout.list_bottom,
+        ) {
+            let row_y = y - RESET_LIST_TOP + self.scroll;
+            let index = (row_y / RESET_ROW_HEIGHT).floor() as usize;
+            if index < count
+                && (RESET_USE_BUTTON_TOP_OFFSET..=RESET_USE_BUTTON_BOTTOM_OFFSET)
+                    .contains(&(row_y % RESET_ROW_HEIGHT))
+            {
                 return Some(ResetHit::Use(index));
             }
         }
@@ -136,6 +144,14 @@ impl ResetPanel {
 
 fn inside(x: f32, y: f32, l: f32, t: f32, r: f32, b: f32) -> bool {
     x >= l && x <= r && y >= t && y <= b
+}
+
+fn inside_d2d(
+    x: f32,
+    y: f32,
+    rect: windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F,
+) -> bool {
+    inside(x, y, rect.left, rect.top, rect.right, rect.bottom)
 }
 
 #[cfg(test)]

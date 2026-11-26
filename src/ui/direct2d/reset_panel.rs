@@ -1,3 +1,7 @@
+use super::super::layout::{
+    RESET_LIST_TOP, RESET_ROW_HEIGHT, RESET_USE_BUTTON_BOTTOM_OFFSET, RESET_USE_BUTTON_TOP_OFFSET,
+    reset_panel_layout,
+};
 use super::*;
 use crate::reset::{ResetHit, ResetPanel};
 
@@ -9,8 +13,9 @@ pub(super) fn draw(
     input: &PaintInput<'_>,
     panel: &ResetPanel,
 ) -> Result<()> {
-    let dimensions = flyout_dimensions(input.state);
-    let (w, h) = (dimensions.width as f32, dimensions.height as f32);
+    let compact = matches!(input.state.quota_availability(), QuotaAvailability::Single(_));
+    let layout = reset_panel_layout(compact);
+    let (w, h) = (layout.width, layout.height);
     let locale = input.locale;
     unsafe {
         target.FillRectangle(&rect(0.0, 0.0, w, h), &b.background);
@@ -78,14 +83,14 @@ pub(super) fn draw(
     let rows = credits.unwrap_or_default();
     unsafe {
         target.PushAxisAlignedClip(
-            &rect(24.0, 76.0, w - 25.0, h - 17.0),
+            &rect(24.0, RESET_LIST_TOP, w - 25.0, layout.list_bottom - 1.0),
             D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
         );
     }
     let scroll = panel.scroll.min(ResetPanel::max_scroll(rows.len(), h));
     for (index, credit) in rows.iter().enumerate() {
-        let y = 76.0 + index as f32 * 60.0 - scroll;
-        if y + 60.0 < 76.0 || y > h - 16.0 {
+        let y = RESET_LIST_TOP + index as f32 * RESET_ROW_HEIGHT - scroll;
+        if y + RESET_ROW_HEIGHT < RESET_LIST_TOP || y > layout.list_bottom {
             continue;
         }
         let date = credit
@@ -107,7 +112,13 @@ pub(super) fn draw(
         );
         let enabled =
             credit.id.is_some() && credit.expires_at.is_none_or(|t| t > Local::now().timestamp());
-        let button = rounded_rect(w - 111.0, y + 9.0, w - 32.0, y + 43.0, 6.0);
+        let button = rounded_rect(
+            layout.use_column_left,
+            y + RESET_USE_BUTTON_TOP_OFFSET,
+            layout.use_column_right,
+            y + RESET_USE_BUTTON_BOTTOM_OFFSET,
+            6.0,
+        );
         unsafe {
             if panel.hovered == Some(ResetHit::Use(index)) && enabled {
                 target.FillRoundedRectangle(&button, &b.line);
@@ -158,19 +169,13 @@ pub(super) fn draw(
     }
     if panel.success {
         let overlay = alpha_brush(target, if input.theme.dark { 0.58 } else { 0.25 })?;
-        let top = (h - 126.0) / 2.0;
+        let dialog =
+            D2D1_ROUNDED_RECT { rect: layout.success_dialog, radiusX: 10.0, radiusY: 10.0 };
+        let top = layout.success_dialog.top;
         unsafe {
             target.FillRectangle(&rect(0.0, 0.0, w, h), &overlay);
-            target.FillRoundedRectangle(
-                &rounded_rect(34.0, top, w - 34.0, top + 126.0, 10.0),
-                &b.metrics_surface,
-            );
-            target.DrawRoundedRectangle(
-                &rounded_rect(34.0, top, w - 34.0, top + 126.0, 10.0),
-                &b.line,
-                1.0,
-                None::<&ID2D1StrokeStyle>,
-            );
+            target.FillRoundedRectangle(&dialog, &b.metrics_surface);
+            target.DrawRoundedRectangle(&dialog, &b.line, 1.0, None::<&ID2D1StrokeStyle>);
         }
         draw_text(
             target,
@@ -186,7 +191,7 @@ pub(super) fn draw(
             &f.date,
             &b.muted,
         );
-        let button = rounded_rect(60.0, top + 76.0, w - 60.0, top + 108.0, 6.0);
+        let button = D2D1_ROUNDED_RECT { rect: layout.success_dismiss, radiusX: 6.0, radiusY: 6.0 };
         unsafe {
             target.DrawRoundedRectangle(&button, &b.line, 1.0, None::<&ID2D1StrokeStyle>);
         }
@@ -195,19 +200,13 @@ pub(super) fn draw(
     }
     if let Some(credit) = &panel.confirmation {
         let overlay = alpha_brush(target, if input.theme.dark { 0.58 } else { 0.25 })?;
-        let top = (h - 166.0) / 2.0;
+        let dialog =
+            D2D1_ROUNDED_RECT { rect: layout.confirm_dialog, radiusX: 10.0, radiusY: 10.0 };
+        let top = layout.confirm_dialog.top;
         unsafe {
             target.FillRectangle(&rect(0.0, 0.0, w, h), &overlay);
-            target.FillRoundedRectangle(
-                &rounded_rect(24.0, top, w - 24.0, top + 166.0, 10.0),
-                &b.metrics_surface,
-            );
-            target.DrawRoundedRectangle(
-                &rounded_rect(24.0, top, w - 24.0, top + 166.0, 10.0),
-                &b.line,
-                1.0,
-                None::<&ID2D1StrokeStyle>,
-            );
+            target.FillRoundedRectangle(&dialog, &b.metrics_surface);
+            target.DrawRoundedRectangle(&dialog, &b.line, 1.0, None::<&ID2D1StrokeStyle>);
         }
         draw_text(
             target,
@@ -242,11 +241,10 @@ pub(super) fn draw(
             &f.date,
             &b.muted,
         );
-        for (left, right, label) in [
-            (40.0, w / 2.0 - 5.0, locale.text("Cancel", "取消")),
+        for (button_rect, label) in [
+            (layout.confirm_cancel, locale.text("Cancel", "取消")),
             (
-                w / 2.0 + 5.0,
-                w - 40.0,
+                layout.confirm_ok,
                 if panel.busy {
                     locale.text("Processing…", "处理中…")
                 } else {
@@ -254,7 +252,7 @@ pub(super) fn draw(
                 },
             ),
         ] {
-            let button = rounded_rect(left, top + 119.0, right, top + 151.0, 6.0);
+            let button = D2D1_ROUNDED_RECT { rect: button_rect, radiusX: 6.0, radiusY: 6.0 };
             unsafe {
                 target.DrawRoundedRectangle(&button, &b.line, 1.0, None::<&ID2D1StrokeStyle>);
             }

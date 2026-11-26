@@ -1,3 +1,8 @@
+use super::layout::{
+    COMPACT_HISTORY_OPEN_HIT, COMPACT_RESOURCE_TOGGLE_HIT, COMPACT_USAGE_TOGGLE_HIT,
+    FULL_HISTORY_OPEN_HIT, FULL_RESOURCE_TOGGLE_HIT, FULL_USAGE_TOGGLE_HIT, HISTORY_BACK_HIT,
+    HISTORY_PREV_HIT, history_layout,
+};
 use crate::history::{UsageHistoryView, monday_of};
 use chrono::{Datelike, Duration, Local, NaiveDate};
 
@@ -151,41 +156,41 @@ pub fn hit_test(
     match navigation.page {
         HistoryPage::Main => {
             if compact {
-                if contains(x, y, 197, 173, 315, 198) {
+                if COMPACT_RESOURCE_TOGGLE_HIT.contains_i32(x, y) {
                     Some(HistoryHit::ToggleResourcePage)
-                } else if contains(x, y, 197, 59, 315, 86) {
+                } else if COMPACT_USAGE_TOGGLE_HIT.contains_i32(x, y) {
                     Some(HistoryHit::ToggleSummaryWeek)
-                } else if contains(x, y, 197, 86, 315, 151) {
+                } else if COMPACT_HISTORY_OPEN_HIT.contains_i32(x, y) {
                     Some(HistoryHit::OpenHistory)
                 } else {
                     None
                 }
-            } else if contains(x, y, 197, 278, 350, 303) {
+            } else if FULL_RESOURCE_TOGGLE_HIT.contains_i32(x, y) {
                 Some(HistoryHit::ToggleResourcePage)
-            } else if contains(x, y, 30, 278, 178, 298) {
+            } else if FULL_USAGE_TOGGLE_HIT.contains_i32(x, y) {
                 Some(HistoryHit::ToggleSummaryWeek)
-            } else if contains(x, y, 30, 298, 178, 335) {
+            } else if FULL_HISTORY_OPEN_HIT.contains_i32(x, y) {
                 Some(HistoryHit::OpenHistory)
             } else {
                 None
             }
         }
         HistoryPage::Month | HistoryPage::Week => {
-            if contains(x, y, 10, 7, 72, 39) {
+            if HISTORY_BACK_HIT.contains_i32(x, y) {
                 return Some(HistoryHit::Back);
             }
             if !full_history {
                 return None;
             }
-            let width = if compact { 336 } else { 376 };
-            if contains(x, y, 43, 43, 72, 77) {
+            let layout = history_layout(compact);
+            if HISTORY_PREV_HIT.contains_i32(x, y) {
                 return Some(if navigation.page == HistoryPage::Month {
                     HistoryHit::PreviousMonth
                 } else {
                     HistoryHit::PreviousWeek
                 });
             }
-            if contains(x, y, width - 72, 43, width - 43, 77) {
+            if layout.next_hit.contains_i32(x, y) {
                 let today =
                     history.map(|view| view.today).unwrap_or_else(|| Local::now().date_naive());
                 let at_latest = match navigation.page {
@@ -204,12 +209,10 @@ pub fn hit_test(
                     HistoryHit::NextWeek
                 });
             }
-            let tabs_top = if compact { 249 } else { 316 };
-            let tabs_left = (width - 160) / 2;
-            if contains(x, y, tabs_left, tabs_top, tabs_left + 80, tabs_top + 28) {
+            if layout.week_tab.contains_i32(x, y) {
                 return Some(HistoryHit::WeekTab);
             }
-            if contains(x, y, tabs_left + 80, tabs_top, tabs_left + 160, tabs_top + 28) {
+            if layout.month_tab.contains_i32(x, y) {
                 return Some(HistoryHit::MonthTab);
             }
             if navigation.page == HistoryPage::Month {
@@ -245,25 +248,18 @@ pub fn hovered_day(
 }
 
 fn month_date_at(month: NaiveDate, compact: bool, x: i32, y: i32) -> Option<NaiveDate> {
-    let grid_left = 24;
-    let grid_right = if compact { 312 } else { 352 };
-    let grid_top = if compact { 96 } else { 101 };
-    let grid_bottom = if compact { 235 } else { 302 };
-    if !contains(x, y, grid_left, grid_top, grid_right, grid_bottom) {
+    let grid = history_layout(compact).month_grid;
+    if !grid.contains_i32(x, y) {
         return None;
     }
-    let column = ((x - grid_left) * 7 / (grid_right - grid_left)).clamp(0, 6);
-    let row = ((y - grid_top) * 6 / (grid_bottom - grid_top)).clamp(0, 5);
+    let column = ((x - grid.left) * 7 / (grid.right - grid.left)).clamp(0, 6);
+    let row = ((y - grid.top) * 6 / (grid.bottom - grid.top)).clamp(0, 5);
     let offset = month.weekday().num_days_from_monday() as i64;
     Some(month - Duration::days(offset) + Duration::days((row * 7 + column) as i64))
 }
 
 fn logical(value: i32, dpi: u32) -> i32 {
     ((i64::from(value) * 96) / i64::from(dpi.max(96))) as i32
-}
-
-fn contains(x: i32, y: i32, left: i32, top: i32, right: i32, bottom: i32) -> bool {
-    x >= left && x < right && y >= top && y < bottom
 }
 
 #[cfg(test)]

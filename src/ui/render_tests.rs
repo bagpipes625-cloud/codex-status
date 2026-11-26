@@ -1,7 +1,10 @@
 //! Explicit offline native render validation; never queries an account.
+use super::gdi::draw_card;
+use super::theme::rgb;
 use super::*;
 use crate::history::{DailyUsageRecord, UsageHistory};
-use crate::model::{CreditBalance, QuotaSnapshot};
+use crate::model::{AccountSummary, CreditBalance, QuotaSnapshot, QuotaWindow};
+use chrono::Local;
 use windows::Win32::{
     Foundation::*, Graphics::Gdi::*, System::LibraryLoader::GetModuleHandleW,
     UI::WindowsAndMessaging::*,

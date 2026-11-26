@@ -5,18 +5,29 @@
 //! prewarmed once at startup, stay warm while hidden, then release on shutdown
 //! or device loss.
 
-use super::{
-    AccountMetrics, CardInteraction, FLYOUT_CORNER_RADIUS, HEADER_ACCENT_BOTTOM, HEADER_ACCENT_TOP,
-    HEADER_TEXT_BOTTOM, HEADER_TEXT_TOP, HEADER_VERSION_BOTTOM, HEADER_VERSION_TOP,
-    HistoryNavigation, HistoryPage, Locale, QuotaPanelGeometry, QuotaPanelSlot,
-    REFRESH_ARC_START_DEGREES, REFRESH_ARC_SWEEP_DEGREES, REFRESH_BUTTON_GAP,
-    REFRESH_BUTTON_RADIUS, REFRESH_BUTTON_RIGHT, ResourcePage, Theme, UsageSummaryWeek, accent_for,
-    account_metrics, claude_summary_rows, flyout_dimensions, format_tokens, header_title,
-    inner_track_color, interactive_text_color, outer_track_color, quota_bar_color,
-    quota_card_colors, quota_label, quota_panel_geometry, refresh_icon_color, reset_details,
-    resource_label, theoretical_color, theoretical_remaining_percent, updated_text, version_text,
-    weekly_usage_metrics,
+use super::format::{
+    AccountMetrics, ClaudeWindowSummary, Locale, account_metrics, claude_summary_rows,
+    format_tokens, header_title, quota_label, reset_details, resource_label,
+    theoretical_remaining_percent, updated_text, version_text, weekly_usage_metrics,
 };
+use super::layout::{
+    BOTTOM_DIVIDER_X, BOTTOM_METRICS_CARD, COMPACT_CLAUDE_FIVE_HOUR, COMPACT_CLAUDE_WEEKLY,
+    COMPACT_RESOURCE_HEADING, COMPACT_USAGE_HEADING, FLYOUT_CORNER_RADIUS, FULL_CLAUDE_FIVE_HOUR,
+    FULL_CLAUDE_WEEKLY, FULL_RESOURCE_HEADING, FULL_USAGE_HEADING, HEADER_ACCENT_BOTTOM,
+    HEADER_ACCENT_TOP, HEADER_TEXT_BOTTOM, HEADER_TEXT_TOP, HEADER_VERSION_BOTTOM,
+    HEADER_VERSION_TOP, HISTORY_TABS_HALF_WIDTH, HISTORY_TABS_WIDTH, QUOTA_ARC_CENTER_Y,
+    QUOTA_CARD_BOTTOM, QUOTA_CARD_TOP, QuotaPanelGeometry, QuotaPanelSlot,
+    REFRESH_ARC_START_DEGREES, REFRESH_ARC_SWEEP_DEGREES, REFRESH_BUTTON_GAP,
+    REFRESH_BUTTON_RADIUS, REFRESH_BUTTON_RIGHT, STACKED_DIVIDER_LEFT, STACKED_DIVIDER_RIGHT,
+    STACKED_DIVIDER_Y, STACKED_METRICS_CARD, flyout_dimensions, history_layout,
+    quota_panel_geometry, refresh_button_center,
+};
+use super::theme::{
+    Theme, accent_for, inner_track_color, interactive_text_color, outer_track_color,
+    panel_title_color, quota_bar_color, quota_card_colors, refresh_icon_color, rgb,
+    theoretical_color,
+};
+use super::{CardInteraction, HistoryNavigation, HistoryPage, ResourcePage, UsageSummaryWeek};
 use crate::history::UsageHistoryView;
 use crate::model::{DisplayState, ProviderKind, QuotaAvailability, QuotaKind, QuotaWindow};
 use chrono::{Datelike, Duration, Local, NaiveDate};
@@ -347,6 +358,11 @@ struct Palette {
     weekly_actual: COLORREF,
     inner_track: COLORREF,
     theoretical: COLORREF,
+    claude_track: COLORREF,
+    quota_healthy: COLORREF,
+    quota_warning: COLORREF,
+    quota_critical: COLORREF,
+    quota_unavailable: COLORREF,
 }
 
 impl Palette {
@@ -390,17 +406,12 @@ impl Palette {
             weekly_actual: quota_bar_color(weekly_actual, input.theme.high_contrast),
             inner_track: inner_track_color(input.theme),
             theoretical: theoretical_color(input.theme),
+            claude_track: outer_track_color(input.theme, false),
+            quota_healthy: quota_bar_color(Some(100), input.theme.high_contrast),
+            quota_warning: quota_bar_color(Some(30), input.theme.high_contrast),
+            quota_critical: quota_bar_color(Some(10), input.theme.high_contrast),
+            quota_unavailable: quota_bar_color(None, input.theme.high_contrast),
         }
-    }
-}
-
-fn panel_title_color(theme: Theme, selected: bool) -> COLORREF {
-    if !selected || theme.high_contrast {
-        theme.muted
-    } else if theme.dark {
-        super::rgb(115, 204, 175)
-    } else {
-        super::rgb(8, 125, 97)
     }
 }
 
@@ -425,6 +436,11 @@ struct Brushes {
     weekly_actual: ID2D1SolidColorBrush,
     inner_track: ID2D1SolidColorBrush,
     theoretical: ID2D1SolidColorBrush,
+    claude_track: ID2D1SolidColorBrush,
+    quota_healthy: ID2D1SolidColorBrush,
+    quota_warning: ID2D1SolidColorBrush,
+    quota_critical: ID2D1SolidColorBrush,
+    quota_unavailable: ID2D1SolidColorBrush,
     shadow_far: ID2D1SolidColorBrush,
     shadow_near: ID2D1SolidColorBrush,
     healthy_gradient: ID2D1LinearGradientBrush,
@@ -471,6 +487,11 @@ impl Brushes {
             weekly_actual: brush(target, palette.weekly_actual)?,
             inner_track: brush(target, palette.inner_track)?,
             theoretical: brush(target, palette.theoretical)?,
+            claude_track: brush(target, palette.claude_track)?,
+            quota_healthy: brush(target, palette.quota_healthy)?,
+            quota_warning: brush(target, palette.quota_warning)?,
+            quota_critical: brush(target, palette.quota_critical)?,
+            quota_unavailable: brush(target, palette.quota_unavailable)?,
             shadow_far: alpha_brush(target, if palette.dark { 0.22 } else { 0.055 })?,
             shadow_near: alpha_brush(target, if palette.dark { 0.28 } else { 0.075 })?,
             healthy_gradient: gradient_brush(target, healthy.0, healthy.1)?,
@@ -478,6 +499,15 @@ impl Brushes {
             critical_gradient: gradient_brush(target, critical.0, critical.1)?,
             theoretical_gradient: gradient_brush(target, theoretical.0, theoretical.1)?,
         })
+    }
+
+    fn quota_bar_brush(&self, percent: Option<u8>) -> &ID2D1SolidColorBrush {
+        match percent {
+            Some(value) if value > 49 => &self.quota_healthy,
+            Some(value) if value > 19 => &self.quota_warning,
+            Some(_) => &self.quota_critical,
+            None => &self.quota_unavailable,
+        }
     }
 }
 
@@ -741,11 +771,12 @@ fn draw_frame(
             &formats.update,
             &brushes.muted,
         );
+        let (refresh_x, refresh_y) = refresh_button_center(dimensions.width);
         draw_refresh_icon(
             target,
             refresh_geometry,
-            width - (REFRESH_BUTTON_RIGHT + REFRESH_BUTTON_RADIUS) as f32,
-            (HEADER_TEXT_TOP + HEADER_TEXT_BOTTOM) as f32 / 2.0,
+            refresh_x as f32,
+            refresh_y as f32,
             input.interaction.refresh_rotation_degrees,
             &brushes.refresh_icon,
             stroke_style,
@@ -790,11 +821,12 @@ fn draw_frame(
         &formats.update,
         &brushes.muted,
     );
+    let (refresh_x, refresh_y) = refresh_button_center(dimensions.width);
     draw_refresh_icon(
         target,
         refresh_geometry,
-        width - (REFRESH_BUTTON_RIGHT + REFRESH_BUTTON_RADIUS) as f32,
-        (HEADER_TEXT_TOP + HEADER_TEXT_BOTTOM) as f32 / 2.0,
+        refresh_x as f32,
+        refresh_y as f32,
         input.interaction.refresh_rotation_degrees,
         &brushes.refresh_icon,
         stroke_style,
@@ -878,7 +910,8 @@ fn draw_history_month(
     width: f32,
 ) -> Result<()> {
     let compact = width < 360.0;
-    let panel_bottom = if compact { 242.5 } else { 309.5 };
+    let layout = history_layout(compact);
+    let panel_bottom = layout.panel_bottom as f32 + 0.5;
     let panel = rounded_rect(16.5, 40.5, width - 16.5, panel_bottom, 10.0);
     if !input.theme.high_contrast {
         draw_card_shadow(target, &panel, brushes);
@@ -913,10 +946,10 @@ fn draw_history_month(
     } else {
         ["M", "T", "W", "T", "F", "S", "S"]
     };
-    let grid_left = 24.0;
-    let grid_right = width - 24.0;
+    let grid_left = layout.month_grid.left as f32;
+    let grid_right = layout.month_grid.right as f32;
     let cell_width = (grid_right - grid_left) / 7.0;
-    let grid_top = if compact { 96.0 } else { 101.0 };
+    let grid_top = layout.month_grid.top as f32;
     let grid_bottom = panel_bottom - 7.0;
     let row_height = (grid_bottom - grid_top) / 6.0;
     for (column, label) in weekdays.iter().enumerate() {
@@ -930,14 +963,10 @@ fn draw_history_month(
         );
     }
 
-    let outside_surface = brush(
-        target,
-        if input.theme.dark { super::rgb(48, 48, 48) } else { super::rgb(235, 235, 235) },
-    )?;
-    let outside_text = brush(
-        target,
-        if input.theme.dark { super::rgb(125, 125, 125) } else { super::rgb(150, 150, 150) },
-    )?;
+    let outside_surface =
+        brush(target, if input.theme.dark { rgb(48, 48, 48) } else { rgb(235, 235, 235) })?;
+    let outside_text =
+        brush(target, if input.theme.dark { rgb(125, 125, 125) } else { rgb(150, 150, 150) })?;
     let history = input.history;
     let first = month - Duration::days(month.weekday().num_days_from_monday() as i64);
     let dates: Vec<_> = (0..42).map(|day| first + Duration::days(day)).collect();
@@ -1023,11 +1052,9 @@ fn draw_history_month(
         let below = cell_top + row_height + 5.0;
         let top =
             if below + 30.0 <= panel_bottom - 5.0 { below } else { (cell_top - 35.0).max(78.0) };
-        let surface = brush(
-            target,
-            if input.theme.dark { super::rgb(18, 18, 18) } else { super::rgb(45, 45, 45) },
-        )?;
-        let text = brush(target, super::rgb(250, 250, 250))?;
+        let surface =
+            brush(target, if input.theme.dark { rgb(18, 18, 18) } else { rgb(45, 45, 45) })?;
+        let text = brush(target, rgb(250, 250, 250))?;
         unsafe {
             target.FillRoundedRectangle(
                 &rounded_rect(left, top, left + tooltip_width, top + 30.0, 6.0),
@@ -1062,7 +1089,7 @@ fn heat_color(value: u64, minimum: u64, maximum: u64, dark: bool) -> COLORREF {
     } else {
         interpolate_rgb(middle, high, (position - 0.5) * 2.0)
     };
-    super::rgb(color.0, color.1, color.2)
+    rgb(color.0, color.1, color.2)
 }
 
 fn interpolate_rgb(from: (u8, u8, u8), to: (u8, u8, u8), amount: f32) -> (u8, u8, u8) {
@@ -1081,7 +1108,8 @@ fn draw_history_week(
     width: f32,
 ) -> Result<()> {
     let compact = width < 360.0;
-    let panel_bottom = if compact { 242.5 } else { 309.5 };
+    let layout = history_layout(compact);
+    let panel_bottom = layout.panel_bottom as f32 + 0.5;
     let panel = rounded_rect(16.5, 40.5, width - 16.5, panel_bottom, 10.0);
     if !input.theme.high_contrast {
         draw_card_shadow(target, &panel, brushes);
@@ -1157,14 +1185,9 @@ fn draw_history_week(
             );
         }
     }
-    let bar = brush(
-        target,
-        if input.theme.dark { super::rgb(74, 143, 93) } else { super::rgb(67, 160, 92) },
-    )?;
-    let inactive = brush(
-        target,
-        if input.theme.dark { super::rgb(125, 125, 125) } else { super::rgb(150, 150, 150) },
-    )?;
+    let bar = brush(target, if input.theme.dark { rgb(74, 143, 93) } else { rgb(67, 160, 92) })?;
+    let inactive =
+        brush(target, if input.theme.dark { rgb(125, 125, 125) } else { rgb(150, 150, 150) })?;
     for (column, date) in dates.iter().enumerate() {
         let left = grid_left + column as f32 * column_width;
         let center_x = left + column_width / 2.0;
@@ -1228,29 +1251,33 @@ fn draw_history_tabs(
     width: f32,
     month_selected: bool,
 ) {
-    let top = if width < 360.0 { 249.5 } else { 316.5 };
+    let layout = history_layout(width < 360.0);
+    let top = layout.tabs_top as f32 + 0.5;
     let bottom = top + 27.0;
-    let left = (width - 160.0) / 2.0;
+    let left = layout.tabs_left as f32;
+    let total_width = HISTORY_TABS_WIDTH as f32;
+    let half_width = HISTORY_TABS_HALF_WIDTH as f32;
     unsafe {
         target.FillRoundedRectangle(
-            &rounded_rect(left, top, left + 160.0, bottom, 7.0),
+            &rounded_rect(left, top, left + total_width, bottom, 7.0),
             &brushes.metrics_surface,
         );
         target.DrawRoundedRectangle(
-            &rounded_rect(left, top, left + 160.0, bottom, 7.0),
+            &rounded_rect(left, top, left + total_width, bottom, 7.0),
             &brushes.line,
             1.0,
             None::<&ID2D1StrokeStyle>,
         );
-        let selected_left = if month_selected { left + 80.0 } else { left + 2.0 };
-        let selected_right = if month_selected { left + 158.0 } else { left + 80.0 };
+        let selected_left = if month_selected { left + half_width } else { left + 2.0 };
+        let selected_right =
+            if month_selected { left + total_width - 2.0 } else { left + half_width };
         target.FillRoundedRectangle(
             &rounded_rect(selected_left, top + 2.0, selected_right, bottom - 2.0, 5.0),
             &brushes.five_surface,
         );
         target.DrawLine(
-            Vector2 { X: left + 80.0, Y: top + 5.0 },
-            Vector2 { X: left + 80.0, Y: bottom - 5.0 },
+            Vector2 { X: left + half_width, Y: top + 5.0 },
+            Vector2 { X: left + half_width, Y: bottom - 5.0 },
             &brushes.line,
             1.0,
             None::<&ID2D1StrokeStyle>,
@@ -1259,14 +1286,14 @@ fn draw_history_tabs(
     draw_text(
         target,
         input.locale.text("Week", "周"),
-        rect(left, top, left + 80.0, bottom),
+        rect(left, top, left + half_width, bottom),
         &formats.stacked_detail,
         if month_selected { &brushes.muted } else { &brushes.status },
     );
     draw_text(
         target,
         input.locale.text("Month", "月"),
-        rect(left + 80.0, top, left + 160.0, bottom),
+        rect(left + half_width, top, left + total_width, bottom),
         &formats.stacked_detail,
         if month_selected { &brushes.status } else { &brushes.muted },
     );
@@ -1324,7 +1351,14 @@ fn draw_quota_panel(
     let left = left as f32;
     let right = right as f32;
     let center_x = center_x as f32;
-    let card = rounded_rect(left + 0.5, 40.5, right - 0.5, 267.5, 10.0);
+    let arc_center_y = QUOTA_ARC_CENTER_Y as f32;
+    let card = rounded_rect(
+        left + 0.5,
+        QUOTA_CARD_TOP as f32 + 0.5,
+        right - 0.5,
+        QUOTA_CARD_BOTTOM as f32 - 0.5,
+        10.0,
+    );
     if !input.theme.high_contrast {
         draw_card_shadow(target, &card, brushes);
     }
@@ -1360,21 +1394,41 @@ fn draw_quota_panel(
     let actual = window.map(QuotaWindow::display_percent);
     let theoretical =
         window.and_then(|window| theoretical_remaining_percent(window, Local::now().timestamp()));
-    draw_arc(target, factory, stroke_style, center_x, 149.0, 66.0, 10.0, 100, track)?;
+    draw_arc(target, factory, stroke_style, center_x, arc_center_y, 66.0, 10.0, 100, track)?;
     if let Some(percent) = actual.filter(|percent| *percent > 0) {
         let arc_brush: &ID2D1Brush = if input.theme.high_contrast {
             actual_brush
         } else {
             let gradient = quota_gradient(brushes, percent);
             unsafe {
-                gradient.SetStartPoint(Vector2 { X: center_x - 66.0, Y: 149.0 });
-                gradient.SetEndPoint(Vector2 { X: center_x + 66.0, Y: 149.0 });
+                gradient.SetStartPoint(Vector2 { X: center_x - 66.0, Y: arc_center_y });
+                gradient.SetEndPoint(Vector2 { X: center_x + 66.0, Y: arc_center_y });
             }
             gradient
         };
-        draw_arc(target, factory, stroke_style, center_x, 149.0, 66.0, 10.0, percent, arc_brush)?;
+        draw_arc(
+            target,
+            factory,
+            stroke_style,
+            center_x,
+            arc_center_y,
+            66.0,
+            10.0,
+            percent,
+            arc_brush,
+        )?;
     }
-    draw_arc(target, factory, stroke_style, center_x, 149.0, 54.0, 8.0, 100, &brushes.inner_track)?;
+    draw_arc(
+        target,
+        factory,
+        stroke_style,
+        center_x,
+        arc_center_y,
+        54.0,
+        8.0,
+        100,
+        &brushes.inner_track,
+    )?;
     if let Some(percent) = theoretical.filter(|percent| *percent > 0) {
         let theoretical_brush: &ID2D1Brush = if input.theme.high_contrast {
             &brushes.theoretical
@@ -1382,8 +1436,10 @@ fn draw_quota_panel(
             unsafe {
                 brushes
                     .theoretical_gradient
-                    .SetStartPoint(Vector2 { X: center_x - 54.0, Y: 149.0 });
-                brushes.theoretical_gradient.SetEndPoint(Vector2 { X: center_x + 54.0, Y: 149.0 });
+                    .SetStartPoint(Vector2 { X: center_x - 54.0, Y: arc_center_y });
+                brushes
+                    .theoretical_gradient
+                    .SetEndPoint(Vector2 { X: center_x + 54.0, Y: arc_center_y });
             }
             &brushes.theoretical_gradient
         };
@@ -1392,7 +1448,7 @@ fn draw_quota_panel(
             factory,
             stroke_style,
             center_x,
-            149.0,
+            arc_center_y,
             54.0,
             8.0,
             percent,
@@ -1430,7 +1486,11 @@ fn draw_stacked_metrics(
     input: &PaintInput<'_>,
     account: &AccountMetrics,
 ) {
-    let metrics = rounded_rect(192.5, 40.5, 319.5, 267.5, 10.0);
+    let metrics = D2D1_ROUNDED_RECT {
+        rect: STACKED_METRICS_CARD.inset_d2d(0.5),
+        radiusX: 10.0,
+        radiusY: 10.0,
+    };
     if !input.theme.high_contrast {
         draw_card_shadow(target, &metrics, brushes);
     }
@@ -1438,8 +1498,8 @@ fn draw_stacked_metrics(
         target.FillRoundedRectangle(&metrics, &brushes.five_surface);
         target.DrawRoundedRectangle(&metrics, &brushes.line, 1.0, None::<&ID2D1StrokeStyle>);
         target.DrawLine(
-            Vector2 { X: 208.0, Y: 153.5 },
-            Vector2 { X: 304.0, Y: 153.5 },
+            Vector2 { X: STACKED_DIVIDER_LEFT as f32, Y: STACKED_DIVIDER_Y as f32 + 0.5 },
+            Vector2 { X: STACKED_DIVIDER_RIGHT as f32, Y: STACKED_DIVIDER_Y as f32 + 0.5 },
             &brushes.line,
             1.0,
             None::<&ID2D1StrokeStyle>,
@@ -1452,8 +1512,7 @@ fn draw_stacked_metrics(
             dwrite,
             formats,
             brushes,
-            input,
-            rect(208.0, 74.0, 304.0, 126.0),
+            COMPACT_CLAUDE_FIVE_HOUR.to_d2d(),
             input.locale.text("Claude 5H", "Claude 5H"),
             &claude.five_hour,
         );
@@ -1462,8 +1521,7 @@ fn draw_stacked_metrics(
             dwrite,
             formats,
             brushes,
-            input,
-            rect(208.0, 186.0, 304.0, 238.0),
+            COMPACT_CLAUDE_WEEKLY.to_d2d(),
             input.locale.text("Claude Wk", "Claude 周"),
             &claude.weekly,
         );
@@ -1508,7 +1566,7 @@ fn draw_stacked_metrics(
         formats,
         brushes,
         resource_label(account.page, input.locale),
-        rect(197.0, 173.0, 315.0, 197.0),
+        COMPACT_RESOURCE_HEADING.to_d2d(),
         account.page == ResourcePage::Resets,
     );
     draw_text(
@@ -1544,7 +1602,11 @@ fn draw_bottom_metrics(
     input: &PaintInput<'_>,
     account: &AccountMetrics,
 ) {
-    let metrics = rounded_rect(16.5, 276.5, 359.5, 335.5, 10.0);
+    let metrics = D2D1_ROUNDED_RECT {
+        rect: BOTTOM_METRICS_CARD.inset_d2d(0.5),
+        radiusX: 10.0,
+        radiusY: 10.0,
+    };
     if !input.theme.high_contrast {
         draw_card_shadow(target, &metrics, brushes);
     }
@@ -1552,8 +1614,8 @@ fn draw_bottom_metrics(
         target.FillRoundedRectangle(&metrics, &brushes.metrics_surface);
         target.DrawRoundedRectangle(&metrics, &brushes.line, 1.0, None::<&ID2D1StrokeStyle>);
         target.DrawLine(
-            Vector2 { X: 188.5, Y: 288.0 },
-            Vector2 { X: 188.5, Y: 324.0 },
+            Vector2 { X: BOTTOM_DIVIDER_X as f32 + 0.5, Y: 288.0 },
+            Vector2 { X: BOTTOM_DIVIDER_X as f32 + 0.5, Y: 324.0 },
             &brushes.line,
             1.0,
             None::<&ID2D1StrokeStyle>,
@@ -1566,8 +1628,7 @@ fn draw_bottom_metrics(
             dwrite,
             formats,
             brushes,
-            input,
-            rect(42.0, 280.0, 162.0, 332.0),
+            FULL_CLAUDE_FIVE_HOUR.to_d2d(),
             input.locale.text("Claude 5H", "Claude 5H"),
             &claude.five_hour,
         );
@@ -1576,8 +1637,7 @@ fn draw_bottom_metrics(
             dwrite,
             formats,
             brushes,
-            input,
-            rect(214.0, 280.0, 334.0, 332.0),
+            FULL_CLAUDE_WEEKLY.to_d2d(),
             input.locale.text("Claude Wk", "Claude 周"),
             &claude.weekly,
         );
@@ -1619,7 +1679,7 @@ fn draw_bottom_metrics(
         formats,
         brushes,
         resource_label(account.page, input.locale),
-        rect(203.0, 278.0, 345.0, 303.0),
+        FULL_RESOURCE_HEADING.to_d2d(),
         account.page == ResourcePage::Resets,
     );
     let value_brush = if account.page == ResourcePage::Resets
@@ -1648,18 +1708,13 @@ fn draw_d2d_claude_slot(
     dwrite: &IDWriteFactory,
     formats: &FormatSet,
     brushes: &Brushes,
-    input: &PaintInput<'_>,
     bounds: D2D_RECT_F,
     label: &str,
-    summary: &super::ClaudeWindowSummary,
+    summary: &ClaudeWindowSummary,
 ) {
-    let track_color = outer_track_color(input.theme, input.theme.high_contrast);
-    let Ok(track_brush) = brush(target, track_color) else {
-        return;
-    };
     let pct_text = summary.percent.map_or_else(|| "--".to_owned(), |v| format!("{v}%"));
-    let bar_color = quota_bar_color(summary.percent, input.theme.high_contrast);
-    let pct_brush = if summary.percent.is_some() { brush(target, bar_color).ok() } else { None };
+    let fill_brush = brushes.quota_bar_brush(summary.percent);
+    let pct_brush = if summary.percent.is_some() { fill_brush } else { &brushes.muted };
     let pct_u16: Vec<u16> = pct_text.encode_utf16().collect();
     let pct_width = 34.0;
     let header_height = 18.0;
@@ -1688,7 +1743,7 @@ fn draw_d2d_claude_slot(
             target.DrawTextLayout(
                 windows_numerics::Vector2::new(bounds.right - pct_width, bounds.top),
                 &layout,
-                pct_brush.as_ref().unwrap_or(&brushes.muted),
+                pct_brush,
                 windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_CLIP,
             );
         }
@@ -1697,11 +1752,10 @@ fn draw_d2d_claude_slot(
     let bar_top = bounds.top + 22.0;
     let bar_rect = rounded_rect(bounds.left, bar_top, bounds.right, bar_top + 4.0, 2.0);
     unsafe {
-        target.FillRoundedRectangle(&bar_rect, &track_brush);
+        target.FillRoundedRectangle(&bar_rect, &brushes.claude_track);
     }
     if let Some(value) = summary.percent
         && value > 0
-        && let Ok(fill_brush) = brush(target, bar_color)
     {
         let fill_w = ((bounds.right - bounds.left) * f32::from(value)) / 100.0;
         if fill_w > 0.0 {
@@ -1713,7 +1767,7 @@ fn draw_d2d_claude_slot(
                 2.0,
             );
             unsafe {
-                target.FillRoundedRectangle(&fill_rect, &fill_brush);
+                target.FillRoundedRectangle(&fill_rect, fill_brush);
             }
         }
     }
@@ -1777,8 +1831,7 @@ fn draw_usage_heading(
     selection: UsageSummaryWeek,
     compact: bool,
 ) {
-    let area =
-        if compact { rect(197.0, 64.0, 315.0, 88.0) } else { rect(30.0, 278.0, 175.0, 303.0) };
+    let area = if compact { COMPACT_USAGE_HEADING.to_d2d() } else { FULL_USAGE_HEADING.to_d2d() };
     draw_paged_heading(
         target,
         factory,
@@ -2088,7 +2141,7 @@ mod tests {
 
     #[test]
     fn palette_channels_preserve_colorref_order() {
-        let value = super::super::rgb(16, 163, 127);
+        let value = rgb(16, 163, 127);
         let converted = color(value);
         assert!((converted.r - 16.0 / 255.0).abs() < f32::EPSILON);
         assert!((converted.g - 163.0 / 255.0).abs() < f32::EPSILON);
@@ -2097,9 +2150,9 @@ mod tests {
 
     #[test]
     fn monthly_heat_scale_maps_low_to_green_and_high_to_red() {
-        assert_eq!(heat_color(10, 10, 30, false), super::super::rgb(99, 190, 123));
-        assert_eq!(heat_color(30, 10, 30, false), super::super::rgb(248, 105, 107));
-        assert_eq!(heat_color(20, 10, 30, false), super::super::rgb(255, 235, 132));
+        assert_eq!(heat_color(10, 10, 30, false), rgb(99, 190, 123));
+        assert_eq!(heat_color(30, 10, 30, false), rgb(248, 105, 107));
+        assert_eq!(heat_color(20, 10, 30, false), rgb(255, 235, 132));
     }
 
     #[test]
