@@ -12,3 +12,4 @@ pub mod settings;
 pub mod startup;
 pub mod ui;
 pub mod updater;
+mod winhttp;

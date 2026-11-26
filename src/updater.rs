@@ -1,6 +1,7 @@
+use crate::winhttp::{ProxyMode, Request, Session, Timeouts, WinHttpError};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::ffi::{OsStr, c_void};
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::windows::fs::OpenOptionsExt;
@@ -8,18 +9,12 @@ use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::ptr;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, ERROR_LOCK_VIOLATION,
     ERROR_SHARING_VIOLATION, HANDLE, WAIT_OBJECT_0,
 };
-use windows::Win32::Networking::WinHttp::{
-    INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
-    WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE, WinHttpCloseHandle, WinHttpConnect,
-    WinHttpOpen, WinHttpOpenRequest, WinHttpQueryDataAvailable, WinHttpQueryHeaders,
-    WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts,
-};
+use windows::Win32::Networking::WinHttp::INTERNET_DEFAULT_HTTPS_PORT;
 use windows::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE,
@@ -95,135 +90,47 @@ struct ReleaseAsset {
     digest: Option<String>,
 }
 
-struct InternetHandle(*mut c_void);
-
-impl InternetHandle {
-    fn new(value: *mut c_void) -> Result<Self, UpdateError> {
-        if value.is_null() {
-            Err(windows::core::Error::from_thread().into())
-        } else {
-            Ok(Self(value))
-        }
-    }
-}
-
-impl Drop for InternetHandle {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe {
-                let _ = WinHttpCloseHandle(self.0);
-            }
-        }
-    }
-}
-
 struct HttpClient {
-    session: InternetHandle,
+    session: Session,
 }
 
 impl HttpClient {
     fn new() -> Result<Self, UpdateError> {
-        let agent = wide0(format!("CodexStatus/{}", env!("CARGO_PKG_VERSION")));
-        let session = unsafe {
-            InternetHandle::new(WinHttpOpen(
-                PCWSTR(agent.as_ptr()),
-                WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-                PCWSTR::null(),
-                PCWSTR::null(),
-                0,
-            ))?
-        };
-        unsafe {
-            WinHttpSetTimeouts(session.0, 5_000, 5_000, 10_000, 15_000)?;
-        }
+        let agent = format!("CodexStatus/{}", env!("CARGO_PKG_VERSION"));
+        let session = Session::open(&agent, ProxyMode::Automatic, Timeouts::DOWNLOAD)
+            .map_err(map_http_error)?;
         Ok(Self { session })
     }
 
     fn get(&self, url: &str, accept: &str, limit: usize) -> Result<Vec<u8>, UpdateError> {
-        let deadline = Instant::now() + HTTP_REQUEST_DEADLINE;
         let (host, path) = split_https_url(url).ok_or(UpdateError::InvalidResponse)?;
-        let host = wide0(host);
-        let path = wide0(path);
-        let connection = unsafe {
-            InternetHandle::new(WinHttpConnect(
-                self.session.0,
-                PCWSTR(host.as_ptr()),
-                INTERNET_DEFAULT_HTTPS_PORT,
-                0,
-            ))?
-        };
-        let request = unsafe {
-            InternetHandle::new(WinHttpOpenRequest(
-                connection.0,
-                w!("GET"),
-                PCWSTR(path.as_ptr()),
-                PCWSTR::null(),
-                PCWSTR::null(),
-                ptr::null(),
-                WINHTTP_FLAG_SECURE,
-            ))?
-        };
-        let headers: Vec<u16> = format!("Accept: {accept}\r\nX-GitHub-Api-Version: 2022-11-28\r\n")
-            .encode_utf16()
-            .collect();
-        unsafe {
-            WinHttpSendRequest(request.0, Some(&headers), None, 0, 0, 0)?;
-            WinHttpReceiveResponse(request.0, ptr::null_mut())?;
-        }
+        let headers = format!("Accept: {accept}\r\nX-GitHub-Api-Version: 2022-11-28\r\n");
+        self.session
+            .send(&Request {
+                method: "GET",
+                host,
+                port: INTERNET_DEFAULT_HTTPS_PORT,
+                path,
+                secure: true,
+                headers: &headers,
+                body: None,
+                allow_redirects: true,
+                disable_cookies: true,
+                allow_loopback_self_signed: false,
+                max_response_bytes: limit,
+                deadline: Instant::now() + HTTP_REQUEST_DEADLINE,
+            })
+            .map_err(map_http_error)
+    }
+}
 
-        let mut status = 0_u32;
-        let mut status_size = std::mem::size_of::<u32>() as u32;
-        let mut index = 0_u32;
-        unsafe {
-            WinHttpQueryHeaders(
-                request.0,
-                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                PCWSTR::null(),
-                Some((&mut status as *mut u32).cast()),
-                &mut status_size,
-                &mut index,
-            )?;
+fn map_http_error(error: WinHttpError) -> UpdateError {
+    match error {
+        WinHttpError::Windows(error) => UpdateError::Windows(error),
+        WinHttpError::Timeout => UpdateError::RequestTimedOut,
+        WinHttpError::Status { .. } | WinHttpError::BodyTooLarge | WinHttpError::InvalidConfig => {
+            UpdateError::InvalidResponse
         }
-        if status != 200 {
-            return Err(UpdateError::InvalidResponse);
-        }
-
-        let mut body = Vec::new();
-        loop {
-            if Instant::now() >= deadline {
-                return Err(UpdateError::RequestTimedOut);
-            }
-            let mut available = 0_u32;
-            unsafe {
-                WinHttpQueryDataAvailable(request.0, &mut available)?;
-            }
-            if available == 0 {
-                break;
-            }
-            let available = available as usize;
-            if body.len().saturating_add(available) > limit {
-                return Err(UpdateError::InvalidResponse);
-            }
-            let start = body.len();
-            body.resize(start + available, 0);
-            let mut read = 0_u32;
-            unsafe {
-                WinHttpReadData(
-                    request.0,
-                    body[start..].as_mut_ptr().cast(),
-                    available as u32,
-                    &mut read,
-                )?;
-            }
-            body.truncate(start + read as usize);
-            if Instant::now() >= deadline {
-                return Err(UpdateError::RequestTimedOut);
-            }
-            if read == 0 {
-                break;
-            }
-        }
-        Ok(body)
     }
 }
 

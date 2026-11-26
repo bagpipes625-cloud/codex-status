@@ -4,20 +4,24 @@ use crate::app_server::{AppServerError, AppServerFailure, AppServerSnapshot};
 use crate::model::{
     AccountSummary, QuotaSnapshot, QuotaWindow, SESSION_MINUTES, SecondaryQuotas, WEEK_MINUTES,
 };
+use crate::winhttp::{ProxyMode, Request, Session, Timeouts, WinHttpError};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::ffi::c_void;
 use std::io::Read;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::ptr;
 use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{CloseHandle, GlobalFree, HANDLE, HGLOBAL};
-use windows::Win32::Networking::WinHttp::*;
+use windows::Win32::Networking::WinHttp::{
+    WINHTTP_ACCESS_TYPE_NAMED_PROXY, WINHTTP_AUTO_DETECT_TYPE_DHCP, WINHTTP_AUTO_DETECT_TYPE_DNS_A,
+    WINHTTP_AUTOPROXY_AUTO_DETECT, WINHTTP_AUTOPROXY_CONFIG_URL, WINHTTP_AUTOPROXY_OPTIONS,
+    WINHTTP_CURRENT_USER_IE_PROXY_CONFIG, WINHTTP_PROXY_INFO,
+    WinHttpGetIEProxyConfigForCurrentUser, WinHttpGetProxyForUrl,
+};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
 };
@@ -33,7 +37,7 @@ use windows::core::{PCWSTR, PWSTR, w};
 use winreg::RegKey;
 use winreg::enums::HKEY_CURRENT_USER;
 
-const LOOPBACK_HOST: PCWSTR = w!("127.0.0.1");
+const LOOPBACK_HOST: &str = "127.0.0.1";
 const GET_USER_STATUS_PATH: &str = "/exa.language_server_pb.LanguageServerService/GetUserStatus";
 const RETRIEVE_QUOTA_PATH: &str =
     "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary";
@@ -261,20 +265,6 @@ fn header_value(value: &str, max_len: usize) -> bool {
         && !value.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0)
 }
 
-struct Handle(*mut c_void);
-impl Handle {
-    fn new(raw: *mut c_void) -> Result<Self, HttpError> {
-        if raw.is_null() { Err(HttpError::Network) } else { Ok(Self(raw)) }
-    }
-}
-impl Drop for Handle {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = WinHttpCloseHandle(self.0);
-        }
-    }
-}
-
 #[derive(Debug)]
 enum HttpError {
     Network,
@@ -282,9 +272,13 @@ enum HttpError {
     Status(u32, Duration),
 }
 
-impl From<windows::core::Error> for HttpError {
-    fn from(_: windows::core::Error) -> Self {
-        Self::Network
+impl From<WinHttpError> for HttpError {
+    fn from(error: WinHttpError) -> Self {
+        match error {
+            WinHttpError::Status { code, retry_after } => Self::Status(code, retry_after),
+            WinHttpError::BodyTooLarge | WinHttpError::InvalidConfig => Self::Invalid,
+            WinHttpError::Windows(_) | WinHttpError::Timeout => Self::Network,
+        }
     }
 }
 
@@ -422,16 +416,8 @@ fn resolve_windows_proxy_for_url() -> Option<String> {
     }
 
     if auto_config_url.is_some() || auto_detect {
-        let session = unsafe {
-            Handle::new(WinHttpOpen(
-                w!("CodexStatus Proxy Resolver"),
-                WINHTTP_ACCESS_TYPE_NO_PROXY,
-                PCWSTR::null(),
-                PCWSTR::null(),
-                0,
-            ))
-            .ok()?
-        };
+        let session =
+            Session::open("CodexStatus Proxy Resolver", ProxyMode::NoProxy, Timeouts::API).ok()?;
         let pac_wide: Option<Vec<u16>> =
             auto_config_url.as_deref().map(|s| s.encode_utf16().chain(Some(0)).collect());
         let mut options =
@@ -449,7 +435,13 @@ fn resolve_windows_proxy_for_url() -> Option<String> {
         {
             let mut proxy_info = WINHTTP_PROXY_INFO::default();
             let ok = unsafe {
-                WinHttpGetProxyForUrl(session.0, probe_url, &mut options, &mut proxy_info).is_ok()
+                WinHttpGetProxyForUrl(
+                    session.raw_handle(),
+                    probe_url,
+                    &mut options,
+                    &mut proxy_info,
+                )
+                .is_ok()
             };
             let resolved = pwstr_to_string_and_free(proxy_info.lpszProxy);
             let _ = pwstr_to_string_and_free(proxy_info.lpszProxyBypass);
@@ -921,154 +913,30 @@ fn post_local_json(
     csrf_token: &str,
     deadline: Instant,
 ) -> Result<Value, HttpError> {
-    let session = unsafe {
-        Handle::new(WinHttpOpen(
-            w!("CodexStatus Antigravity local read-only"),
-            WINHTTP_ACCESS_TYPE_NO_PROXY,
-            PCWSTR::null(),
-            PCWSTR::null(),
-            0,
-        ))?
-    };
-    unsafe {
-        WinHttpSetTimeouts(session.0, 5_000, 5_000, 5_000, 20_000)?;
-    }
-    let connection = unsafe { Handle::new(WinHttpConnect(session.0, LOOPBACK_HOST, port, 0))? };
-    let path: Vec<u16> = path_str.encode_utf16().chain(Some(0)).collect();
-    let request = unsafe {
-        Handle::new(WinHttpOpenRequest(
-            connection.0,
-            w!("POST"),
-            PCWSTR(path.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            ptr::null(),
-            if secure { WINHTTP_FLAG_SECURE } else { WINHTTP_OPEN_REQUEST_FLAGS(0) },
-        ))?
-    };
-    let disabled = WINHTTP_DISABLE_REDIRECTS | WINHTTP_DISABLE_COOKIES;
-    unsafe {
-        WinHttpSetOption(
-            Some(request.0),
-            WINHTTP_OPTION_DISABLE_FEATURE,
-            Some(&disabled.to_ne_bytes()),
-        )?;
-        if secure {
-            // This exception is scoped to a fixed loopback host. Antigravity's local
-            // language server uses an ephemeral self-signed certificate.
-            let security_flags = SECURITY_FLAG_IGNORE_UNKNOWN_CA
-                | SECURITY_FLAG_IGNORE_CERT_CN_INVALID
-                | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID
-                | SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
-            WinHttpSetOption(
-                Some(request.0),
-                WINHTTP_OPTION_SECURITY_FLAGS,
-                Some(&security_flags.to_ne_bytes()),
-            )?;
-        }
-    }
+    let session = Session::open(
+        "CodexStatus Antigravity local read-only",
+        ProxyMode::NoProxy,
+        Timeouts::API,
+    )?;
     let payload = serde_json::to_vec(body).map_err(|_| HttpError::Invalid)?;
-    let headers: Vec<u16> = format!(
+    let headers = format!(
         "X-Codeium-Csrf-Token: {csrf_token}\r\nConnect-Protocol-Version: 1\r\nContent-Type: application/json\r\nAccept: application/json\r\n"
-    )
-    .encode_utf16()
-    .collect();
-    timeouts(&request, deadline)?;
-    unsafe {
-        WinHttpSendRequest(
-            request.0,
-            Some(&headers),
-            Some(payload.as_ptr().cast()),
-            payload.len() as u32,
-            payload.len() as u32,
-            0,
-        )?;
-    }
-    timeouts(&request, deadline)?;
-    unsafe {
-        WinHttpReceiveResponse(request.0, ptr::null_mut())?;
-    }
-    let mut status = 0u32;
-    let mut size = 4;
-    let mut index = 0;
-    unsafe {
-        WinHttpQueryHeaders(
-            request.0,
-            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-            PCWSTR::null(),
-            Some((&mut status as *mut u32).cast()),
-            &mut size,
-            &mut index,
-        )?;
-    }
-    if status != 200 {
-        return Err(HttpError::Status(status, retry_after(&request)));
-    }
-    let mut bytes = Vec::new();
-    let mut buffer = [0u8; 8192];
-    loop {
-        timeouts(&request, deadline)?;
-        let mut read = 0;
-        unsafe {
-            WinHttpReadData(request.0, buffer.as_mut_ptr().cast(), buffer.len() as u32, &mut read)?;
-        }
-        if read == 0 {
-            break;
-        }
-        if bytes.len() + read as usize > MAX_RESPONSE_BYTES {
-            return Err(HttpError::Invalid);
-        }
-        bytes.extend_from_slice(&buffer[..read as usize]);
-    }
-    if Instant::now() >= deadline {
-        return Err(HttpError::Network);
-    }
-    serde_json::from_slice(&bytes).map_err(|_| HttpError::Invalid)
-}
-
-fn timeouts(request: &Handle, deadline: Instant) -> Result<(), HttpError> {
-    let remaining = deadline.saturating_duration_since(Instant::now()).as_millis();
-    if remaining == 0 {
-        return Err(HttpError::Network);
-    }
-    let ms = remaining.min(20_000) as i32;
-    unsafe {
-        WinHttpSetTimeouts(request.0, ms.min(5_000), ms.min(5_000), ms.min(5_000), ms)?;
-    }
-    Ok(())
-}
-
-fn retry_after(request: &Handle) -> Duration {
-    let mut buffer = [0u16; 128];
-    let mut size = (buffer.len() * 2) as u32;
-    let mut index = 0;
-    let ok = unsafe {
-        WinHttpQueryHeaders(
-            request.0,
-            WINHTTP_QUERY_CUSTOM,
-            w!("Retry-After"),
-            Some(buffer.as_mut_ptr().cast()),
-            &mut size,
-            &mut index,
-        )
-    };
-    if ok.is_err() {
-        return Duration::from_secs(300);
-    }
-    let value = String::from_utf16_lossy(
-        &buffer[..buffer.iter().position(|&v| v == 0).unwrap_or(buffer.len())],
     );
-    let seconds = value
-        .trim()
-        .parse::<u64>()
-        .ok()
-        .or_else(|| {
-            chrono::DateTime::parse_from_rfc2822(value.trim()).ok().map(|date| {
-                date.timestamp().saturating_sub(chrono::Utc::now().timestamp()).max(0) as u64
-            })
-        })
-        .unwrap_or(300);
-    Duration::from_secs(seconds.clamp(60, 86_400))
+    let bytes = session.send(&Request {
+        method: "POST",
+        host: LOOPBACK_HOST,
+        port,
+        path: path_str,
+        secure,
+        headers: &headers,
+        body: Some(&payload),
+        allow_redirects: false,
+        disable_cookies: true,
+        allow_loopback_self_signed: secure,
+        max_response_bytes: MAX_RESPONSE_BYTES,
+        deadline,
+    })?;
+    serde_json::from_slice(&bytes).map_err(|_| HttpError::Invalid)
 }
 
 fn extract_plan_type(value: &Value) -> Option<String> {
