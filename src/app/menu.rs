@@ -286,7 +286,7 @@ impl AppState {
                         _ => 5,
                     };
                     self.persist_settings();
-                    self.reset_refresh_timer(self.settings.refresh_minutes * 60_000);
+                    self.reset_refresh_timer(self.settings.refresh_minutes.saturating_mul(60_000));
                 }
                 CMD_ALERT_OFF | CMD_ALERT_10 | CMD_ALERT_20 | CMD_ALERT_30 => {
                     self.settings.alert_threshold = match command {

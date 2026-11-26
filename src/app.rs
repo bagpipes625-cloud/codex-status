@@ -28,13 +28,14 @@ use windows::Win32::UI::Shell::{NIM_DELETE, NIN_SELECT, Shell_NotifyIconW};
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DROPSHADOW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
     DispatchMessageW, FindWindowW, GetMessageW, IDC_ARROW, IsWindowVisible, KillTimer, LoadCursorW,
-    MSG, PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SW_HIDE,
-    SWP_NOACTIVATE, SWP_NOZORDER, SetTimer, SetWindowPos, ShowWindow, TranslateMessage,
-    WA_INACTIVE, WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_CONTEXTMENU,
-    WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
-    WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
+    MSG, PBT_APMRESUMEAUTOMATIC, PostMessageW, PostQuitMessage, RegisterClassExW,
+    RegisterWindowMessageW, SW_HIDE, SWP_NOACTIVATE, SWP_NOZORDER, SetTimer, SetWindowPos,
+    ShowWindow, TranslateMessage, WA_INACTIVE, WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP,
+    WM_CAPTURECHANGED, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    WM_ENDSESSION, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_POWERBROADCAST, WM_QUERYENDSESSION, WM_RBUTTONUP,
+    WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED,
+    WS_POPUP,
 };
 #[cfg(any(codex_status_channel = "stable", codex_status_channel = "beta"))]
 use windows::core::GUID;
@@ -240,6 +241,13 @@ fn should_background_prefetch(slot: &ProviderSlot, force: bool, now: Instant) ->
 
 fn same_verified_account(active: Option<&str>, observed: Option<&str>) -> bool {
     observed.is_some() && active == observed
+}
+
+fn should_refresh_after_resume(display: &DisplayState, now: i64, refresh_minutes: u32) -> bool {
+    display.snapshot.as_ref().is_none_or(|snapshot| {
+        let max_age = i64::from(refresh_minutes).saturating_mul(60);
+        !snapshot.is_cache_valid(now) || now.saturating_sub(snapshot.fetched_at) >= max_age
+    })
 }
 
 fn provider_index(provider: ProviderKind) -> usize {
@@ -749,6 +757,10 @@ unsafe extern "system" fn main_window_proc(
                     let _ = InvalidateRect(Some(state.flyout), None, true);
                     return LRESULT(0);
                 }
+                WM_POWERBROADCAST if wparam.0 == PBT_APMRESUMEAUTOMATIC as usize => {
+                    state.handle_system_resume();
+                    return LRESULT(1);
+                }
                 _ => {}
             }
         }
@@ -873,21 +885,23 @@ unsafe extern "system" fn flyout_window_proc(
                         return LRESULT(0);
                     }
                 }
-                let history = state.history_view();
-                let compact =
-                    matches!(active_display.quota_availability(), QuotaAvailability::Single(_));
-                if let Some(hit) = ui::history_hit_test(
-                    &state.history_navigation,
-                    history,
-                    compact,
-                    x,
-                    y,
-                    dpi,
-                    state.full_history_render,
-                ) {
-                    state.pressed_history = Some(hit);
-                    let _ = SetCapture(hwnd);
-                    return LRESULT(0);
+                if state.settings.provider == ProviderKind::Codex {
+                    let history = state.history_view();
+                    let compact =
+                        matches!(active_display.quota_availability(), QuotaAvailability::Single(_));
+                    if let Some(hit) = ui::history_hit_test(
+                        &state.history_navigation,
+                        history,
+                        compact,
+                        x,
+                        y,
+                        dpi,
+                        state.full_history_render,
+                    ) {
+                        state.pressed_history = Some(hit);
+                        let _ = SetCapture(hwnd);
+                        return LRESULT(0);
+                    }
                 }
             }
             WM_LBUTTONUP if !state_ptr.is_null() => {
@@ -1368,6 +1382,20 @@ impl AppState {
         self.sync_visible_flyout_layout();
     }
 
+    fn handle_system_resume(&mut self) {
+        let now = Utc::now().timestamp();
+        self.refresh_time_sensitive_state();
+        if !self.active_slot().refreshing
+            && should_refresh_after_resume(
+                &self.active_slot().display,
+                now,
+                self.settings.refresh_minutes,
+            )
+        {
+            self.start_refresh(false);
+        }
+    }
+
     fn reset_refresh_timer(&self, milliseconds: u32) {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH);
@@ -1693,5 +1721,16 @@ mod tests {
 
         slot.refreshing = true;
         assert!(!should_background_prefetch(&slot, true, now + BACKGROUND_PREFETCH_INTERVAL));
+    }
+
+    #[test]
+    fn system_resume_refreshes_only_when_snapshot_is_missing_stale_or_expired() {
+        let empty = DisplayState::loading(None);
+        assert!(should_refresh_after_resume(&empty, 1_000, 5));
+
+        let mut fresh = display_with_quotas(Some(80), Some(90));
+        fresh.snapshot.as_mut().unwrap().fetched_at = 1_000;
+        assert!(!should_refresh_after_resume(&fresh, 1_200, 5));
+        assert!(should_refresh_after_resume(&fresh, 1_300, 5));
     }
 }

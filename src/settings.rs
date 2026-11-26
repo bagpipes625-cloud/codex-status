@@ -6,18 +6,21 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use windows::Win32::Foundation::ERROR_SHARING_VIOLATION;
 use windows::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, REPLACEFILE_WRITE_THROUGH,
     ReplaceFileW,
 };
-use windows::core::PCWSTR;
+use windows::core::{HRESULT, PCWSTR};
 
 const APP_DIR: &str = "CodexStatus";
 const SMALL_STATE_LIMIT: u64 = 1024 * 1024;
 const HISTORY_STATE_LIMIT: u64 = 8 * 1024 * 1024;
 const TRAY_LOG_LIMIT: u64 = 256 * 1024;
 const STALE_TEMP_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const REPLACE_RETRY_BUDGET: Duration = Duration::from_millis(200);
+const REPLACE_RETRY_SLEEP: Duration = Duration::from_millis(25);
 static TEMPORARY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -253,7 +256,7 @@ fn replace_file(temporary: &Path, destination: &Path) -> io::Result<()> {
     let destination_exists = destination.exists();
     let temporary = wide0(temporary);
     let destination = wide0(destination);
-    let result = unsafe {
+    retry_sharing_violation(REPLACE_RETRY_BUDGET, || unsafe {
         if destination_exists {
             ReplaceFileW(
                 PCWSTR(destination.as_ptr()),
@@ -270,8 +273,30 @@ fn replace_file(temporary: &Path, destination: &Path) -> io::Result<()> {
                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
             )
         }
-    };
-    result.map_err(|_| io::Error::last_os_error())
+    })
+    .map_err(|_| io::Error::last_os_error())
+}
+
+fn retry_sharing_violation(
+    budget: Duration,
+    mut operation: impl FnMut() -> windows::core::Result<()>,
+) -> windows::core::Result<()> {
+    let deadline = Instant::now() + budget;
+    loop {
+        match operation() {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let sharing_violation =
+                    error.code() == HRESULT::from_win32(ERROR_SHARING_VIOLATION.0);
+                if !sharing_violation || Instant::now() >= deadline {
+                    return Err(error);
+                }
+                std::thread::sleep(
+                    deadline.saturating_duration_since(Instant::now()).min(REPLACE_RETRY_SLEEP),
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -429,5 +454,30 @@ mod tests {
         assert!(!is_state_temporary_name("notes.tmp-backup"));
         assert!(!is_state_temporary_name("settings.tmp-old-0"));
         assert!(!is_state_temporary_name("settings.tmp-1-2-extra"));
+    }
+
+    #[test]
+    fn sharing_violation_retry_recovers_and_skips_permanent_errors() {
+        let mut attempts = 0;
+        let recovered = retry_sharing_violation(Duration::from_millis(100), || {
+            attempts += 1;
+            if attempts < 3 {
+                Err(windows::core::Error::from_hresult(HRESULT::from_win32(
+                    ERROR_SHARING_VIOLATION.0,
+                )))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(recovered.is_ok());
+        assert_eq!(attempts, 3);
+
+        let mut permanent_attempts = 0;
+        let permanent = retry_sharing_violation(Duration::from_millis(100), || {
+            permanent_attempts += 1;
+            Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))
+        });
+        assert!(permanent.is_err());
+        assert_eq!(permanent_attempts, 1);
     }
 }

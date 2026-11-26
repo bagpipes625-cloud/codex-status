@@ -220,3 +220,63 @@ pub fn release_card_renderer() {
 pub fn reset_card_renderer_fallback() {
     direct2d::reset_fallback();
 }
+
+/// Captures a window client surface into a 32-bit BMP file for offline visual tests.
+///
+/// # Safety
+/// `hwnd` must be a valid window handle on the current thread with at least `width x height` pixels.
+#[doc(hidden)]
+pub unsafe fn save_window_bmp(hwnd: HWND, width: i32, height: i32, path: &std::path::Path) {
+    use windows::Win32::Graphics::Gdi::{
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, GetDC, GetDIBits, ReleaseDC,
+    };
+    unsafe {
+        let dc = GetDC(Some(hwnd));
+        let mem = CreateCompatibleDC(Some(dc));
+        let bitmap = CreateCompatibleBitmap(dc, width, height);
+        let old = SelectObject(mem, HGDIOBJ(bitmap.0));
+        BitBlt(mem, 0, 0, width, height, Some(dc), 0, 0, SRCCOPY).unwrap();
+        let _ = SelectObject(mem, old);
+        let mut info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: 40,
+                biWidth: width,
+                biHeight: height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        assert_ne!(
+            GetDIBits(
+                mem,
+                bitmap,
+                0,
+                height as u32,
+                Some(pixels.as_mut_ptr().cast()),
+                &mut info,
+                DIB_RGB_COLORS
+            ),
+            0
+        );
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"BM");
+        bytes.extend_from_slice(&(54u32 + pixels.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&[0; 4]);
+        bytes.extend_from_slice(&54u32.to_le_bytes());
+        bytes.extend_from_slice(&40u32.to_le_bytes());
+        bytes.extend_from_slice(&width.to_le_bytes());
+        bytes.extend_from_slice(&height.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&32u16.to_le_bytes());
+        bytes.extend_from_slice(&[0; 24]);
+        bytes.extend_from_slice(&pixels);
+        std::fs::write(path, bytes).unwrap();
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteDC(mem);
+        let _ = ReleaseDC(Some(hwnd), dc);
+    }
+}
